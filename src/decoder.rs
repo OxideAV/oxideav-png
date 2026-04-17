@@ -13,15 +13,20 @@
 //! Output pixel formats (no internal conversion — the `PixConvert` graph
 //! node handles that):
 //!
+//! - colour type 0 / 1-2-4-bit → `Gray8` (scaled up via ×255/×85/×17)
 //! - colour type 0 / 8-bit  → `Gray8`
 //! - colour type 0 / 16-bit → `Gray16Le` (network byte order collapsed to LE on output)
 //! - colour type 2 / 8-bit  → `Rgb24`
 //! - colour type 2 / 16-bit → `Rgb48Le`
+//! - colour type 3 / 1-2-4-bit → `Pal8` (one index byte per pixel after unpacking)
 //! - colour type 3 / 8-bit  → `Pal8` (palette embedded into extradata)
 //! - colour type 4 / 8-bit  → `Ya8` (gray + alpha)
 //! - colour type 4 / 16-bit → `Rgba64Le` (PNG has no native Ya16 — we expand)
 //! - colour type 6 / 8-bit  → `Rgba`
 //! - colour type 6 / 16-bit → `Rgba64Le`
+//!
+//! Adam7 interlaced streams (IHDR interlace=1) are decoded seven passes at
+//! a time per §A.8 and scattered into the final canvas.
 
 use oxideav_codec::Decoder;
 use oxideav_core::{
@@ -162,11 +167,15 @@ impl Ihdr {
 
     pub fn output_pixel_format(&self) -> Result<PixelFormat> {
         Ok(match (self.colour_type, self.bit_depth) {
-            (0, 8) => PixelFormat::Gray8,
+            // Grayscale sub-8-bit is expanded to Gray8 during decode (scale
+            // from bit_depth-max to 255).
+            (0, 1) | (0, 2) | (0, 4) | (0, 8) => PixelFormat::Gray8,
             (0, 16) => PixelFormat::Gray16Le,
             (2, 8) => PixelFormat::Rgb24,
             (2, 16) => PixelFormat::Rgb48Le,
-            (3, 8) => PixelFormat::Pal8,
+            // Indexed sub-8-bit is expanded to Pal8 (one index byte per
+            // pixel) during decode.
+            (3, 1) | (3, 2) | (3, 4) | (3, 8) => PixelFormat::Pal8,
             (4, 8) => PixelFormat::Ya8,
             (4, 16) => PixelFormat::Rgba64Le,
             (6, 8) => PixelFormat::Rgba,
@@ -177,6 +186,25 @@ impl Ihdr {
                 )))
             }
         })
+    }
+
+    /// Number of bytes in one logical pixel of the *decoded* byte-plane that
+    /// the decoder hands to `build_video_frame`. For sub-8-bit gray/indexed,
+    /// this is 1 after expansion. For ≥8-bit it's `channels * (bit_depth/8)`.
+    pub fn decoded_bytes_per_pixel(&self) -> Result<usize> {
+        if self.bit_depth < 8 {
+            // Only valid for grayscale / indexed — RGB, Ya, RGBA forbid
+            // sub-byte depths per the PNG spec.
+            if self.colour_type != 0 && self.colour_type != 3 {
+                return Err(Error::invalid(format!(
+                    "PNG: colour type {} cannot have bit depth {}",
+                    self.colour_type, self.bit_depth
+                )));
+            }
+            return Ok(1);
+        }
+        let channels = self.channels()?;
+        Ok(channels * (self.bit_depth as usize / 8))
     }
 }
 
@@ -218,10 +246,11 @@ pub fn decode_png_to_frame(
         .find(|c| c.is_type(b"IHDR"))
         .ok_or_else(|| Error::invalid("PNG: missing IHDR"))?;
     let ihdr = Ihdr::parse(ihdr_chunk.data)?;
-    if ihdr.interlace != 0 {
-        return Err(Error::unsupported(
-            "PNG: interlaced (Adam7) not implemented",
-        ));
+    if ihdr.interlace != 0 && ihdr.interlace != 1 {
+        return Err(Error::invalid(format!(
+            "PNG: unknown interlace method {}",
+            ihdr.interlace
+        )));
     }
     if ihdr.compression != 0 {
         return Err(Error::invalid("PNG: unknown compression method"));
@@ -256,9 +285,180 @@ pub fn decode_png_to_frame(
     let pixels = decompress_to_vec_zlib(&idat_concat)
         .map_err(|e| Error::invalid(format!("PNG: zlib decompress failed: {e:?}")))?;
 
-    let frame_pixels = reconstruct_filtered(&pixels, &ihdr)?;
+    let frame_pixels = decode_image_pixels(&pixels, &ihdr)?;
     let vf = build_video_frame(&ihdr, &frame_pixels, plte, trns, pts, time_base)?;
     Ok(vf)
+}
+
+/// Decompressed-zlib → unfiltered → (optionally expanded sub-byte, and for
+/// Adam7 interlaced streams, scattered into the full canvas) byte plane
+/// ready to be packed by `build_video_frame`.
+///
+/// The output layout is always "row-major, `decoded_bytes_per_pixel` bytes
+/// per pixel, tightly packed (stride = width * bpp)".
+pub(crate) fn decode_image_pixels(decompressed: &[u8], ihdr: &Ihdr) -> Result<Vec<u8>> {
+    if ihdr.interlace == 0 {
+        let raw = reconstruct_filtered(decompressed, ihdr)?;
+        expand_byte_plane(&raw, ihdr, ihdr.width as usize, ihdr.height as usize)
+    } else {
+        // Adam7: seven passes, reconstructed independently, scattered into
+        // the full canvas.
+        decode_adam7(decompressed, ihdr)
+    }
+}
+
+/// Adam7 pass table — (starting_row, starting_col, row_spacing, column_spacing).
+/// From PNG spec §A.8 Table E.3 (pass 1 = index 0, etc.).
+const ADAM7: [(usize, usize, usize, usize); 7] = [
+    (0, 0, 8, 8), // pass 1
+    (0, 4, 8, 8), // pass 2
+    (4, 0, 8, 4), // pass 3
+    (0, 2, 4, 4), // pass 4
+    (2, 0, 4, 2), // pass 5
+    (0, 1, 2, 2), // pass 6
+    (1, 0, 2, 1), // pass 7
+];
+
+/// Dimensions of an Adam7 pass for a given full image size.
+fn adam7_pass_dims(img_w: usize, img_h: usize, pass: usize) -> (usize, usize) {
+    let (sr, sc, rs, cs) = ADAM7[pass];
+    let pw = if img_w > sc {
+        (img_w - sc).div_ceil(cs)
+    } else {
+        0
+    };
+    let ph = if img_h > sr {
+        (img_h - sr).div_ceil(rs)
+    } else {
+        0
+    };
+    (pw, ph)
+}
+
+/// Decode an Adam7 interlaced image. Produces a final byte plane whose
+/// layout matches what the non-interlaced path would output (1 byte per
+/// pixel for sub-byte Gray/Pal, native bpp otherwise).
+fn decode_adam7(decompressed: &[u8], ihdr: &Ihdr) -> Result<Vec<u8>> {
+    let img_w = ihdr.width as usize;
+    let img_h = ihdr.height as usize;
+    let out_bpp = ihdr.decoded_bytes_per_pixel()?;
+    let mut canvas = vec![0u8; img_w * img_h * out_bpp];
+
+    let mut cursor = 0usize;
+    for (pass, &(sr, sc, rs, cs)) in ADAM7.iter().enumerate() {
+        let (pw, ph) = adam7_pass_dims(img_w, img_h, pass);
+        if pw == 0 || ph == 0 {
+            continue;
+        }
+
+        // Per-pass synthetic IHDR.
+        let pass_ihdr = Ihdr {
+            width: pw as u32,
+            height: ph as u32,
+            ..*ihdr
+        };
+        let row_bytes = pass_ihdr.row_bytes()?;
+        let pass_bytes = (1 + row_bytes) * ph;
+        if cursor + pass_bytes > decompressed.len() {
+            return Err(Error::invalid(format!(
+                "PNG Adam7: pass {} wants {} bytes, only {} remaining",
+                pass + 1,
+                pass_bytes,
+                decompressed.len().saturating_sub(cursor)
+            )));
+        }
+        let pass_slice = &decompressed[cursor..cursor + pass_bytes];
+        cursor += pass_bytes;
+
+        let raw = reconstruct_filtered(pass_slice, &pass_ihdr)?;
+        let expanded = expand_byte_plane(&raw, ihdr, pw, ph)?;
+
+        // Scatter `expanded` (pw × ph, out_bpp bytes/pixel) into `canvas`.
+        for py in 0..ph {
+            let dst_y = sr + py * rs;
+            for px in 0..pw {
+                let dst_x = sc + px * cs;
+                let src_off = (py * pw + px) * out_bpp;
+                let dst_off = (dst_y * img_w + dst_x) * out_bpp;
+                canvas[dst_off..dst_off + out_bpp]
+                    .copy_from_slice(&expanded[src_off..src_off + out_bpp]);
+            }
+        }
+    }
+    if cursor != decompressed.len() {
+        return Err(Error::invalid(format!(
+            "PNG Adam7: trailing {} bytes after last pass",
+            decompressed.len() - cursor
+        )));
+    }
+    Ok(canvas)
+}
+
+/// Given a raw (unfiltered) PNG byte plane at native bit depth, expand it to
+/// the byte layout consumed by `build_video_frame`. For sub-byte gray/pal,
+/// this means unpacking 2/4/8 pixels per byte and (for grayscale) scaling
+/// up to 8-bit. For ≥8-bit data this is a straight copy.
+///
+/// `w`/`h` are the logical pixel dimensions of the image the raw bytes
+/// represent (the *pass* dimensions for an Adam7 pass, or the full image
+/// dimensions otherwise).
+fn expand_byte_plane(raw: &[u8], ihdr: &Ihdr, w: usize, h: usize) -> Result<Vec<u8>> {
+    if ihdr.bit_depth >= 8 {
+        // Sanity check — caller passed us matching-sized data.
+        let bpp = ihdr.decoded_bytes_per_pixel()?;
+        let expected = w * h * bpp;
+        if raw.len() != expected {
+            return Err(Error::invalid(format!(
+                "PNG: expand_byte_plane expected {expected} bytes, got {}",
+                raw.len()
+            )));
+        }
+        return Ok(raw.to_vec());
+    }
+
+    // Sub-byte: only colour type 0 (grayscale) or 3 (indexed) allowed.
+    let bd = ihdr.bit_depth as usize;
+    if ihdr.colour_type != 0 && ihdr.colour_type != 3 {
+        return Err(Error::invalid(format!(
+            "PNG: colour type {} cannot have bit depth {}",
+            ihdr.colour_type, bd
+        )));
+    }
+    let mask: u8 = (1u16 << bd) as u8 - 1;
+    let pixels_per_byte = 8 / bd;
+    let row_bytes_packed = (w * bd).div_ceil(8);
+    let expected = row_bytes_packed * h;
+    if raw.len() != expected {
+        return Err(Error::invalid(format!(
+            "PNG: expand_byte_plane (sub-byte) expected {expected} bytes, got {}",
+            raw.len()
+        )));
+    }
+
+    // Scale table for grayscale: 1-bit → ×255, 2-bit → ×85, 4-bit → ×17.
+    // (PNG spec §13.12.)
+    let scale = match (ihdr.colour_type, bd) {
+        (0, 1) => 255,
+        (0, 2) => 85,
+        (0, 4) => 17,
+        _ => 1, // indexed: raw index (not scaled)
+    };
+
+    let mut out = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let byte_idx = y * row_bytes_packed + x / pixels_per_byte;
+            // Pixels in a byte are MSB-first per PNG spec.
+            let shift_in_byte = (pixels_per_byte - 1 - (x % pixels_per_byte)) * bd;
+            let v = (raw[byte_idx] >> shift_in_byte) & mask;
+            out[y * w + x] = if ihdr.colour_type == 0 {
+                v.wrapping_mul(scale)
+            } else {
+                v
+            };
+        }
+    }
+    Ok(out)
 }
 
 /// Apply the 5 per-row filters, returning a flat raw-pixel buffer of
@@ -548,7 +748,7 @@ pub fn decode_apng_frames(info: &ApngInfo, time_base: TimeBase) -> Result<Vec<Vi
         };
         let decompressed = decompress_to_vec_zlib(&frame.compressed)
             .map_err(|e| Error::invalid(format!("APNG: zlib failed: {e:?}")))?;
-        let frame_raw = reconstruct_filtered(&decompressed, &sub_ihdr)?;
+        let frame_raw = decode_image_pixels(&decompressed, &sub_ihdr)?;
         let sub_frame = build_video_frame(
             &sub_ihdr,
             &frame_raw,

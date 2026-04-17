@@ -1,16 +1,21 @@
 //! Pure-Rust PNG + APNG codec and container.
 //!
 //! Supports (decode):
-//! * colour type 0 (grayscale) — 8-bit, 16-bit
+//! * colour type 0 (grayscale) — 1/2/4/8/16-bit
 //! * colour type 2 (RGB) — 8-bit, 16-bit
-//! * colour type 3 (palette) — 8-bit
+//! * colour type 3 (palette) — 1/2/4/8-bit
 //! * colour type 4 (grayscale + alpha) — 8-bit, 16-bit
 //! * colour type 6 (RGBA) — 8-bit, 16-bit
 //! * all five PNG row filters (None / Sub / Up / Average / Paeth)
+//! * Adam7 interlacing (seven-pass progressive)
 //! * multiple IDAT chunks
 //! * PLTE + tRNS palettes
 //! * APNG animation: `acTL`, `fcTL`, `fdAT` with `None`/`Background`/`Previous`
 //!   disposal and `Source`/`Over` blending.
+//!
+//! Sub-8-bit grayscale is expanded to `Gray8` (scaled per §13.12: ×255, ×85,
+//! ×17 for 1/2/4-bit) on output. Sub-8-bit indexed is expanded to `Pal8`
+//! (one palette index byte per pixel).
 //!
 //! Supports (encode):
 //! * `Rgba` / `Rgb24` / `Gray8` / `Pal8` at 8-bit
@@ -22,9 +27,8 @@
 //!   more than one frame is submitted.
 //!
 //! Not implemented:
-//! * Adam7 interlacing
-//! * colour type 3 with sub-byte bit depths (1/2/4-bit palette)
-//! * colour type 0 with 1/2/4-bit grayscale
+//! * Adam7 interlaced encode (decode only)
+//! * Sub-byte encode (decode only — encoder always writes 8/16-bit)
 //! * cICP / sRGB / gAMA / cHRM colour management (chunks are ignored but
 //!   CRC'd, so they round-trip through the container transparently).
 
