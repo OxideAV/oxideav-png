@@ -207,7 +207,6 @@ fn build_apng_packets(
     // State accumulators for the currently-parsed frame.
     let mut pending_fctl: Option<Fctl> = None;
     let mut pending_data: Vec<u8> = Vec::new();
-    let mut saw_idat = false;
 
     for c in chunks {
         match &c.chunk_type {
@@ -231,11 +230,10 @@ fn build_apng_packets(
                 pending_data.clear();
                 pending_fctl = Some(Fctl::parse(c.data)?);
             }
-            b"IDAT" => {
-                saw_idat = true;
-                if pending_fctl.is_some() {
-                    pending_data.extend_from_slice(c.data);
-                }
+            // Only attach IDAT bytes to a frame when they're claimed by a
+            // preceding fcTL — otherwise they belong to the default image.
+            b"IDAT" if pending_fctl.is_some() => {
+                pending_data.extend_from_slice(c.data);
             }
             b"fdAT" => {
                 let (_seq, payload) = parse_fdat(c.data)?;
@@ -251,7 +249,6 @@ fn build_apng_packets(
         p.duration = Some(delay);
         packets.push(p);
     }
-    let _ = saw_idat;
 
     Ok(packets)
 }
@@ -408,7 +405,7 @@ impl Muxer for PngMuxer {
 /// Take N standalone-PNG packets produced by the demuxer's APNG split and
 /// re-assemble them into a single APNG file. Extracts IDATs, rewrites them
 /// as fdATs for frames 1..N, and inserts matching fcTL chunks between them.
-fn merge_still_packets_to_apng(packets: &[Packet], stream: &StreamInfo) -> Result<Vec<u8>> {
+fn merge_still_packets_to_apng(packets: &[Packet], _stream: &StreamInfo) -> Result<Vec<u8>> {
     use crate::apng::{Actl, Blend, Disposal, Fctl};
 
     if packets.is_empty() {
@@ -466,7 +463,6 @@ fn merge_still_packets_to_apng(packets: &[Packet], stream: &StreamInfo) -> Resul
         num_frames: stills.len() as u32,
         num_plays: 0,
     };
-    let _ = stream;
 
     let mut out = Vec::new();
     out.extend_from_slice(&PNG_MAGIC);

@@ -650,14 +650,11 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
     let mut saw_idat = false;
     let mut first_frame_is_default = false;
 
-    // Scan chunks in order.
-    let mut seen_any_fctl = false;
     for c in &chunks {
         match &c.chunk_type {
             b"PLTE" => plte = Some(c.data.to_vec()),
             b"tRNS" => trns = Some(c.data.to_vec()),
             b"fcTL" => {
-                // Flush the previous frame.
                 if let Some(prev_fctl) = current_fctl.take() {
                     frames.push(ApngFrame {
                         fctl: prev_fctl,
@@ -665,18 +662,17 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
                     });
                 }
                 let f = Fctl::parse(c.data)?;
-                // If we see fcTL before IDAT, the default image is also the
-                // first animation frame.
+                // An fcTL appearing before any IDAT means the default image
+                // doubles as the first animation frame.
                 if !saw_idat {
                     first_frame_is_default = true;
                 }
                 current_fctl = Some(f);
-                seen_any_fctl = true;
             }
             b"IDAT" => {
-                // If we have an fcTL pending, these IDAT bytes belong to
-                // that frame. Otherwise, they form the "default image"
-                // which is not part of the animation.
+                // IDAT bytes only contribute to the animation if we've
+                // already seen an fcTL claiming them; otherwise they belong
+                // to the non-animated default image.
                 saw_idat = true;
                 if current_fctl.is_some() {
                     current_compressed.extend_from_slice(c.data);
@@ -688,9 +684,7 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
             }
             _ => {}
         }
-        let _ = seen_any_fctl;
     }
-    // Final frame.
     if let Some(f) = current_fctl.take() {
         frames.push(ApngFrame {
             fctl: f,
@@ -698,10 +692,9 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
         });
     }
 
-    if frames.len() as u32 != actl.num_frames {
-        // Survive mildly lying files — don't error, but note in a comment.
-        // (Libpng accepts extra/missing frames.)
-    }
+    // Per APNG spec acTL.num_frames should equal the number of fcTLs. We
+    // tolerate mismatches to stay compatible with generators in the wild —
+    // libpng accepts them and so do browsers.
 
     Ok(ApngInfo {
         ihdr,

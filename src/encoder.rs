@@ -58,15 +58,10 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     output_params.height = Some(height);
     output_params.pixel_format = Some(pix);
 
-    // If frame_rate is set, time_base = 1/100 (centiseconds) — APNG native.
-    let time_base = if params.frame_rate.is_some() {
-        TimeBase::new(1, 100)
-    } else {
-        params
-            .frame_rate
-            .map(|r: Rational| TimeBase::new(r.den, r.num))
-            .unwrap_or(TimeBase::new(1, 100))
-    };
+    // APNG's on-wire delay is num/den seconds, so everything the encoder
+    // emits is expressed in centiseconds regardless of the caller's
+    // frame_rate — converting happens in the fcTL delay_num/delay_den fields.
+    let time_base = TimeBase::new(1, 100);
 
     let animated_hint = params.frame_rate.is_some();
 
@@ -211,8 +206,6 @@ fn ihdr_and_row_bytes(
     palette: &[u8],
 ) -> Result<IhdrAndRowInfo> {
     let w = frame.width;
-    let h = frame.height as usize;
-    let _ = h;
     let (bit_depth, colour_type, channels): (u8, u8, usize) = match pix {
         PixelFormat::Gray8 => (8, 0, 1),
         PixelFormat::Gray16Le => (16, 0, 1),
@@ -368,19 +361,12 @@ fn deflate_encode_pixels(
         } else {
             &raw[(y - 1) * row_bytes..y * row_bytes]
         };
-        let ft = if y == 0 && height == 1 {
-            // First (and only) row has no predecessor — Sub is the most
-            // useful filter and avoids the noop `None` for tiny images.
-            // (Pick via heuristic regardless.)
-            choose_filter_heuristic(row, prev, bpp, &mut scratch)
-        } else {
-            choose_filter_heuristic(row, prev, bpp, &mut scratch)
-        };
+        let ft = choose_filter_heuristic(row, prev, bpp, &mut scratch);
         let dst_off = y * (1 + row_bytes);
         filtered[dst_off] = ft as u8;
         let data_slot = &mut filtered[dst_off + 1..dst_off + 1 + row_bytes];
-        // Re-run the filter to write into the right slot (scratch held
-        // the last tried filter during the heuristic).
+        // The heuristic's scratch buffer holds whichever filter it tried
+        // last, not necessarily the winner — re-filter into the output slot.
         filter_row(ft, row, prev, bpp, data_slot);
     }
     Ok(compress_to_vec_zlib(&filtered, 6))
