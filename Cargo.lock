@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "oxideav-png"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "miniz_oxide",
  "oxideav-codec",
