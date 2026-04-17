@@ -29,8 +29,15 @@
 //! Not implemented:
 //! * Adam7 interlaced encode (decode only)
 //! * Sub-byte encode (decode only — encoder always writes 8/16-bit)
-//! * cICP / sRGB / gAMA / cHRM colour management (chunks are ignored but
-//!   CRC'd, so they round-trip through the container transparently).
+//! * Colour management / metadata chunks (`cICP`, `sRGB`, `gAMA`, `cHRM`,
+//!   `iCCP`, `tEXt`, `zTXt`, `iTXt`, `tIME`, `pHYs`, `sBIT`, `bKGD`, `hIST`,
+//!   `sPLT`). CRC is verified on read and then they are dropped — they are
+//!   not round-tripped through the container and not surfaced on decode.
+//! * `tRNS` alpha application to decoded `Gray8` / `Gray16Le` / `Rgb24` /
+//!   `Rgb48Le` pixels. For colour type 3 (palette), `tRNS` per-entry alpha
+//!   is preserved verbatim in `CodecParameters::extradata` alongside `PLTE`
+//!   so encoders can rewrite it, but the decoded `Pal8` plane itself
+//!   carries no alpha.
 
 pub mod apng;
 pub mod chunk;

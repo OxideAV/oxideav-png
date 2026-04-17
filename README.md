@@ -19,6 +19,9 @@ wrappers, no `*-sys` crates.
 - Sub-byte indexed expanded to one index-byte-per-pixel
 - APNG: `acTL` / `fcTL` / `fdAT` with None/Background/Previous disposal and
   Source/Over blending
+- `PLTE` + `tRNS` palettes — `PLTE` drives `Pal8` index resolution and the
+  demuxer preserves both verbatim in `CodecParameters::extradata` so the
+  encoder can faithfully rewrite them
 
 ## Encode support
 
@@ -26,6 +29,17 @@ wrappers, no `*-sys` crates.
 - 16-bit: `Rgb48Le`, `Rgba64Le`, `Gray16Le`
 - Per-row filter heuristic (min-sum-abs-delta per §12.8)
 - APNG output when multiple frames submitted or `frame_rate` is set
+
+## Not preserved
+
+- Adam7 interlaced encode (decode only — encoder always writes non-interlaced)
+- Sub-byte encode (decode only — encoder always writes 8/16-bit)
+- `tRNS` alpha applied to `Gray*` / `Rgb*` pixels on decode (the chunk is
+  parsed + CRC-validated but not blended into the output plane; for `Pal8`
+  the per-entry alpha is still carried through `extradata`)
+- Colour-management + metadata chunks: `cICP`, `sRGB`, `gAMA`, `cHRM`,
+  `iCCP`, `tEXt`, `zTXt`, `iTXt`, `tIME`, `pHYs`, `sBIT`, `bKGD`, `hIST`,
+  `sPLT`. Each is CRC-checked on read and then dropped
 
 ## Usage
 
