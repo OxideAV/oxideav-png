@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-png/compare/v0.0.4...v0.0.5) - 2026-04-19
+
+### Other
+
+- bump oxideav-container dep to "0.1"
+- drop Cargo.lock — this crate is a library
+- bump oxideav-pixfmt dep to "0.1"
+- bump to oxideav-core 0.1.1 + codec 0.1.1
+- migrate register() to CodecInfo builder
+- bump oxideav-core + oxideav-codec deps to "0.1"
+- thread &dyn CodecResolver through open()
+- drop dead bindings, fold redundant branches
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-png/compare/v0.0.3...v0.0.4) - 2026-04-17
 
 ### Other
