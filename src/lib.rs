@@ -46,7 +46,8 @@ pub mod decoder;
 pub mod encoder;
 pub mod filter;
 
-pub use decoder::CODEC_ID_STR;
+pub use decoder::{decode_png_to_frame, CODEC_ID_STR};
+pub use encoder::encode_single;
 
 /// Register the PNG codec (both decoder and encoder).
 pub fn register_codecs(reg: &mut oxideav_codec::CodecRegistry) {
