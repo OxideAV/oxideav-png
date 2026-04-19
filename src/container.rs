@@ -27,9 +27,9 @@ use crate::decoder::{parse_all_chunks, Ihdr};
 
 /// Register the PNG codec (decoder + encoder).
 pub fn register_codecs(reg: &mut oxideav_codec::CodecRegistry) {
+    use oxideav_codec::CodecInfo;
     use oxideav_core::{CodecCapabilities, CodecId};
 
-    let cid = CodecId::new(crate::CODEC_ID_STR);
     let caps = CodecCapabilities::video("png_sw")
         .with_intra_only(true)
         .with_lossless(true)
@@ -42,11 +42,11 @@ pub fn register_codecs(reg: &mut oxideav_codec::CodecRegistry) {
             PixelFormat::Rgb48Le,
             PixelFormat::Rgba64Le,
         ]);
-    reg.register_both(
-        cid,
-        caps,
-        crate::decoder::make_decoder,
-        crate::encoder::make_encoder,
+    reg.register(
+        CodecInfo::new(CodecId::new(crate::CODEC_ID_STR))
+            .capabilities(caps)
+            .decoder(crate::decoder::make_decoder)
+            .encoder(crate::encoder::make_encoder),
     );
 }
 
