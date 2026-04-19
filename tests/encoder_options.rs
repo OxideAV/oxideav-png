@@ -6,8 +6,7 @@
 //! `CodecParameters::options` at init.
 
 use oxideav_core::{
-    parse_options, CodecId, CodecOptions, CodecOptionsStruct, CodecParameters, Error,
-    PixelFormat,
+    parse_options, CodecId, CodecOptions, CodecOptionsStruct, CodecParameters, Error, PixelFormat,
 };
 use oxideav_png::PngEncoderOptions;
 

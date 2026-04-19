@@ -556,12 +556,7 @@ fn encode_apng(enc: &PngEncoder) -> Result<Vec<u8>> {
 
         let raw = flatten_and_normalise_pixels(frame, pix, row_bytes)?;
         let compressed = if enc.opts.interlace {
-            deflate_encode_pixels_adam7(
-                &raw,
-                ihdr.width as usize,
-                ihdr.height as usize,
-                &ihdr,
-            )?
+            deflate_encode_pixels_adam7(&raw, ihdr.width as usize, ihdr.height as usize, &ihdr)?
         } else {
             deflate_encode_pixels(&raw, row_bytes, ihdr.height as usize, &ihdr)?
         };
