@@ -25,9 +25,11 @@
 //!   selection (PNG §12.8 min-sum-abs-delta).
 //! * APNG: `acTL` + per-frame `fcTL`/`fdAT` when `frame_rate` is set or
 //!   more than one frame is submitted.
+//! * Adam7 seven-pass interlaced encode, opt-in via
+//!   [`encoder::PngEncoderOptions`]`::interlace` (or
+//!   `CodecParameters::options` key `"interlace"`).
 //!
 //! Not implemented:
-//! * Adam7 interlaced encode (decode only)
 //! * Sub-byte encode (decode only — encoder always writes 8/16-bit)
 //! * Colour management / metadata chunks (`cICP`, `sRGB`, `gAMA`, `cHRM`,
 //!   `iCCP`, `tEXt`, `zTXt`, `iTXt`, `tIME`, `pHYs`, `sBIT`, `bKGD`, `hIST`,
@@ -47,7 +49,7 @@ pub mod encoder;
 pub mod filter;
 
 pub use decoder::{decode_png_to_frame, CODEC_ID_STR};
-pub use encoder::encode_single;
+pub use encoder::{encode_single, encode_single_with_options, PngEncoderOptions};
 
 /// Register the PNG codec (both decoder and encoder).
 pub fn register_codecs(reg: &mut oxideav_codec::CodecRegistry) {

@@ -46,7 +46,8 @@ pub fn register_codecs(reg: &mut oxideav_codec::CodecRegistry) {
         CodecInfo::new(CodecId::new(crate::CODEC_ID_STR))
             .capabilities(caps)
             .decoder(crate::decoder::make_decoder)
-            .encoder(crate::encoder::make_encoder),
+            .encoder(crate::encoder::make_encoder)
+            .encoder_options::<crate::encoder::PngEncoderOptions>(),
     );
 }
 

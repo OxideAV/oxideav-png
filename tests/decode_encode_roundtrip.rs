@@ -48,6 +48,17 @@ fn make_frame(w: u32, h: u32, fmt: PixelFormat, bpp: usize, palette: Option<&[u8
 }
 
 fn roundtrip_check(w: u32, h: u32, fmt: PixelFormat, bpp: usize, palette: Option<Vec<u8>>) {
+    roundtrip_check_inner(w, h, fmt, bpp, palette, false);
+}
+
+fn roundtrip_check_inner(
+    w: u32,
+    h: u32,
+    fmt: PixelFormat,
+    bpp: usize,
+    palette: Option<Vec<u8>>,
+    interlace: bool,
+) {
     let frame = make_frame(w, h, fmt, bpp, palette.as_deref());
 
     let mut params = CodecParameters::video(CodecId::new("png"));
@@ -56,6 +67,9 @@ fn roundtrip_check(w: u32, h: u32, fmt: PixelFormat, bpp: usize, palette: Option
     params.pixel_format = Some(fmt);
     if let Some(p) = &palette {
         params.extradata = p.clone();
+    }
+    if interlace {
+        params.options = params.options.set("interlace", "true");
     }
 
     let mut enc = oxideav_png::encoder::make_encoder(&params).expect("make encoder");
@@ -72,7 +86,7 @@ fn roundtrip_check(w: u32, h: u32, fmt: PixelFormat, bpp: usize, palette: Option
     assert_eq!(vf.height, h);
     assert_eq!(
         vf.planes[0].data, frame.planes[0].data,
-        "roundtrip byte mismatch for {fmt:?} {w}x{h}"
+        "roundtrip byte mismatch for {fmt:?} {w}x{h} interlace={interlace}"
     );
 }
 
@@ -121,4 +135,68 @@ fn roundtrip_pal8() {
         0, 0, 255, // blue
     ];
     roundtrip_check(16, 8, PixelFormat::Pal8, 1, Some(palette));
+}
+
+// ---- Adam7 interlaced round-trips --------------------------------------
+//
+// Each test encodes with `options = { "interlace": "true" }`, which flips
+// `IHDR.interlace` to 1 and routes compression through the seven-pass
+// packer. The decoder's existing Adam7 path must reconstruct the image
+// pixel-identical.
+
+#[test]
+fn roundtrip_rgba_interlaced() {
+    roundtrip_check_inner(16, 8, PixelFormat::Rgba, 4, None, true);
+}
+
+#[test]
+fn roundtrip_rgb24_interlaced() {
+    roundtrip_check_inner(16, 8, PixelFormat::Rgb24, 3, None, true);
+}
+
+#[test]
+fn roundtrip_gray8_interlaced() {
+    roundtrip_check_inner(16, 8, PixelFormat::Gray8, 1, None, true);
+}
+
+#[test]
+fn roundtrip_rgba64le_interlaced() {
+    // 16-bit-per-channel: exercises bytes_per_pixel = 8 in the pass packer.
+    roundtrip_check_inner(16, 8, PixelFormat::Rgba64Le, 8, None, true);
+}
+
+// Non-power-of-8 dimensions exercise the edge cases of Adam7 pass
+// dimension math (img_w % 8 != 0 means passes 1/2/4/6 all see odd widths).
+#[test]
+fn roundtrip_rgba_interlaced_odd_dims() {
+    roundtrip_check_inner(13, 11, PixelFormat::Rgba, 4, None, true);
+}
+
+// Tiny images where some passes have zero rows/cols — the packer must
+// skip them cleanly.
+#[test]
+fn roundtrip_rgba_interlaced_3x3() {
+    roundtrip_check_inner(3, 3, PixelFormat::Rgba, 4, None, true);
+}
+
+// Confirm interlace also flows through via the typed entry point (no
+// CodecOptions bag involved) and the output really sets IHDR.interlace = 1.
+#[test]
+fn encode_single_with_options_sets_interlace_flag() {
+    let frame = make_frame(8, 8, PixelFormat::Rgba, 4, None);
+    let bytes = oxideav_png::encode_single_with_options(
+        &frame,
+        PixelFormat::Rgba,
+        &[],
+        &oxideav_png::PngEncoderOptions { interlace: true },
+    )
+    .expect("encode");
+    // IHDR body starts at offset 8 (magic) + 8 (chunk length+type) = 16.
+    // Interlace byte is the 13th (last) byte of IHDR data → offset 16 + 12 = 28.
+    assert_eq!(bytes[28], 1, "interlace byte should be 1 for Adam7 encode");
+
+    // And decoding reproduces the same pixels.
+    let vf = oxideav_png::decoder::decode_png_to_frame(&bytes, Some(0), TimeBase::new(1, 100))
+        .expect("decode");
+    assert_eq!(vf.planes[0].data, frame.planes[0].data);
 }

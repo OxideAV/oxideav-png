@@ -309,7 +309,7 @@ pub(crate) fn decode_image_pixels(decompressed: &[u8], ihdr: &Ihdr) -> Result<Ve
 
 /// Adam7 pass table — (starting_row, starting_col, row_spacing, column_spacing).
 /// From PNG spec §A.8 Table E.3 (pass 1 = index 0, etc.).
-const ADAM7: [(usize, usize, usize, usize); 7] = [
+pub(crate) const ADAM7: [(usize, usize, usize, usize); 7] = [
     (0, 0, 8, 8), // pass 1
     (0, 4, 8, 8), // pass 2
     (4, 0, 8, 4), // pass 3
@@ -320,7 +320,7 @@ const ADAM7: [(usize, usize, usize, usize); 7] = [
 ];
 
 /// Dimensions of an Adam7 pass for a given full image size.
-fn adam7_pass_dims(img_w: usize, img_h: usize, pass: usize) -> (usize, usize) {
+pub(crate) fn adam7_pass_dims(img_w: usize, img_h: usize, pass: usize) -> (usize, usize) {
     let (sr, sc, rs, cs) = ADAM7[pass];
     let pw = if img_w > sc {
         (img_w - sc).div_ceil(cs)

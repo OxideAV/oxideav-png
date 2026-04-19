@@ -15,18 +15,49 @@ use std::collections::VecDeque;
 
 use oxideav_codec::Encoder;
 use oxideav_core::{
-    CodecId, CodecParameters, Error, Frame, MediaType, Packet, PixelFormat, Rational, Result,
-    TimeBase, VideoFrame,
+    parse_options, CodecId, CodecOptionsStruct, CodecParameters, Error, Frame, MediaType,
+    OptionField, OptionKind, OptionValue, Packet, PixelFormat, Rational, Result, TimeBase,
+    VideoFrame,
 };
 
 use miniz_oxide::deflate::compress_to_vec_zlib;
 
 use crate::apng::{build_fdat, Actl, Blend, Disposal, Fctl};
 use crate::chunk::{write_chunk, PNG_MAGIC};
-use crate::decoder::Ihdr;
+use crate::decoder::{adam7_pass_dims, Ihdr, ADAM7};
 use crate::filter::{choose_filter_heuristic, filter_row};
 
+/// PNG encoder tuning knobs, attached via
+/// [`CodecParameters::options`](oxideav_core::CodecParameters::options)
+/// or passed directly to [`encode_single_with_options`].
+///
+/// Recognised keys (see [`CodecOptionsStruct::SCHEMA`]):
+/// - `interlace` *(bool, default `false`)* — Adam7 seven-pass
+///   interlaced encode. Sets `IHDR.interlace = 1`. Compressed payload
+///   gets ~5–15% larger but the image is progressively renderable.
+#[derive(Debug, Clone, Default)]
+pub struct PngEncoderOptions {
+    pub interlace: bool,
+}
+
+impl CodecOptionsStruct for PngEncoderOptions {
+    const SCHEMA: &'static [OptionField] = &[OptionField {
+        name: "interlace",
+        kind: OptionKind::Bool,
+        default: OptionValue::Bool(false),
+        help: "Emit an Adam7 seven-pass interlaced PNG stream (IHDR.interlace = 1)",
+    }];
+    fn apply(&mut self, key: &str, v: &OptionValue) -> Result<()> {
+        match key {
+            "interlace" => self.interlace = v.as_bool()?,
+            _ => unreachable!("guarded by SCHEMA"),
+        }
+        Ok(())
+    }
+}
+
 pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
+    let opts = parse_options::<PngEncoderOptions>(&params.options)?;
     let width = params
         .width
         .ok_or_else(|| Error::invalid("PNG encoder: missing width"))?;
@@ -77,6 +108,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         palette: params.extradata.clone(),
         animated_hint,
         eof: false,
+        opts,
     }))
 }
 
@@ -94,6 +126,7 @@ struct PngEncoder {
     palette: Vec<u8>,
     animated_hint: bool,
     eof: bool,
+    opts: PngEncoderOptions,
 }
 
 impl Encoder for PngEncoder {
@@ -162,7 +195,7 @@ impl PngEncoder {
         let bytes = if is_animated {
             encode_apng(self)?
         } else {
-            encode_single(&self.frames[0], self.pix, &self.palette)?
+            encode_single_with_options(&self.frames[0], self.pix, &self.palette, &self.opts)?
         };
         let mut pkt = Packet::new(0, self.time_base, bytes);
         pkt.pts = self.frames[0].pts;
@@ -176,10 +209,36 @@ impl PngEncoder {
 
 // ---- Single-image encode -----------------------------------------------
 
+/// Encode one [`VideoFrame`] as a standalone PNG using default options
+/// (non-interlaced). Thin wrapper around
+/// [`encode_single_with_options`] preserved for existing callers.
 pub fn encode_single(frame: &VideoFrame, pix: PixelFormat, palette: &[u8]) -> Result<Vec<u8>> {
-    let (ihdr, row_bytes, plte_bytes, trns_bytes) = ihdr_and_row_bytes(frame, pix, palette)?;
+    encode_single_with_options(frame, pix, palette, &PngEncoderOptions::default())
+}
+
+/// Encode one [`VideoFrame`] as a standalone PNG, honouring the
+/// supplied options (e.g. `interlace: true` for Adam7).
+pub fn encode_single_with_options(
+    frame: &VideoFrame,
+    pix: PixelFormat,
+    palette: &[u8],
+    opts: &PngEncoderOptions,
+) -> Result<Vec<u8>> {
+    let (mut ihdr, row_bytes, plte_bytes, trns_bytes) = ihdr_and_row_bytes(frame, pix, palette)?;
+    if opts.interlace {
+        ihdr.interlace = 1;
+    }
     let raw_pixels = flatten_and_normalise_pixels(frame, pix, row_bytes)?;
-    let idat = deflate_encode_pixels(&raw_pixels, row_bytes, frame.height as usize, &ihdr)?;
+    let idat = if opts.interlace {
+        deflate_encode_pixels_adam7(
+            &raw_pixels,
+            frame.width as usize,
+            frame.height as usize,
+            &ihdr,
+        )?
+    } else {
+        deflate_encode_pixels(&raw_pixels, row_bytes, frame.height as usize, &ihdr)?
+    };
 
     let mut out = Vec::with_capacity(64 + idat.len());
     out.extend_from_slice(&PNG_MAGIC);
@@ -372,6 +431,78 @@ fn deflate_encode_pixels(
     Ok(compress_to_vec_zlib(&filtered, 6))
 }
 
+/// Adam7 counterpart to [`deflate_encode_pixels`]: gather each of the
+/// seven passes into its own sub-image, filter its rows (per-pass
+/// heuristic), and concatenate `(1 + pass_row_bytes) * pass_height`
+/// filtered bytes from each pass. The full concatenation is zlib-
+/// compressed into one IDAT/fdAT payload.
+///
+/// Invariants shared with the non-interlaced path:
+/// - `raw` is row-major, tightly packed at the full image's `row_bytes`
+///   per row (same buffer produced by [`flatten_and_normalise_pixels`]).
+/// - The encoder never writes sub-8-bit depths, so `bytes_per_pixel`
+///   is always 1, 2, 3, 4, 6, or 8 — no bit-packing required.
+///
+/// The decoder's [`decode_adam7`](crate::decoder) inverts this: it
+/// splits the decompressed stream back into seven per-pass sub-images,
+/// reconstructs each via the standard filter loop, and scatters each
+/// pixel to `(sr + py*rs, sc + px*cs)` on the output canvas.
+fn deflate_encode_pixels_adam7(
+    raw: &[u8],
+    width: usize,
+    height: usize,
+    ihdr: &Ihdr,
+) -> Result<Vec<u8>> {
+    let bpp = ihdr.bpp_for_filter()?;
+    let bytes_per_pixel = ihdr.decoded_bytes_per_pixel()?;
+    let full_row_bytes = width * bytes_per_pixel;
+
+    let mut filtered_all = Vec::new();
+    for (pass, &(sr, sc, rs, cs)) in ADAM7.iter().enumerate() {
+        let (pw, ph) = adam7_pass_dims(width, height, pass);
+        if pw == 0 || ph == 0 {
+            continue;
+        }
+
+        // Gather the pass sub-image into a contiguous buffer at the
+        // pass's own row_bytes (= pw * bytes_per_pixel, since we never
+        // emit sub-byte encodes).
+        let pass_row_bytes = pw * bytes_per_pixel;
+        let mut pass_raw = vec![0u8; pass_row_bytes * ph];
+        for py in 0..ph {
+            let src_y = sr + py * rs;
+            for px in 0..pw {
+                let src_x = sc + px * cs;
+                let src_off = src_y * full_row_bytes + src_x * bytes_per_pixel;
+                let dst_off = py * pass_row_bytes + px * bytes_per_pixel;
+                pass_raw[dst_off..dst_off + bytes_per_pixel]
+                    .copy_from_slice(&raw[src_off..src_off + bytes_per_pixel]);
+            }
+        }
+
+        // Filter this pass's rows independently, exactly like the
+        // non-interlaced path.
+        let prev_start = filtered_all.len();
+        filtered_all.resize(prev_start + (1 + pass_row_bytes) * ph, 0);
+        let mut scratch = vec![0u8; pass_row_bytes];
+        let zero_row = vec![0u8; pass_row_bytes];
+        for y in 0..ph {
+            let row = &pass_raw[y * pass_row_bytes..(y + 1) * pass_row_bytes];
+            let prev: &[u8] = if y == 0 {
+                &zero_row
+            } else {
+                &pass_raw[(y - 1) * pass_row_bytes..y * pass_row_bytes]
+            };
+            let ft = choose_filter_heuristic(row, prev, bpp, &mut scratch);
+            let dst_off = prev_start + y * (1 + pass_row_bytes);
+            filtered_all[dst_off] = ft as u8;
+            let data_slot = &mut filtered_all[dst_off + 1..dst_off + 1 + pass_row_bytes];
+            filter_row(ft, row, prev, bpp, data_slot);
+        }
+    }
+    Ok(compress_to_vec_zlib(&filtered_all, 6))
+}
+
 // ---- APNG encode --------------------------------------------------------
 
 fn encode_apng(enc: &PngEncoder) -> Result<Vec<u8>> {
@@ -379,7 +510,10 @@ fn encode_apng(enc: &PngEncoder) -> Result<Vec<u8>> {
         return Err(Error::invalid("PNG encoder: no frames for APNG"));
     }
     let pix = enc.pix;
-    let (ihdr, row_bytes, plte, trns) = ihdr_and_row_bytes(&enc.frames[0], pix, &enc.palette)?;
+    let (mut ihdr, row_bytes, plte, trns) = ihdr_and_row_bytes(&enc.frames[0], pix, &enc.palette)?;
+    if enc.opts.interlace {
+        ihdr.interlace = 1;
+    }
 
     let num_plays: u32 = 0; // loop forever by default
     let actl = Actl {
@@ -421,7 +555,16 @@ fn encode_apng(enc: &PngEncoder) -> Result<Vec<u8>> {
         seq += 1;
 
         let raw = flatten_and_normalise_pixels(frame, pix, row_bytes)?;
-        let compressed = deflate_encode_pixels(&raw, row_bytes, ihdr.height as usize, &ihdr)?;
+        let compressed = if enc.opts.interlace {
+            deflate_encode_pixels_adam7(
+                &raw,
+                ihdr.width as usize,
+                ihdr.height as usize,
+                &ihdr,
+            )?
+        } else {
+            deflate_encode_pixels(&raw, row_bytes, ihdr.height as usize, &ihdr)?
+        };
 
         if idx == 0 {
             // First frame is the default image → IDAT.
