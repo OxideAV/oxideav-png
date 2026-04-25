@@ -52,19 +52,19 @@ pub use decoder::{decode_png_to_frame, CODEC_ID_STR};
 pub use encoder::{encode_single, encode_single_with_options, PngEncoderOptions};
 
 /// Register the PNG codec (both decoder and encoder).
-pub fn register_codecs(reg: &mut oxideav_codec::CodecRegistry) {
+pub fn register_codecs(reg: &mut oxideav_core::CodecRegistry) {
     container::register_codecs(reg);
 }
 
 /// Register the PNG / APNG container (demuxer + muxer + extensions + probe).
-pub fn register_containers(reg: &mut oxideav_container::ContainerRegistry) {
+pub fn register_containers(reg: &mut oxideav_core::ContainerRegistry) {
     container::register_containers(reg);
 }
 
 /// Combined registration: codecs + containers.
 pub fn register(
-    codecs: &mut oxideav_codec::CodecRegistry,
-    containers: &mut oxideav_container::ContainerRegistry,
+    codecs: &mut oxideav_core::CodecRegistry,
+    containers: &mut oxideav_core::ContainerRegistry,
 ) {
     register_codecs(codecs);
     register_containers(containers);

@@ -28,7 +28,7 @@
 //! Adam7 interlaced streams (IHDR interlace=1) are decoded seven passes at
 //! a time per §A.8 and scattered into the final canvas.
 
-use oxideav_codec::Decoder;
+use oxideav_core::Decoder;
 use oxideav_core::{
     CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, TimeBase, VideoFrame,
     VideoPlane,

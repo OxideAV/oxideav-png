@@ -15,19 +15,19 @@
 
 use std::io::{Read, SeekFrom, Write};
 
-use oxideav_container::{ContainerRegistry, Demuxer, Muxer, ProbeData, ReadSeek, WriteSeek};
 use oxideav_core::{
     CodecId, CodecParameters, CodecResolver, Error, MediaType, Packet, PixelFormat, Result,
     StreamInfo, TimeBase,
 };
+use oxideav_core::{ContainerRegistry, Demuxer, Muxer, ProbeData, ReadSeek, WriteSeek};
 
 use crate::apng::parse_fdat;
 use crate::chunk::{write_chunk, ChunkRef, PNG_MAGIC};
 use crate::decoder::{parse_all_chunks, Ihdr};
 
 /// Register the PNG codec (decoder + encoder).
-pub fn register_codecs(reg: &mut oxideav_codec::CodecRegistry) {
-    use oxideav_codec::CodecInfo;
+pub fn register_codecs(reg: &mut oxideav_core::CodecRegistry) {
+    use oxideav_core::CodecInfo;
     use oxideav_core::{CodecCapabilities, CodecId};
 
     let caps = CodecCapabilities::video("png_sw")

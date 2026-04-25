@@ -1,7 +1,7 @@
 //! Container probe: PNG magic bytes at offset 0 → score 100. Anything else
 //! → 0.
 
-use oxideav_container::ProbeData;
+use oxideav_core::ProbeData;
 
 #[test]
 fn probe_recognises_png_magic() {
