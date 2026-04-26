@@ -30,7 +30,7 @@
 
 use oxideav_core::Decoder;
 use oxideav_core::{
-    CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, TimeBase, VideoFrame,
+    CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, VideoFrame,
     VideoPlane,
 };
 
@@ -79,7 +79,7 @@ impl Decoder for PngDecoder {
                 Err(Error::NeedMore)
             };
         };
-        let vf = decode_png_to_frame(&pkt.data, pkt.pts, pkt.time_base)?;
+        let vf = decode_png_to_frame(&pkt.data, pkt.pts)?;
         Ok(Frame::Video(vf))
     }
 
@@ -234,12 +234,10 @@ pub(crate) fn parse_all_chunks(buf: &[u8]) -> Result<Vec<ChunkRef<'_>>> {
 }
 
 /// Decode a single non-animated PNG packet (or the "default image" of an
-/// APNG) into a [`VideoFrame`].
-pub fn decode_png_to_frame(
-    buf: &[u8],
-    pts: Option<i64>,
-    time_base: TimeBase,
-) -> Result<VideoFrame> {
+/// APNG) into a [`VideoFrame`]. Stream-level metadata (pixel format,
+/// width, height, time base) is the caller's responsibility — the
+/// frame just carries `pts + planes`.
+pub fn decode_png_to_frame(buf: &[u8], pts: Option<i64>) -> Result<VideoFrame> {
     let chunks = parse_all_chunks(buf)?;
     let ihdr_chunk = chunks
         .iter()
@@ -286,7 +284,7 @@ pub fn decode_png_to_frame(
         .map_err(|e| Error::invalid(format!("PNG: zlib decompress failed: {e:?}")))?;
 
     let frame_pixels = decode_image_pixels(&pixels, &ihdr)?;
-    let vf = build_video_frame(&ihdr, &frame_pixels, plte, trns, pts, time_base)?;
+    let vf = build_video_frame(&ihdr, &frame_pixels, plte, trns, pts)?;
     Ok(vf)
 }
 
@@ -513,7 +511,6 @@ fn build_video_frame(
     plte: Option<&[u8]>,
     trns: Option<&[u8]>,
     pts: Option<i64>,
-    time_base: TimeBase,
 ) -> Result<VideoFrame> {
     let fmt = ihdr.output_pixel_format()?;
     let w = ihdr.width as usize;
@@ -588,12 +585,9 @@ fn build_video_frame(
         }
     };
 
+    let _ = fmt; // format/dimensions live on the stream's CodecParameters now.
     Ok(VideoFrame {
-        format: fmt,
-        width: ihdr.width,
-        height: ihdr.height,
         pts,
-        time_base,
         planes: vec![VideoPlane { stride, data }],
     })
 }
@@ -713,8 +707,11 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
 /// composite using `fctl.x_offset / y_offset` + disposal state.
 ///
 /// In this initial cut we composite into a canvas-sized frame so the top
-/// level API is simpler for downstream consumers.
-pub fn decode_apng_frames(info: &ApngInfo, time_base: TimeBase) -> Result<Vec<VideoFrame>> {
+/// level API is simpler for downstream consumers. The PTS is reported in
+/// units of centiseconds (1/100 s) — APNG's native delay unit. Stream-level
+/// metadata (pixel format / width / height / time base) is the caller's
+/// responsibility.
+pub fn decode_apng_frames(info: &ApngInfo) -> Result<Vec<VideoFrame>> {
     let canvas_w = info.ihdr.width;
     let canvas_h = info.ihdr.height;
     let canvas_fmt = info.ihdr.output_pixel_format()?;
@@ -748,7 +745,6 @@ pub fn decode_apng_frames(info: &ApngInfo, time_base: TimeBase) -> Result<Vec<Vi
             info.plte.as_deref(),
             info.trns.as_deref(),
             None,
-            time_base,
         )?;
 
         // Disposal: Previous → snapshot the region pre-draw.
@@ -764,18 +760,22 @@ pub fn decode_apng_frames(info: &ApngInfo, time_base: TimeBase) -> Result<Vec<Vi
             canvas_w as usize,
             canvas_h as usize,
             &sub_frame,
+            sub_ihdr.width as usize,
+            sub_ihdr.height as usize,
+            canvas_fmt,
             frame.fctl.x_offset as usize,
             frame.fctl.y_offset as usize,
             frame.fctl.blend_op,
         );
 
-        // Emit the composed canvas as this frame.
+        // Emit the composed canvas as this frame. Stream-level metadata
+        // (format / width / height / time base) lives on the caller's
+        // CodecParameters; the frame just carries the planes + pts.
+        let _ = canvas_fmt;
+        let _ = canvas_w;
+        let _ = canvas_h;
         let mut vf = VideoFrame {
-            format: canvas_fmt,
-            width: canvas_w,
-            height: canvas_h,
             pts: Some(pts),
-            time_base,
             planes: vec![VideoPlane {
                 stride: stride_canvas,
                 data: canvas.clone(),
@@ -832,6 +832,7 @@ fn bytes_per_pixel_and_stride(fmt: PixelFormat, w: u32) -> Result<(usize, usize)
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn blit_sub_into_canvas(
     canvas: &mut [u8],
     stride_canvas: usize,
@@ -839,13 +840,14 @@ fn blit_sub_into_canvas(
     canvas_w: usize,
     canvas_h: usize,
     sub: &VideoFrame,
+    sub_w: usize,
+    sub_h: usize,
+    sub_fmt: PixelFormat,
     x_off: usize,
     y_off: usize,
     blend: Blend,
 ) {
     let sub_stride = sub.planes[0].stride;
-    let sub_w = sub.width as usize;
-    let sub_h = sub.height as usize;
     for sy in 0..sub_h {
         let dy = y_off + sy;
         if dy >= canvas_h {
@@ -883,7 +885,7 @@ fn blit_sub_into_canvas(
                             let a_dst = dst[3] as u32;
                             dst[3] = (a + ((a_dst * inv + 127) / 255)) as u8;
                         }
-                    } else if bpp == 2 && matches!(sub.format, PixelFormat::Ya8) {
+                    } else if bpp == 2 && matches!(sub_fmt, PixelFormat::Ya8) {
                         let a = src[1] as u32;
                         if a == 255 {
                             dst.copy_from_slice(src);

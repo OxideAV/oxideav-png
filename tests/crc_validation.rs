@@ -8,7 +8,7 @@ fn bad_chunk_crc_is_rejected() {
     // Build a minimal valid 2x2 Gray8 PNG via the encoder, then flip a byte
     // inside one of its chunk CRCs.
     use oxideav_core::{
-        CodecId, CodecParameters, Frame, PixelFormat, TimeBase, VideoFrame, VideoPlane,
+        CodecId, CodecParameters, Frame, PixelFormat, VideoFrame, VideoPlane,
     };
 
     let mut params = CodecParameters::video(CodecId::new("png"));
@@ -17,11 +17,7 @@ fn bad_chunk_crc_is_rejected() {
     params.pixel_format = Some(PixelFormat::Gray8);
     let mut enc = oxideav_png::encoder::make_encoder(&params).unwrap();
     enc.send_frame(&Frame::Video(VideoFrame {
-        format: PixelFormat::Gray8,
-        width: 2,
-        height: 2,
         pts: Some(0),
-        time_base: TimeBase::new(1, 100),
         planes: vec![VideoPlane {
             stride: 2,
             data: vec![10u8, 20, 30, 40],
@@ -37,8 +33,7 @@ fn bad_chunk_crc_is_rejected() {
     // IHDR: 8 (magic) + 4 (len) + 4 (type) + 13 (data) = 29, then 4 bytes of CRC.
     bytes[30] ^= 0x01;
 
-    let err =
-        oxideav_png::decoder::decode_png_to_frame(&bytes, None, TimeBase::new(1, 100)).unwrap_err();
+    let err = oxideav_png::decoder::decode_png_to_frame(&bytes, None).unwrap_err();
     match err {
         Error::InvalidData(msg) => assert!(msg.contains("CRC"), "expected CRC error, got: {msg}"),
         other => panic!("expected InvalidData, got: {other:?}"),

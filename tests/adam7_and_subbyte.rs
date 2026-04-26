@@ -6,7 +6,6 @@
 //! capability.
 
 use miniz_oxide::deflate::compress_to_vec_zlib;
-use oxideav_core::{PixelFormat, TimeBase};
 
 use oxideav_png::chunk::{write_chunk, PNG_MAGIC};
 use oxideav_png::decoder::{decode_png_to_frame, Ihdr};
@@ -93,10 +92,9 @@ fn adam7_rgb_8x8_matches_noninterlaced() {
     };
     let png = build_png_file(&ihdr, &idat, None);
 
-    let vf = decode_png_to_frame(&png, Some(0), TimeBase::new(1, 100)).expect("adam7 decode");
-    assert_eq!(vf.format, PixelFormat::Rgb24);
-    assert_eq!(vf.width as usize, w);
-    assert_eq!(vf.height as usize, h);
+    let vf = decode_png_to_frame(&png, Some(0)).expect("adam7 decode");
+    // Stream-level format / width / height live on CodecParameters now;
+    // the frame just carries planes.
     assert_eq!(vf.planes[0].stride, w * 3);
 
     // Verify every pixel round-trips.
@@ -166,10 +164,7 @@ fn indexed_2bit_16x16_unpacks_correctly() {
     };
     let png = build_png_file(&ihdr, &idat, Some(&palette));
 
-    let vf = decode_png_to_frame(&png, Some(0), TimeBase::new(1, 100)).expect("2-bit decode");
-    assert_eq!(vf.format, PixelFormat::Pal8);
-    assert_eq!(vf.width as usize, w);
-    assert_eq!(vf.height as usize, h);
+    let vf = decode_png_to_frame(&png, Some(0)).expect("2-bit decode");
     assert_eq!(vf.planes[0].stride, w);
     assert_eq!(vf.planes[0].data, expected);
 }
@@ -202,8 +197,7 @@ fn grayscale_4bit_scales_to_gray8() {
         interlace: 0,
     };
     let png = build_png_file(&ihdr, &idat, None);
-    let vf = decode_png_to_frame(&png, Some(0), TimeBase::new(1, 100)).expect("4-bit gray decode");
-    assert_eq!(vf.format, PixelFormat::Gray8);
+    let vf = decode_png_to_frame(&png, Some(0)).expect("4-bit gray decode");
     let expected: Vec<u8> = src_vals.iter().map(|&v| v.wrapping_mul(17)).collect();
     assert_eq!(vf.planes[0].data, expected);
 }

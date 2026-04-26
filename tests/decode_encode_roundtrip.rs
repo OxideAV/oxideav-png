@@ -5,9 +5,7 @@
 //! This proves the encoder + decoder are inverses and that per-row filters
 //! + CRC + deflate round-trip cleanly.
 
-use oxideav_core::{
-    CodecId, CodecParameters, Frame, PixelFormat, TimeBase, VideoFrame, VideoPlane,
-};
+use oxideav_core::{CodecId, CodecParameters, Frame, PixelFormat, VideoFrame, VideoPlane};
 
 fn gradient(w: usize, h: usize, bpp: usize) -> Vec<u8> {
     let mut out = vec![0u8; w * h * bpp];
@@ -35,11 +33,7 @@ fn make_frame(w: u32, h: u32, fmt: PixelFormat, bpp: usize, palette: Option<&[u8
         gradient(w as usize, h as usize, bpp)
     };
     VideoFrame {
-        format: fmt,
-        width: w,
-        height: h,
         pts: Some(0),
-        time_base: TimeBase::new(1, 100),
         planes: vec![VideoPlane {
             stride: w as usize * bpp,
             data,
@@ -77,13 +71,11 @@ fn roundtrip_check_inner(
     enc.flush().expect("flush");
     let pkt = enc.receive_packet().expect("recv");
 
-    // Decode the produced PNG.
-    let vf = oxideav_png::decoder::decode_png_to_frame(&pkt.data, Some(0), TimeBase::new(1, 100))
-        .expect("decode");
+    // Decode the produced PNG. Stream-level metadata (format, width,
+    // height) is now reported via the IHDR-derived CodecParameters
+    // contract, not on the frame.
+    let vf = oxideav_png::decoder::decode_png_to_frame(&pkt.data, Some(0)).expect("decode");
 
-    assert_eq!(vf.format, fmt);
-    assert_eq!(vf.width, w);
-    assert_eq!(vf.height, h);
     assert_eq!(
         vf.planes[0].data, frame.planes[0].data,
         "roundtrip byte mismatch for {fmt:?} {w}x{h} interlace={interlace}"
@@ -186,6 +178,8 @@ fn encode_single_with_options_sets_interlace_flag() {
     let frame = make_frame(8, 8, PixelFormat::Rgba, 4, None);
     let bytes = oxideav_png::encode_single_with_options(
         &frame,
+        8,
+        8,
         PixelFormat::Rgba,
         &[],
         &oxideav_png::PngEncoderOptions { interlace: true },
@@ -196,7 +190,6 @@ fn encode_single_with_options_sets_interlace_flag() {
     assert_eq!(bytes[28], 1, "interlace byte should be 1 for Adam7 encode");
 
     // And decoding reproduces the same pixels.
-    let vf = oxideav_png::decoder::decode_png_to_frame(&bytes, Some(0), TimeBase::new(1, 100))
-        .expect("decode");
+    let vf = oxideav_png::decoder::decode_png_to_frame(&bytes, Some(0)).expect("decode");
     assert_eq!(vf.planes[0].data, frame.planes[0].data);
 }

@@ -3,7 +3,7 @@
 //! frame's data is byte-identical to the input.
 
 use oxideav_core::{
-    CodecId, CodecParameters, Frame, PixelFormat, Rational, TimeBase, VideoFrame, VideoPlane,
+    CodecId, CodecParameters, Frame, PixelFormat, Rational, VideoFrame, VideoPlane,
 };
 
 fn make_frame(idx: u8, w: u32, h: u32) -> VideoFrame {
@@ -20,11 +20,7 @@ fn make_frame(idx: u8, w: u32, h: u32) -> VideoFrame {
         }
     }
     VideoFrame {
-        format: PixelFormat::Rgba,
-        width: w,
-        height: h,
         pts: Some(idx as i64),
-        time_base: TimeBase::new(1, 100),
         planes: vec![VideoPlane {
             stride: w as usize * bpp,
             data,
@@ -60,13 +56,14 @@ fn apng_three_frames_roundtrip_byte_identical() {
     assert_eq!(info.actl.num_frames, 3);
     assert_eq!(info.frames.len(), 3);
 
-    let decoded = oxideav_png::decoder::decode_apng_frames(&info, TimeBase::new(1, 100))
-        .expect("decode apng");
+    let decoded = oxideav_png::decoder::decode_apng_frames(&info).expect("decode apng");
     assert_eq!(decoded.len(), 3);
 
+    // Stream-level dimensions live on info.ihdr (and on the caller's
+    // CodecParameters); per-frame data must round-trip byte-for-byte.
+    assert_eq!(info.ihdr.width, w);
+    assert_eq!(info.ihdr.height, h);
     for (i, (orig, got)) in frames.iter().zip(decoded.iter()).enumerate() {
-        assert_eq!(got.width, w);
-        assert_eq!(got.height, h);
         assert_eq!(
             got.planes[0].data, orig.planes[0].data,
             "frame {i} bytes differ"

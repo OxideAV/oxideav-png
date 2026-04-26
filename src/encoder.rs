@@ -141,17 +141,10 @@ impl Encoder for PngEncoder {
     fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         match frame {
             Frame::Video(v) => {
-                if v.width != self.width || v.height != self.height {
-                    return Err(Error::invalid(
-                        "PNG encoder: frame dimensions must match encoder config",
-                    ));
-                }
-                if v.format != self.pix {
-                    return Err(Error::invalid(format!(
-                        "PNG encoder: frame format {:?} does not match encoder format {:?}",
-                        v.format, self.pix
-                    )));
-                }
+                // Stream-level format / dimensions live on the
+                // CodecParameters (set at make_encoder); the frame just
+                // carries pts + planes. Trust the caller to feed us
+                // matching geometry.
                 self.frames.push(v.clone());
                 // Non-animated shortcut: if we only ever get one frame and
                 // there's no animation hint, we emit eagerly on flush. Keep
@@ -195,7 +188,14 @@ impl PngEncoder {
         let bytes = if is_animated {
             encode_apng(self)?
         } else {
-            encode_single_with_options(&self.frames[0], self.pix, &self.palette, &self.opts)?
+            encode_single_with_options(
+                &self.frames[0],
+                self.width,
+                self.height,
+                self.pix,
+                &self.palette,
+                &self.opts,
+            )?
         };
         let mut pkt = Packet::new(0, self.time_base, bytes);
         pkt.pts = self.frames[0].pts;
@@ -212,32 +212,44 @@ impl PngEncoder {
 /// Encode one [`VideoFrame`] as a standalone PNG using default options
 /// (non-interlaced). Thin wrapper around
 /// [`encode_single_with_options`] preserved for existing callers.
-pub fn encode_single(frame: &VideoFrame, pix: PixelFormat, palette: &[u8]) -> Result<Vec<u8>> {
-    encode_single_with_options(frame, pix, palette, &PngEncoderOptions::default())
+/// `width` and `height` come from the caller's `CodecParameters`.
+pub fn encode_single(
+    frame: &VideoFrame,
+    width: u32,
+    height: u32,
+    pix: PixelFormat,
+    palette: &[u8],
+) -> Result<Vec<u8>> {
+    encode_single_with_options(
+        frame,
+        width,
+        height,
+        pix,
+        palette,
+        &PngEncoderOptions::default(),
+    )
 }
 
 /// Encode one [`VideoFrame`] as a standalone PNG, honouring the
 /// supplied options (e.g. `interlace: true` for Adam7).
 pub fn encode_single_with_options(
     frame: &VideoFrame,
+    width: u32,
+    height: u32,
     pix: PixelFormat,
     palette: &[u8],
     opts: &PngEncoderOptions,
 ) -> Result<Vec<u8>> {
-    let (mut ihdr, row_bytes, plte_bytes, trns_bytes) = ihdr_and_row_bytes(frame, pix, palette)?;
+    let (mut ihdr, row_bytes, plte_bytes, trns_bytes) =
+        ihdr_and_row_bytes(frame, width, height, pix, palette)?;
     if opts.interlace {
         ihdr.interlace = 1;
     }
-    let raw_pixels = flatten_and_normalise_pixels(frame, pix, row_bytes)?;
+    let raw_pixels = flatten_and_normalise_pixels(frame, width, height, pix, row_bytes)?;
     let idat = if opts.interlace {
-        deflate_encode_pixels_adam7(
-            &raw_pixels,
-            frame.width as usize,
-            frame.height as usize,
-            &ihdr,
-        )?
+        deflate_encode_pixels_adam7(&raw_pixels, width as usize, height as usize, &ihdr)?
     } else {
-        deflate_encode_pixels(&raw_pixels, row_bytes, frame.height as usize, &ihdr)?
+        deflate_encode_pixels(&raw_pixels, row_bytes, height as usize, &ihdr)?
     };
 
     let mut out = Vec::with_capacity(64 + idat.len());
@@ -261,10 +273,12 @@ type IhdrAndRowInfo = (Ihdr, usize, Option<Vec<u8>>, Option<Vec<u8>>);
 /// count + optional PLTE / tRNS chunk payloads.
 fn ihdr_and_row_bytes(
     frame: &VideoFrame,
+    width: u32,
+    height: u32,
     pix: PixelFormat,
     palette: &[u8],
 ) -> Result<IhdrAndRowInfo> {
-    let w = frame.width;
+    let w = width;
     let (bit_depth, colour_type, channels): (u8, u8, usize) = match pix {
         PixelFormat::Gray8 => (8, 0, 1),
         PixelFormat::Gray16Le => (16, 0, 1),
@@ -283,7 +297,7 @@ fn ihdr_and_row_bytes(
     let row_bytes = channels * (bit_depth as usize / 8) * w as usize;
     let ihdr = Ihdr {
         width: w,
-        height: frame.height,
+        height,
         bit_depth,
         colour_type,
         compression: 0,
@@ -338,11 +352,13 @@ fn ihdr_and_row_bytes(
 /// expected byte count per row.
 fn flatten_and_normalise_pixels(
     frame: &VideoFrame,
+    width: u32,
+    height: u32,
     pix: PixelFormat,
     row_bytes: usize,
 ) -> Result<Vec<u8>> {
-    let h = frame.height as usize;
-    let w = frame.width as usize;
+    let h = height as usize;
+    let w = width as usize;
     let src = &frame.planes[0];
     let mut out = vec![0u8; row_bytes * h];
 
@@ -510,7 +526,8 @@ fn encode_apng(enc: &PngEncoder) -> Result<Vec<u8>> {
         return Err(Error::invalid("PNG encoder: no frames for APNG"));
     }
     let pix = enc.pix;
-    let (mut ihdr, row_bytes, plte, trns) = ihdr_and_row_bytes(&enc.frames[0], pix, &enc.palette)?;
+    let (mut ihdr, row_bytes, plte, trns) =
+        ihdr_and_row_bytes(&enc.frames[0], enc.width, enc.height, pix, &enc.palette)?;
     if enc.opts.interlace {
         ihdr.interlace = 1;
     }
@@ -554,7 +571,7 @@ fn encode_apng(enc: &PngEncoder) -> Result<Vec<u8>> {
         write_chunk(&mut out, b"fcTL", &fctl.to_bytes());
         seq += 1;
 
-        let raw = flatten_and_normalise_pixels(frame, pix, row_bytes)?;
+        let raw = flatten_and_normalise_pixels(frame, enc.width, enc.height, pix, row_bytes)?;
         let compressed = if enc.opts.interlace {
             deflate_encode_pixels_adam7(&raw, ihdr.width as usize, ihdr.height as usize, &ihdr)?
         } else {
