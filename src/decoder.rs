@@ -30,8 +30,7 @@
 
 use oxideav_core::Decoder;
 use oxideav_core::{
-    CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, VideoFrame,
-    VideoPlane,
+    CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, VideoFrame, VideoPlane,
 };
 
 use miniz_oxide::inflate::decompress_to_vec_zlib;
@@ -831,7 +830,6 @@ fn bytes_per_pixel_and_stride(fmt: PixelFormat, w: u32) -> Result<(usize, usize)
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn blit_sub_into_canvas(
     canvas: &mut [u8],
