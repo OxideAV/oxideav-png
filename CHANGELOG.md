@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/OxideAV/oxideav-png/compare/v0.1.3...v0.1.4) - 2026-04-27
+
+### Other
+
+- drop duplicated #[allow(clippy::too_many_arguments)] on blit_sub_into_canvas
+- adopt slim VideoFrame shape
+- pin release-plz to patch-only bumps
+
 ## [0.1.3](https://github.com/OxideAV/oxideav-png/compare/v0.1.2...v0.1.3) - 2026-04-25
 
 ### Other
