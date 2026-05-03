@@ -257,7 +257,7 @@ fn generate_random_rgba(width: u32, height: u32, seed: u64) -> Vec<u8> {
     out
 }
 
-fn rgba_video_frame(width: u32, height: u32, rgba: &[u8]) -> VideoFrame {
+fn rgba_video_frame(width: u32, _height: u32, rgba: &[u8]) -> VideoFrame {
     VideoFrame {
         pts: Some(0),
         planes: vec![VideoPlane {
