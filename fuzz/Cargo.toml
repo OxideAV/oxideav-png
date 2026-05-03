@@ -1,0 +1,49 @@
+[package]
+name = "oxideav-png-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+oxideav-core = "0.1"
+# libloading is the only libpng interop: each cross-decode harness
+# `dlopen`s the system-installed libpng at startup. No `*-sys` crate,
+# no libpng source pulled into the dep tree. Harnesses skip silently
+# when libpng isn't installed (see fuzz/src/lib.rs).
+libloading = "0.8"
+
+[dependencies.oxideav-png]
+path = ".."
+
+[lib]
+name = "oxideav_png_fuzz"
+path = "src/lib.rs"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "png_self_roundtrip"
+path = "fuzz_targets/png_self_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "libpng_encode_oxideav_decode"
+path = "fuzz_targets/libpng_encode_oxideav_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "oxideav_encode_libpng_decode"
+path = "fuzz_targets/oxideav_encode_libpng_decode.rs"
+test = false
+doc = false
