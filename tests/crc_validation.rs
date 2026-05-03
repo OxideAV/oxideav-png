@@ -7,9 +7,7 @@ use oxideav_core::Error;
 fn bad_chunk_crc_is_rejected() {
     // Build a minimal valid 2x2 Gray8 PNG via the encoder, then flip a byte
     // inside one of its chunk CRCs.
-    use oxideav_core::{
-        CodecId, CodecParameters, Frame, PixelFormat, VideoFrame, VideoPlane,
-    };
+    use oxideav_core::{CodecId, CodecParameters, Frame, PixelFormat, VideoFrame, VideoPlane};
 
     let mut params = CodecParameters::video(CodecId::new("png"));
     params.width = Some(2);
