@@ -17,3 +17,9 @@ categories = ["multimedia::encoding", "multimedia::images"]
 oxideav-core = "0.1"
 oxideav-pixfmt = "0.1"
 miniz_oxide = "0.9"
+
+[dev-dependencies]
+# libpng interop for the external roundtrip test (tests/external_roundtrip.rs).
+# Loaded via dlopen at test time — no `*-sys` crate, no libpng source pulled
+# into the workspace. The test skips silently when libpng isn't installed.
+libloading = "0.8"
