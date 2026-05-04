@@ -8,10 +8,11 @@
 //! 4. `acTL` + `fcTL` + `fdAT` carry animation frame metadata / data.
 //! 5. Each frame's compressed stream = concatenation of `IDAT` (for default
 //!    image) or `fdAT[4..]` (for animation frames) → `miniz_oxide` zlib
-//!    decode → reverse per-row filters → fill a `VideoFrame`.
+//!    decode → reverse per-row filters → fill a [`PngImage`] (or, behind
+//!    the `registry` feature, an `oxideav_core::VideoFrame`).
 //!
-//! Output pixel formats (no internal conversion — the `PixConvert` graph
-//! node handles that):
+//! Output pixel formats (no internal conversion — the framework's pixfmt
+//! graph node handles that):
 //!
 //! - colour type 0 / 1-2-4-bit → `Gray8` (scaled up via ×255/×85/×17)
 //! - colour type 0 / 8-bit  → `Gray8`
@@ -28,10 +29,15 @@
 //! Adam7 interlaced streams (IHDR interlace=1) are decoded seven passes at
 //! a time per §A.8 and scattered into the final canvas.
 
-use oxideav_core::Decoder;
-use oxideav_core::{
-    CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, VideoFrame, VideoPlane,
-};
+use crate::error::{PngError as Error, Result};
+use crate::image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat};
+
+// Backward-compat re-exports: existing callers reach for
+// `oxideav_png::decoder::make_decoder` and
+// `oxideav_png::decoder::decode_png_to_frame`. Keep both paths live
+// by re-exporting the registry-side surface.
+#[cfg(feature = "registry")]
+pub use crate::registry::{decode_png_to_frame, make_decoder};
 
 use miniz_oxide::inflate::decompress_to_vec_zlib;
 
@@ -41,51 +47,30 @@ use crate::filter::{unfilter_row, FilterType};
 
 pub const CODEC_ID_STR: &str = "png";
 
-pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
-    Ok(Box::new(PngDecoder {
-        codec_id: params.codec_id.clone(),
-        pending: None,
-        eof: false,
-    }))
-}
-
-struct PngDecoder {
-    codec_id: CodecId,
-    pending: Option<Packet>,
-    eof: bool,
-}
-
-impl Decoder for PngDecoder {
-    fn codec_id(&self) -> &CodecId {
-        &self.codec_id
+/// Backward-compat alias for [`decode_apng_info`] — older callers
+/// reach for `decode_apng_frames(&ApngInfo)`. Returns the per-frame
+/// `VideoFrame` list when the `registry` feature is on, otherwise the
+/// composited [`ApngImage::frames`] list. New code should call
+/// [`decode_apng_info`] (standalone) or
+/// [`crate::registry::decode_png_to_frame`] (framework-side).
+#[cfg(feature = "registry")]
+pub fn decode_apng_frames(
+    info: &ApngInfo,
+) -> oxideav_core::Result<Vec<oxideav_core::VideoFrame>> {
+    let img = decode_apng_info(info)?;
+    let mut out = Vec::with_capacity(img.frames.len());
+    let mut pts: i64 = 0;
+    for f in &img.frames {
+        out.push(oxideav_core::VideoFrame {
+            pts: Some(pts),
+            planes: vec![oxideav_core::VideoPlane {
+                stride: f.image.stride,
+                data: f.image.data.clone(),
+            }],
+        });
+        pts += f.delay_cs as i64;
     }
-
-    fn send_packet(&mut self, packet: &Packet) -> Result<()> {
-        if self.pending.is_some() {
-            return Err(Error::other(
-                "PNG decoder: receive_frame must be called before sending another packet",
-            ));
-        }
-        self.pending = Some(packet.clone());
-        Ok(())
-    }
-
-    fn receive_frame(&mut self) -> Result<Frame> {
-        let Some(pkt) = self.pending.take() else {
-            return if self.eof {
-                Err(Error::Eof)
-            } else {
-                Err(Error::NeedMore)
-            };
-        };
-        let vf = decode_png_to_frame(&pkt.data, pkt.pts)?;
-        Ok(Frame::Video(vf))
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        self.eof = true;
-        Ok(())
-    }
+    Ok(out)
 }
 
 // ---- IHDR ---------------------------------------------------------------
@@ -164,21 +149,22 @@ impl Ihdr {
         Ok(bits_per_row.div_ceil(8))
     }
 
-    pub fn output_pixel_format(&self) -> Result<PixelFormat> {
+    /// Pixel format the decoder produces for this IHDR.
+    pub fn output_pixel_format(&self) -> Result<PngPixelFormat> {
         Ok(match (self.colour_type, self.bit_depth) {
             // Grayscale sub-8-bit is expanded to Gray8 during decode (scale
             // from bit_depth-max to 255).
-            (0, 1) | (0, 2) | (0, 4) | (0, 8) => PixelFormat::Gray8,
-            (0, 16) => PixelFormat::Gray16Le,
-            (2, 8) => PixelFormat::Rgb24,
-            (2, 16) => PixelFormat::Rgb48Le,
+            (0, 1) | (0, 2) | (0, 4) | (0, 8) => PngPixelFormat::Gray8,
+            (0, 16) => PngPixelFormat::Gray16Le,
+            (2, 8) => PngPixelFormat::Rgb24,
+            (2, 16) => PngPixelFormat::Rgb48Le,
             // Indexed sub-8-bit is expanded to Pal8 (one index byte per
             // pixel) during decode.
-            (3, 1) | (3, 2) | (3, 4) | (3, 8) => PixelFormat::Pal8,
-            (4, 8) => PixelFormat::Ya8,
-            (4, 16) => PixelFormat::Rgba64Le,
-            (6, 8) => PixelFormat::Rgba,
-            (6, 16) => PixelFormat::Rgba64Le,
+            (3, 1) | (3, 2) | (3, 4) | (3, 8) => PngPixelFormat::Pal8,
+            (4, 8) => PngPixelFormat::Ya8,
+            (4, 16) => PngPixelFormat::Rgba64Le,
+            (6, 8) => PngPixelFormat::Rgba,
+            (6, 16) => PngPixelFormat::Rgba64Le,
             (ct, bd) => {
                 return Err(Error::unsupported(format!(
                     "PNG: colour type {ct} bit depth {bd} not implemented"
@@ -188,7 +174,7 @@ impl Ihdr {
     }
 
     /// Number of bytes in one logical pixel of the *decoded* byte-plane that
-    /// the decoder hands to `build_video_frame`. For sub-8-bit gray/indexed,
+    /// the decoder hands to `build_png_image`. For sub-8-bit gray/indexed,
     /// this is 1 after expansion. For ≥8-bit it's `channels * (bit_depth/8)`.
     pub fn decoded_bytes_per_pixel(&self) -> Result<usize> {
         if self.bit_depth < 8 {
@@ -232,11 +218,10 @@ pub(crate) fn parse_all_chunks(buf: &[u8]) -> Result<Vec<ChunkRef<'_>>> {
     Ok(out)
 }
 
-/// Decode a single non-animated PNG packet (or the "default image" of an
-/// APNG) into a [`VideoFrame`]. Stream-level metadata (pixel format,
-/// width, height, time base) is the caller's responsibility — the
-/// frame just carries `pts + planes`.
-pub fn decode_png_to_frame(buf: &[u8], pts: Option<i64>) -> Result<VideoFrame> {
+/// Decode a single non-animated PNG file (or the "default image" of an
+/// APNG) into a [`PngImage`]. Standalone (no `oxideav-core`) entry
+/// point: works whether or not the `registry` feature is enabled.
+pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
     let chunks = parse_all_chunks(buf)?;
     let ihdr_chunk = chunks
         .iter()
@@ -283,13 +268,106 @@ pub fn decode_png_to_frame(buf: &[u8], pts: Option<i64>) -> Result<VideoFrame> {
         .map_err(|e| Error::invalid(format!("PNG: zlib decompress failed: {e:?}")))?;
 
     let frame_pixels = decode_image_pixels(&pixels, &ihdr)?;
-    let vf = build_video_frame(&ihdr, &frame_pixels, plte, trns, pts)?;
-    Ok(vf)
+    build_png_image(&ihdr, &frame_pixels, plte, trns)
+}
+
+/// Pack the raw decoded byte plane into a [`PngImage`] with the IHDR's
+/// output pixel format. For 16-bit formats this swaps PNG's BE samples
+/// to little-endian; for colour type 4 / 16-bit it expands `(gray,
+/// alpha)` into `(gray, gray, gray, alpha)` because we have no native
+/// Ya16 pixel format.
+fn build_png_image(
+    ihdr: &Ihdr,
+    raw: &[u8],
+    plte: Option<&[u8]>,
+    trns: Option<&[u8]>,
+) -> Result<PngImage> {
+    let pf = ihdr.output_pixel_format()?;
+    let w = ihdr.width as usize;
+    let h = ihdr.height as usize;
+
+    let (stride, data) = match pf {
+        PngPixelFormat::Gray8 => (w, raw.to_vec()),
+        PngPixelFormat::Pal8 => {
+            let _plte =
+                plte.ok_or_else(|| Error::invalid("PNG: colour type 3 requires PLTE chunk"))?;
+            (w, raw.to_vec())
+        }
+        PngPixelFormat::Gray16Le => {
+            let mut out = vec![0u8; w * h * 2];
+            for i in 0..w * h {
+                let be = &raw[i * 2..i * 2 + 2];
+                out[i * 2] = be[1];
+                out[i * 2 + 1] = be[0];
+            }
+            (w * 2, out)
+        }
+        PngPixelFormat::Rgb24 => (w * 3, raw.to_vec()),
+        PngPixelFormat::Rgba => (w * 4, raw.to_vec()),
+        PngPixelFormat::Rgb48Le => {
+            let mut out = vec![0u8; w * h * 6];
+            for i in 0..w * h * 3 {
+                out[i * 2] = raw[i * 2 + 1];
+                out[i * 2 + 1] = raw[i * 2];
+            }
+            (w * 6, out)
+        }
+        PngPixelFormat::Rgba64Le => {
+            // Two cases: genuinely RGBA 16 (ct=6, bd=16) or gray+alpha 16 (ct=4, bd=16).
+            if ihdr.colour_type == 6 {
+                let mut out = vec![0u8; w * h * 8];
+                for i in 0..w * h * 4 {
+                    out[i * 2] = raw[i * 2 + 1];
+                    out[i * 2 + 1] = raw[i * 2];
+                }
+                (w * 8, out)
+            } else {
+                // colour type 4 + 16 bit → (G16, A16) in BE per sample.
+                // Expand to (G,G,G,A) LE.
+                let mut out = vec![0u8; w * h * 8];
+                for i in 0..w * h {
+                    let g_hi = raw[i * 4];
+                    let g_lo = raw[i * 4 + 1];
+                    let a_hi = raw[i * 4 + 2];
+                    let a_lo = raw[i * 4 + 3];
+                    for c in 0..3 {
+                        out[i * 8 + c * 2] = g_lo;
+                        out[i * 8 + c * 2 + 1] = g_hi;
+                    }
+                    out[i * 8 + 6] = a_lo;
+                    out[i * 8 + 7] = a_hi;
+                }
+                (w * 8, out)
+            }
+        }
+        PngPixelFormat::Ya8 => (w * 2, raw.to_vec()),
+    };
+
+    let palette = if pf == PngPixelFormat::Pal8 {
+        let mut pal = Vec::new();
+        if let Some(p) = plte {
+            pal.extend_from_slice(p);
+        }
+        if let Some(t) = trns {
+            pal.extend_from_slice(t);
+        }
+        pal
+    } else {
+        Vec::new()
+    };
+
+    Ok(PngImage {
+        width: ihdr.width,
+        height: ihdr.height,
+        pixel_format: pf,
+        stride,
+        data,
+        palette,
+    })
 }
 
 /// Decompressed-zlib → unfiltered → (optionally expanded sub-byte, and for
-/// Adam7 interlaced streams, scattered into the full canvas) byte plane
-/// ready to be packed by `build_video_frame`.
+/// Adam7 interlaced streams, scattered into the full canvas) byte plane.
 ///
 /// The output layout is always "row-major, `decoded_bytes_per_pixel` bytes
 /// per pixel, tightly packed (stride = width * bpp)".
@@ -392,7 +470,7 @@ fn decode_adam7(decompressed: &[u8], ihdr: &Ihdr) -> Result<Vec<u8>> {
 }
 
 /// Given a raw (unfiltered) PNG byte plane at native bit depth, expand it to
-/// the byte layout consumed by `build_video_frame`. For sub-byte gray/pal,
+/// the byte layout consumed by `build_png_image`. For sub-byte gray/pal,
 /// this means unpacking 2/4/8 pixels per byte and (for grayscale) scaling
 /// up to 8-bit. For ≥8-bit data this is a straight copy.
 ///
@@ -497,98 +575,6 @@ pub(crate) fn reconstruct_filtered(filtered: &[u8], ihdr: &Ihdr) -> Result<Vec<u
         unfilter_row(filter_type, curr, prev, bpp)?;
     }
     Ok(raw)
-}
-
-/// Pack the raw pixel buffer into a `VideoFrame` for the given IHDR output
-/// pixel format. For 16-bit formats we swap big-endian samples to little-
-/// endian because our `Le` pixel formats expect LE byte order. For colour
-/// type 4 / 16-bit we explode `(gray, alpha)` into `(gray, gray, gray, alpha)`
-/// because we have no native Ya16 pixel format.
-fn build_video_frame(
-    ihdr: &Ihdr,
-    raw: &[u8],
-    plte: Option<&[u8]>,
-    trns: Option<&[u8]>,
-    pts: Option<i64>,
-) -> Result<VideoFrame> {
-    let fmt = ihdr.output_pixel_format()?;
-    let w = ihdr.width as usize;
-    let h = ihdr.height as usize;
-
-    let (stride, data) = match fmt {
-        PixelFormat::Gray8 => {
-            // 1 byte/pixel, already laid out.
-            (w, raw.to_vec())
-        }
-        PixelFormat::Pal8 => {
-            let _plte =
-                plte.ok_or_else(|| Error::invalid("PNG: colour type 3 requires PLTE chunk"))?;
-            let _ = trns;
-            (w, raw.to_vec())
-        }
-        PixelFormat::Gray16Le => {
-            // 2 BE bytes/pixel → LE.
-            let mut out = vec![0u8; w * h * 2];
-            for i in 0..w * h {
-                let be = &raw[i * 2..i * 2 + 2];
-                out[i * 2] = be[1];
-                out[i * 2 + 1] = be[0];
-            }
-            (w * 2, out)
-        }
-        PixelFormat::Rgb24 => (w * 3, raw.to_vec()),
-        PixelFormat::Rgba => (w * 4, raw.to_vec()),
-        PixelFormat::Rgb48Le => {
-            let mut out = vec![0u8; w * h * 6];
-            for i in 0..w * h * 3 {
-                out[i * 2] = raw[i * 2 + 1];
-                out[i * 2 + 1] = raw[i * 2];
-            }
-            (w * 6, out)
-        }
-        PixelFormat::Rgba64Le => {
-            // Two cases: genuinely RGBA 16 (ct=6, bd=16) or gray+alpha 16 (ct=4, bd=16).
-            if ihdr.colour_type == 6 {
-                let mut out = vec![0u8; w * h * 8];
-                for i in 0..w * h * 4 {
-                    out[i * 2] = raw[i * 2 + 1];
-                    out[i * 2 + 1] = raw[i * 2];
-                }
-                (w * 8, out)
-            } else {
-                // colour type 4 + 16 bit → (G16, A16) in BE per sample.
-                // Expand to (G,G,G,A) LE.
-                let mut out = vec![0u8; w * h * 8];
-                for i in 0..w * h {
-                    let g_hi = raw[i * 4];
-                    let g_lo = raw[i * 4 + 1];
-                    let a_hi = raw[i * 4 + 2];
-                    let a_lo = raw[i * 4 + 3];
-                    // Each 16-bit sample stored LE.
-                    for c in 0..3 {
-                        out[i * 8 + c * 2] = g_lo;
-                        out[i * 8 + c * 2 + 1] = g_hi;
-                    }
-                    out[i * 8 + 6] = a_lo;
-                    out[i * 8 + 7] = a_hi;
-                }
-                (w * 8, out)
-            }
-        }
-        PixelFormat::Ya8 => (w * 2, raw.to_vec()),
-        other => {
-            return Err(Error::unsupported(format!(
-                "PNG: build_video_frame unhandled pixel format {:?}",
-                other
-            )))
-        }
-    };
-
-    let _ = fmt; // format/dimensions live on the stream's CodecParameters now.
-    Ok(VideoFrame {
-        pts,
-        planes: vec![VideoPlane { stride, data }],
-    })
 }
 
 // ---- APNG: multi-frame iterator ----------------------------------------
@@ -699,29 +685,26 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
     })
 }
 
-/// Decompress + unfilter a single APNG animation frame into a `VideoFrame`.
-/// `ihdr` is the file-level IHDR; the frame may be smaller than the canvas
-/// (fcTL width/height < IHDR width/height). The returned frame has the
-/// frame-local dimensions; callers wanting canvas-size frames must
-/// composite using `fctl.x_offset / y_offset` + disposal state.
-///
-/// In this initial cut we composite into a canvas-sized frame so the top
-/// level API is simpler for downstream consumers. The PTS is reported in
-/// units of centiseconds (1/100 s) — APNG's native delay unit. Stream-level
-/// metadata (pixel format / width / height / time base) is the caller's
-/// responsibility.
-pub fn decode_apng_frames(info: &ApngInfo) -> Result<Vec<VideoFrame>> {
+/// Decode an entire APNG file into its composited per-frame canvases.
+/// Standalone (no `oxideav-core`) entry point.
+pub fn decode_apng(buf: &[u8]) -> Result<ApngImage> {
+    let info = parse_apng(buf)?;
+    decode_apng_info(&info)
+}
+
+/// Composite the parsed APNG `info` into per-frame canvases.
+pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
     let canvas_w = info.ihdr.width;
     let canvas_h = info.ihdr.height;
     let canvas_fmt = info.ihdr.output_pixel_format()?;
-    let (bytes_per_pixel, stride_canvas) = bytes_per_pixel_and_stride(canvas_fmt, canvas_w)?;
+    let bpp = canvas_fmt.bytes_per_pixel();
+    let stride_canvas = canvas_w as usize * bpp;
 
     let mut canvas = vec![0u8; stride_canvas * canvas_h as usize];
     // For Disposal::Previous we snapshot the pre-draw state before writing
     // the new frame.
     let mut prev_snapshot: Option<Vec<u8>> = None;
-    let mut out_frames: Vec<VideoFrame> = Vec::new();
-    let mut pts: i64 = 0;
+    let mut out_frames: Vec<ApngFrameImage> = Vec::new();
 
     for frame in info.frames.iter() {
         // Build a synthetic IHDR-like block for the sub-frame dimensions.
@@ -738,12 +721,11 @@ pub fn decode_apng_frames(info: &ApngInfo) -> Result<Vec<VideoFrame>> {
         let decompressed = decompress_to_vec_zlib(&frame.compressed)
             .map_err(|e| Error::invalid(format!("APNG: zlib failed: {e:?}")))?;
         let frame_raw = decode_image_pixels(&decompressed, &sub_ihdr)?;
-        let sub_frame = build_video_frame(
+        let sub_frame = build_png_image(
             &sub_ihdr,
             &frame_raw,
             info.plte.as_deref(),
             info.trns.as_deref(),
-            None,
         )?;
 
         // Disposal: Previous → snapshot the region pre-draw.
@@ -755,7 +737,7 @@ pub fn decode_apng_frames(info: &ApngInfo) -> Result<Vec<VideoFrame>> {
         blit_sub_into_canvas(
             &mut canvas,
             stride_canvas,
-            bytes_per_pixel,
+            bpp,
             canvas_w as usize,
             canvas_h as usize,
             &sub_frame,
@@ -767,23 +749,19 @@ pub fn decode_apng_frames(info: &ApngInfo) -> Result<Vec<VideoFrame>> {
             frame.fctl.blend_op,
         );
 
-        // Emit the composed canvas as this frame. Stream-level metadata
-        // (format / width / height / time base) lives on the caller's
-        // CodecParameters; the frame just carries the planes + pts.
-        let _ = canvas_fmt;
-        let _ = canvas_w;
-        let _ = canvas_h;
-        let mut vf = VideoFrame {
-            pts: Some(pts),
-            planes: vec![VideoPlane {
-                stride: stride_canvas,
-                data: canvas.clone(),
-            }],
+        let img = PngImage {
+            width: canvas_w,
+            height: canvas_h,
+            pixel_format: canvas_fmt,
+            stride: stride_canvas,
+            data: canvas.clone(),
+            palette: Vec::new(),
         };
-        let delay = frame.fctl.delay_centiseconds().max(1) as i64;
-        vf.pts = Some(pts);
-        pts += delay;
-        out_frames.push(vf);
+        let delay = frame.fctl.delay_centiseconds().max(1);
+        out_frames.push(ApngFrameImage {
+            image: img,
+            delay_cs: delay,
+        });
 
         // Apply disposal *after* emitting.
         match frame.fctl.dispose_op {
@@ -793,7 +771,7 @@ pub fn decode_apng_frames(info: &ApngInfo) -> Result<Vec<VideoFrame>> {
                 clear_region(
                     &mut canvas,
                     stride_canvas,
-                    bytes_per_pixel,
+                    bpp,
                     canvas_w as usize,
                     canvas_h as usize,
                     frame.fctl.x_offset as usize,
@@ -810,23 +788,12 @@ pub fn decode_apng_frames(info: &ApngInfo) -> Result<Vec<VideoFrame>> {
         }
     }
 
-    Ok(out_frames)
-}
-
-fn bytes_per_pixel_and_stride(fmt: PixelFormat, w: u32) -> Result<(usize, usize)> {
-    Ok(match fmt {
-        PixelFormat::Gray8 | PixelFormat::Pal8 => (1, w as usize),
-        PixelFormat::Ya8 => (2, w as usize * 2),
-        PixelFormat::Rgb24 => (3, w as usize * 3),
-        PixelFormat::Rgba => (4, w as usize * 4),
-        PixelFormat::Gray16Le => (2, w as usize * 2),
-        PixelFormat::Rgb48Le => (6, w as usize * 6),
-        PixelFormat::Rgba64Le => (8, w as usize * 8),
-        other => {
-            return Err(Error::unsupported(format!(
-                "PNG: bytes_per_pixel_and_stride unsupported for {other:?}"
-            )))
-        }
+    Ok(ApngImage {
+        width: canvas_w,
+        height: canvas_h,
+        pixel_format: canvas_fmt,
+        frames: out_frames,
+        num_plays: info.actl.num_plays,
     })
 }
 
@@ -837,15 +804,15 @@ fn blit_sub_into_canvas(
     bpp: usize,
     canvas_w: usize,
     canvas_h: usize,
-    sub: &VideoFrame,
+    sub: &PngImage,
     sub_w: usize,
     sub_h: usize,
-    sub_fmt: PixelFormat,
+    sub_fmt: PngPixelFormat,
     x_off: usize,
     y_off: usize,
     blend: Blend,
 ) {
-    let sub_stride = sub.planes[0].stride;
+    let sub_stride = sub.stride;
     for sy in 0..sub_h {
         let dy = y_off + sy;
         if dy >= canvas_h {
@@ -854,8 +821,7 @@ fn blit_sub_into_canvas(
         let row_cap = (canvas_w - x_off.min(canvas_w)).min(sub_w);
         for sx in 0..row_cap {
             let dx = x_off + sx;
-            let src =
-                &sub.planes[0].data[sy * sub_stride + sx * bpp..sy * sub_stride + (sx + 1) * bpp];
+            let src = &sub.data[sy * sub_stride + sx * bpp..sy * sub_stride + (sx + 1) * bpp];
             let dst_start = dy * stride_canvas + dx * bpp;
             let dst = &mut canvas[dst_start..dst_start + bpp];
             match blend {
@@ -883,7 +849,7 @@ fn blit_sub_into_canvas(
                             let a_dst = dst[3] as u32;
                             dst[3] = (a + ((a_dst * inv + 127) / 255)) as u8;
                         }
-                    } else if bpp == 2 && matches!(sub_fmt, PixelFormat::Ya8) {
+                    } else if bpp == 2 && matches!(sub_fmt, PngPixelFormat::Ya8) {
                         let a = src[1] as u32;
                         if a == 255 {
                             dst.copy_from_slice(src);

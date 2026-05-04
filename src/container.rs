@@ -12,46 +12,40 @@
 //! for palettised PNGs, the PLTE and tRNS chunk data concatenated in that
 //! order (layout: `[IHDR (13 bytes)] [PLTE ...] [tRNS ...]`, with length
 //! prefixes as `u32` BE before each non-IHDR block so callers can parse).
+//!
+//! Whole module gated behind the `registry` feature — the container
+//! surface is framework-side only.
 
 use std::io::{Read, SeekFrom, Write};
 
 use oxideav_core::{
-    CodecId, CodecParameters, CodecResolver, Error, MediaType, Packet, PixelFormat, Result,
-    StreamInfo, TimeBase,
+    CodecId, CodecParameters, CodecResolver, MediaType, Packet, PixelFormat, Result, StreamInfo,
+    TimeBase,
 };
-use oxideav_core::{ContainerRegistry, Demuxer, Muxer, ProbeData, ReadSeek, WriteSeek};
+use oxideav_core::{ContainerRegistry, Demuxer, Error, Muxer, ProbeData, ReadSeek, WriteSeek};
 
 use crate::apng::parse_fdat;
 use crate::chunk::{write_chunk, ChunkRef, PNG_MAGIC};
 use crate::decoder::{parse_all_chunks, Ihdr};
+use crate::image::PngPixelFormat;
 
-/// Register the PNG codec (decoder + encoder).
-pub fn register_codecs(reg: &mut oxideav_core::CodecRegistry) {
-    use oxideav_core::CodecInfo;
-    use oxideav_core::{CodecCapabilities, CodecId};
-
-    let caps = CodecCapabilities::video("png_sw")
-        .with_intra_only(true)
-        .with_lossless(true)
-        .with_max_size(16384, 16384)
-        .with_pixel_formats(vec![
-            PixelFormat::Rgba,
-            PixelFormat::Rgb24,
-            PixelFormat::Gray8,
-            PixelFormat::Pal8,
-            PixelFormat::Rgb48Le,
-            PixelFormat::Rgba64Le,
-        ]);
-    reg.register(
-        CodecInfo::new(CodecId::new(crate::CODEC_ID_STR))
-            .capabilities(caps)
-            .decoder(crate::decoder::make_decoder)
-            .encoder(crate::encoder::make_encoder)
-            .encoder_options::<crate::encoder::PngEncoderOptions>(),
-    );
+/// Map a [`PngPixelFormat`] back to the framework's pixel-format enum
+/// for the demuxer's `CodecParameters`.
+fn to_core_pixel_format(pf: PngPixelFormat) -> PixelFormat {
+    match pf {
+        PngPixelFormat::Gray8 => PixelFormat::Gray8,
+        PngPixelFormat::Gray16Le => PixelFormat::Gray16Le,
+        PngPixelFormat::Rgb24 => PixelFormat::Rgb24,
+        PngPixelFormat::Rgb48Le => PixelFormat::Rgb48Le,
+        PngPixelFormat::Pal8 => PixelFormat::Pal8,
+        PngPixelFormat::Ya8 => PixelFormat::Ya8,
+        PngPixelFormat::Rgba => PixelFormat::Rgba,
+        PngPixelFormat::Rgba64Le => PixelFormat::Rgba64Le,
+    }
 }
 
-pub fn register_containers(reg: &mut ContainerRegistry) {
+/// Register the PNG / APNG container (demuxer + muxer + extensions + probe).
+pub fn register(reg: &mut ContainerRegistry) {
     reg.register_demuxer("png", open_demuxer);
     reg.register_muxer("png", open_muxer);
     reg.register_extension("png", "png");
@@ -139,7 +133,7 @@ fn open_demuxer(
     params.media_type = MediaType::Video;
     params.width = Some(ihdr.width);
     params.height = Some(ihdr.height);
-    params.pixel_format = Some(ihdr.output_pixel_format()?);
+    params.pixel_format = Some(to_core_pixel_format(ihdr.output_pixel_format()?));
     params.extradata = extradata;
 
     let time_base = TimeBase::new(1, 100);

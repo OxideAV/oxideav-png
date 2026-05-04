@@ -10,7 +10,7 @@
 //! `fdAT` starts with a 4-byte sequence number that monotonically increases
 //! across the file.
 
-use oxideav_core::{Error, Result};
+use crate::error::{PngError as Error, Result};
 
 /// `acTL` — animation control chunk (8 bytes total).
 #[derive(Clone, Copy, Debug)]

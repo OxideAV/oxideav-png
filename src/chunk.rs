@@ -11,8 +11,7 @@
 //!
 //! The 8-byte magic `\x89PNG\r\n\x1a\n` precedes the first chunk.
 
-use oxideav_core::{Error, Result};
-
+use crate::error::{PngError as Error, Result};
 use crate::filter::crc32;
 
 /// PNG file magic.

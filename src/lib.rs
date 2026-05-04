@@ -40,32 +40,51 @@
 //!   is preserved verbatim in `CodecParameters::extradata` alongside `PLTE`
 //!   so encoders can rewrite it, but the decoded `Pal8` plane itself
 //!   carries no alpha.
+//!
+//! ## Standalone (no `oxideav-core`) mode
+//!
+//! `oxideav-core` is gated behind the default-on `registry` feature. With
+//! the feature off, the crate exposes a free-standing
+//! [`decode_png`] / [`encode_png_image`] / [`decode_apng`] /
+//! [`encode_apng`] API plus crate-local [`PngImage`] / [`PngError`]
+//! types and never references `oxideav-core`. Image-library consumers
+//! depend on this crate with `default-features = false` to skip the
+//! framework dependency tree entirely.
+
+// When built without the `registry` feature, the `Decoder`/`Encoder`
+// trait wrappers don't exist so a few standalone helpers go unused on
+// that build. Suppress crate-wide rather than gating each individually.
+#![cfg_attr(not(feature = "registry"), allow(dead_code))]
 
 pub mod apng;
 pub mod chunk;
+#[cfg(feature = "registry")]
 pub mod container;
 pub mod decoder;
 pub mod encoder;
+pub mod error;
 pub mod filter;
+pub mod image;
+#[cfg(feature = "registry")]
+pub mod registry;
 
-pub use decoder::{decode_png_to_frame, CODEC_ID_STR};
-pub use encoder::{encode_single, encode_single_with_options, PngEncoderOptions};
+// Public unconditional API — works whether or not `registry` is enabled.
+pub use decoder::CODEC_ID_STR;
+pub use decoder::{decode_apng, decode_apng_info, decode_png, parse_apng, ApngInfo, Ihdr};
+pub use encoder::{
+    encode_apng, encode_apng_with_options, encode_png_image, encode_png_image_with_options,
+    PngEncoderOptions,
+};
+pub use error::{PngError, Result};
+pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat};
 
-/// Register the PNG codec (both decoder and encoder).
-pub fn register_codecs(reg: &mut oxideav_core::CodecRegistry) {
-    container::register_codecs(reg);
-}
-
-/// Register the PNG / APNG container (demuxer + muxer + extensions + probe).
-pub fn register_containers(reg: &mut oxideav_core::ContainerRegistry) {
-    container::register_containers(reg);
-}
-
-/// Combined registration: codecs + containers.
-pub fn register(
-    codecs: &mut oxideav_core::CodecRegistry,
-    containers: &mut oxideav_core::ContainerRegistry,
-) {
-    register_codecs(codecs);
-    register_containers(containers);
-}
+// Public registry-gated API — keeps the framework integration surface
+// (Decoder/Encoder/Demuxer/Muxer trait impls, `register*` helpers,
+// `decode_png_to_frame` / `encode_single*` `VideoFrame` wrappers)
+// behind the default-on `registry` feature so image-library callers can
+// build the crate without dragging in `oxideav-core`.
+#[cfg(feature = "registry")]
+pub use registry::{
+    decode_png_to_frame, encode_single, encode_single_with_options, register, register_codecs,
+    register_containers, PngDecoder, PngEncoder,
+};

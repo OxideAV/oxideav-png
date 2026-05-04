@@ -5,7 +5,7 @@
 //! operates byte-wise; `bpp` (bytes per pixel, rounded up to at least 1) is
 //! the stride used when subtracting a "left" or "upper-left" neighbour.
 
-use oxideav_core::{Error, Result};
+use crate::error::{PngError as Error, Result};
 
 /// PNG filter type byte values. See RFC 2083 §6.
 #[repr(u8)]

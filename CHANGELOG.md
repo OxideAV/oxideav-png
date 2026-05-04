@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Standalone-friendly retrofit: `oxideav-core` is now gated behind the
+  default-on `registry` feature. Image-library consumers can depend on
+  `oxideav-png` with `default-features = false` to skip the framework
+  dependency tree entirely. The standalone API exposes
+  `decode_png` / `encode_png_image` / `decode_apng` / `encode_apng`
+  plus crate-local `PngImage` / `PngError` types using std primitives
+  only. `Decoder` / `Encoder` / `Demuxer` / `Muxer` trait impls and
+  `register*` helpers stay behind the `registry` feature gate.
+
 ## [0.1.4](https://github.com/OxideAV/oxideav-png/compare/v0.1.3...v0.1.4) - 2026-05-03
 
 ### Other
