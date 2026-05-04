@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plus crate-local `PngImage` / `PngError` types using std primitives
   only. `Decoder` / `Encoder` / `Demuxer` / `Muxer` trait impls and
   `register*` helpers stay behind the `registry` feature gate.
+- New `decode_png_to_rgba(&[u8]) -> Result<RgbaBitmap>` convenience
+  entry point (and matching `RgbaBitmap` struct) for callers that just
+  want pixels to blit. Promotes every supported source pixel format
+  (`Gray8` / `Gray16Le` / `Rgb24` / `Rgb48Le` / `Pal8` with
+  `PLTE` + `tRNS` / `Ya8` / `Rgba` / `Rgba64Le`) to 8-bit RGBA with
+  α-fill for opaque sources. Eliminates the need for downstream
+  consumers (e.g. scribe's CBDT path on Pal8 emoji glyphs) to walk
+  `PLTE` + `tRNS` chunks themselves.
 
 ## [0.1.4](https://github.com/OxideAV/oxideav-png/compare/v0.1.3...v0.1.4) - 2026-05-03
 

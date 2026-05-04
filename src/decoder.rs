@@ -30,7 +30,7 @@
 //! a time per §A.8 and scattered into the final canvas.
 
 use crate::error::{PngError as Error, Result};
-use crate::image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat};
+use crate::image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
 
 // Backward-compat re-exports: existing callers reach for
 // `oxideav_png::decoder::make_decoder` and
@@ -267,6 +267,158 @@ pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
 
     let frame_pixels = decode_image_pixels(&pixels, &ihdr)?;
     build_png_image(&ihdr, &frame_pixels, plte, trns)
+}
+
+/// Decode a PNG (any supported colour type / bit depth) and promote the
+/// result to an 8-bit-per-channel [`RgbaBitmap`].
+///
+/// One-shot convenience entry point for callers that just want pixels
+/// to blit — palette resolution (`Pal8` + `PLTE` + `tRNS`), grayscale
+/// widening, 16→8 truncation and α-fill for opaque formats are all
+/// handled internally:
+///
+/// | Source format | RGBA promotion                                       |
+/// |---------------|------------------------------------------------------|
+/// | `Gray8`       | `(g,g,g,255)`                                        |
+/// | `Gray16Le`    | `(hi,hi,hi,255)` — high byte from the 16-bit sample  |
+/// | `Rgb24`       | `(r,g,b,255)`                                        |
+/// | `Rgb48Le`     | `(r_hi,g_hi,b_hi,255)` — high byte per channel       |
+/// | `Pal8`        | `PLTE` lookup + `tRNS` alpha (`255` for entries past `tRNS`'s end) |
+/// | `Ya8`         | `(g,g,g,a)`                                          |
+/// | `Rgba`        | identity — bytes copied through unchanged            |
+/// | `Rgba64Le`    | `(r_hi,g_hi,b_hi,a_hi)` — high byte per channel      |
+///
+/// For palette PNGs the `PLTE` + `tRNS` chunks are walked directly off
+/// the source bitstream so the original chunk lengths are preserved
+/// (the [`PngImage::palette`] side-channel concatenates the two without
+/// recording where the split is).
+///
+/// Standalone (no `oxideav-core`) entry point: works whether or not
+/// the `registry` feature is enabled.
+pub fn decode_png_to_rgba(buf: &[u8]) -> Result<RgbaBitmap> {
+    // Re-walk chunks so we can read the original PLTE / tRNS lengths
+    // separately. `decode_png` collapses them into a single
+    // `palette = PLTE || tRNS` blob with no explicit split point.
+    let chunks = parse_all_chunks(buf)?;
+    let mut plte: Option<&[u8]> = None;
+    let mut trns: Option<&[u8]> = None;
+    for c in &chunks {
+        if c.is_type(b"PLTE") {
+            plte = Some(c.data);
+        } else if c.is_type(b"tRNS") {
+            trns = Some(c.data);
+        }
+    }
+
+    let img = decode_png(buf)?;
+    png_image_to_rgba(&img, plte, trns)
+}
+
+/// Promote an arbitrary [`PngImage`] (any supported pixel format) into
+/// an 8-bit-per-channel [`RgbaBitmap`]. `plte` / `trns` are used only
+/// for `Pal8` source images.
+fn png_image_to_rgba(
+    img: &PngImage,
+    plte: Option<&[u8]>,
+    trns: Option<&[u8]>,
+) -> Result<RgbaBitmap> {
+    let w = img.width as usize;
+    let h = img.height as usize;
+    let n = w * h;
+    let mut out = vec![0u8; n * 4];
+
+    match img.pixel_format {
+        PngPixelFormat::Gray8 => {
+            for i in 0..n {
+                let g = img.data[i];
+                out[i * 4] = g;
+                out[i * 4 + 1] = g;
+                out[i * 4 + 2] = g;
+                out[i * 4 + 3] = 255;
+            }
+        }
+        PngPixelFormat::Gray16Le => {
+            // Stored little-endian per sample: (lo, hi). Take the high
+            // byte for an 8-bit promotion.
+            for i in 0..n {
+                let g = img.data[i * 2 + 1];
+                out[i * 4] = g;
+                out[i * 4 + 1] = g;
+                out[i * 4 + 2] = g;
+                out[i * 4 + 3] = 255;
+            }
+        }
+        PngPixelFormat::Rgb24 => {
+            for i in 0..n {
+                out[i * 4] = img.data[i * 3];
+                out[i * 4 + 1] = img.data[i * 3 + 1];
+                out[i * 4 + 2] = img.data[i * 3 + 2];
+                out[i * 4 + 3] = 255;
+            }
+        }
+        PngPixelFormat::Rgb48Le => {
+            for i in 0..n {
+                out[i * 4] = img.data[i * 6 + 1];
+                out[i * 4 + 1] = img.data[i * 6 + 3];
+                out[i * 4 + 2] = img.data[i * 6 + 5];
+                out[i * 4 + 3] = 255;
+            }
+        }
+        PngPixelFormat::Pal8 => {
+            let plte = plte.ok_or_else(|| {
+                Error::invalid("PNG: Pal8 image missing PLTE chunk for RGBA promotion")
+            })?;
+            if plte.len() % 3 != 0 {
+                return Err(Error::invalid(format!(
+                    "PNG: PLTE chunk length {} is not a multiple of 3",
+                    plte.len()
+                )));
+            }
+            let entries = plte.len() / 3;
+            let trns = trns.unwrap_or(&[]);
+            for i in 0..n {
+                let idx = img.data[i] as usize;
+                if idx >= entries {
+                    return Err(Error::invalid(format!(
+                        "PNG: palette index {idx} out of bounds (PLTE has {entries} entries)"
+                    )));
+                }
+                out[i * 4] = plte[idx * 3];
+                out[i * 4 + 1] = plte[idx * 3 + 1];
+                out[i * 4 + 2] = plte[idx * 3 + 2];
+                // tRNS (per spec): leading entries carry alpha; all
+                // entries past tRNS.len() are fully opaque.
+                out[i * 4 + 3] = if idx < trns.len() { trns[idx] } else { 255 };
+            }
+        }
+        PngPixelFormat::Ya8 => {
+            for i in 0..n {
+                let g = img.data[i * 2];
+                let a = img.data[i * 2 + 1];
+                out[i * 4] = g;
+                out[i * 4 + 1] = g;
+                out[i * 4 + 2] = g;
+                out[i * 4 + 3] = a;
+            }
+        }
+        PngPixelFormat::Rgba => {
+            out.copy_from_slice(&img.data);
+        }
+        PngPixelFormat::Rgba64Le => {
+            for i in 0..n {
+                out[i * 4] = img.data[i * 8 + 1];
+                out[i * 4 + 1] = img.data[i * 8 + 3];
+                out[i * 4 + 2] = img.data[i * 8 + 5];
+                out[i * 4 + 3] = img.data[i * 8 + 7];
+            }
+        }
+    }
+
+    Ok(RgbaBitmap {
+        width: img.width,
+        height: img.height,
+        data: out,
+    })
 }
 
 /// Pack the raw decoded byte plane into a [`PngImage`] with the IHDR's

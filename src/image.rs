@@ -106,3 +106,27 @@ pub struct ApngFrameImage {
     /// Frame display duration in centiseconds (1/100 s).
     pub delay_cs: u32,
 }
+
+/// 8-bit-per-channel RGBA bitmap returned by
+/// [`crate::decode_png_to_rgba`].
+///
+/// Always `width * 4` bytes per row, tightly packed (no stride padding).
+/// Channel order is `R, G, B, A`. Opaque source pixel formats
+/// (`Gray8` / `Gray16Le` / `Rgb24` / `Rgb48Le` without `tRNS`) are
+/// promoted to RGBA with `α = 255`.
+#[derive(Clone, Debug)]
+pub struct RgbaBitmap {
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// `width * height * 4` bytes, row-major, channel order `R G B A`.
+    pub data: Vec<u8>,
+}
+
+impl RgbaBitmap {
+    /// Stride (bytes per row) — always `width * 4`.
+    pub fn stride(&self) -> usize {
+        self.width as usize * 4
+    }
+}

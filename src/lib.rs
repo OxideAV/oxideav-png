@@ -70,13 +70,15 @@ pub mod registry;
 
 // Public unconditional API — works whether or not `registry` is enabled.
 pub use decoder::CODEC_ID_STR;
-pub use decoder::{decode_apng, decode_apng_info, decode_png, parse_apng, ApngInfo, Ihdr};
+pub use decoder::{
+    decode_apng, decode_apng_info, decode_png, decode_png_to_rgba, parse_apng, ApngInfo, Ihdr,
+};
 pub use encoder::{
     encode_apng, encode_apng_with_options, encode_png_image, encode_png_image_with_options,
     PngEncoderOptions,
 };
 pub use error::{PngError, Result};
-pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat};
+pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
 
 // Public registry-gated API — keeps the framework integration surface
 // (Decoder/Encoder/Demuxer/Muxer trait impls, `register*` helpers,
