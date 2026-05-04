@@ -54,9 +54,7 @@ pub const CODEC_ID_STR: &str = "png";
 /// [`decode_apng_info`] (standalone) or
 /// [`crate::registry::decode_png_to_frame`] (framework-side).
 #[cfg(feature = "registry")]
-pub fn decode_apng_frames(
-    info: &ApngInfo,
-) -> oxideav_core::Result<Vec<oxideav_core::VideoFrame>> {
+pub fn decode_apng_frames(info: &ApngInfo) -> oxideav_core::Result<Vec<oxideav_core::VideoFrame>> {
     let img = decode_apng_info(info)?;
     let mut out = Vec::with_capacity(img.frames.len());
     let mut pts: i64 = 0;
