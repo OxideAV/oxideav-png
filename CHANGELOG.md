@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/OxideAV/oxideav-png/compare/v0.1.4...v0.1.5) - 2026-05-04
+
+### Added
+
+- decode_png_to_rgba convenience helper
+- standalone-friendly retrofit (registry feature gate)
+
+### Fixed
+
+- *(clippy)* underscore-prefix unused height arg in rgba_video_frame
+
+### Other
+
+- pending cleanup after standalone refactor
+- add external libpng cross-roundtrip (640x480 RGBA)
+- add cargo-fuzz harness mirroring oxideav-webp
+
 ### Added
 
 - Standalone-friendly retrofit: `oxideav-core` is now gated behind the
