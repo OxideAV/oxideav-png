@@ -406,6 +406,8 @@ pub fn register(ctx: &mut RuntimeContext) {
     register_containers(&mut ctx.containers);
 }
 
+oxideav_core::register!("png", register);
+
 #[cfg(test)]
 mod register_tests {
     use super::*;
