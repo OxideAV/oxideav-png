@@ -21,6 +21,7 @@ use std::collections::VecDeque;
 
 use oxideav_core::Decoder;
 use oxideav_core::Encoder;
+use oxideav_core::RuntimeContext;
 use oxideav_core::{
     parse_options, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters,
     CodecRegistry, ContainerRegistry, Frame, MediaType, OptionField, OptionKind, OptionValue,
@@ -397,8 +398,35 @@ pub fn register_containers(reg: &mut ContainerRegistry) {
     crate::container::register(reg);
 }
 
-/// Combined registration: codecs + containers.
-pub fn register(codecs: &mut CodecRegistry, containers: &mut ContainerRegistry) {
-    register_codecs(codecs);
-    register_containers(containers);
+/// Unified registration entry point — installs the PNG codec into the
+/// codec sub-registry and the PNG/APNG container into the container
+/// sub-registry of the supplied [`RuntimeContext`].
+pub fn register(ctx: &mut RuntimeContext) {
+    register_codecs(&mut ctx.codecs);
+    register_containers(&mut ctx.containers);
+}
+
+#[cfg(test)]
+mod register_tests {
+    use super::*;
+
+    #[test]
+    fn register_via_runtime_context_installs_both_sides() {
+        let mut ctx = RuntimeContext::new();
+        register(&mut ctx);
+        let id = CodecId::new(CODEC_ID_STR);
+        assert!(
+            ctx.codecs.has_decoder(&id),
+            "PNG decoder factory not installed via RuntimeContext"
+        );
+        assert!(
+            ctx.codecs.has_encoder(&id),
+            "PNG encoder factory not installed via RuntimeContext"
+        );
+        assert_eq!(
+            ctx.containers.container_for_extension("png"),
+            Some("png"),
+            "PNG container extension not installed via RuntimeContext"
+        );
+    }
 }
