@@ -87,6 +87,6 @@ pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap}
 // build the crate without dragging in `oxideav-core`.
 #[cfg(feature = "registry")]
 pub use registry::{
-    decode_png_to_frame, encode_single, encode_single_with_options, register, register_codecs,
-    register_containers, PngDecoder, PngEncoder,
+    __oxideav_entry, decode_png_to_frame, encode_single, encode_single_with_options, register,
+    register_codecs, register_containers, PngDecoder, PngEncoder,
 };
