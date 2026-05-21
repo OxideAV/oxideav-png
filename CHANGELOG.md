@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `metadata` module: `Sbit`, `Phys`, `PhysUnit`, `Time`, `PngMetadata`
+  with round-trip parsers + encoders for the `sBIT`, `pHYs`, and `tIME`
+  ancillary chunks (RFC 2083 §4.2.5 / §4.2.6 / §4.2.8).
+- `parse_metadata(&[u8]) -> PngMetadata` standalone entry point.
+- `PngEncoderOptions::metadata: Option<PngMetadata>` so encoders can
+  embed any subset of the three chunks at spec-compliant positions
+  (sBIT before PLTE+IDAT; pHYs / tIME before IDAT).
+
 ## [0.1.6](https://github.com/OxideAV/oxideav-png/compare/v0.1.5...v0.1.6) - 2026-05-06
 
 ### Other

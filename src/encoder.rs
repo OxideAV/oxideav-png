@@ -16,6 +16,7 @@
 
 use crate::error::{PngError as Error, Result};
 use crate::image::{PngImage, PngPixelFormat};
+use crate::metadata::PngMetadata;
 
 // Backward-compat re-export: existing callers reach for
 // `oxideav_png::encoder::make_encoder` to construct a framework-side
@@ -39,6 +40,12 @@ pub struct PngEncoderOptions {
     /// Compressed payload gets ~5–15% larger but the image is
     /// progressively renderable.
     pub interlace: bool,
+    /// Optional `sBIT` / `pHYs` / `tIME` ancillary metadata to embed.
+    /// Each `Some(_)` field is written; chunk ordering follows RFC
+    /// 2083 §4.3 (`sBIT` before `PLTE` + `IDAT`; `pHYs` before `IDAT`;
+    /// `tIME` is unrestricted but we put it before `IDAT` too for
+    /// determinism). `None` skips the chunk entirely.
+    pub metadata: Option<PngMetadata>,
 }
 
 // ---- Single-image encode -----------------------------------------------
@@ -75,15 +82,46 @@ pub fn encode_png_image_with_options(
     let mut out = Vec::with_capacity(64 + idat.len());
     out.extend_from_slice(&PNG_MAGIC);
     write_chunk(&mut out, b"IHDR", &ihdr.to_bytes());
+    // sBIT must precede PLTE + IDAT (RFC 2083 §4.3 / §4.2.6).
+    write_metadata_before_plte(&mut out, opts.metadata.as_ref());
     if let Some(p) = plte_bytes.as_deref() {
         write_chunk(&mut out, b"PLTE", p);
     }
     if let Some(t) = trns_bytes.as_deref() {
         write_chunk(&mut out, b"tRNS", t);
     }
+    // pHYs + tIME go between PLTE/tRNS and IDAT (pHYs MUST be before
+    // IDAT per RFC 2083 §4.2.5; tIME has no ordering constraint but we
+    // bucket it here for determinism).
+    write_metadata_before_idat(&mut out, opts.metadata.as_ref());
     write_chunk(&mut out, b"IDAT", &idat);
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
+}
+
+/// Emit `sBIT` (the only metadata chunk RFC 2083 §4.3 places
+/// "before PLTE and IDAT").
+fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
+    let Some(meta) = meta else {
+        return;
+    };
+    if let Some(sbit) = &meta.sbit {
+        write_chunk(out, b"sBIT", &sbit.to_bytes());
+    }
+}
+
+/// Emit `pHYs` and `tIME` — both go between any PLTE/tRNS pair and
+/// the IDAT stream.
+fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
+    let Some(meta) = meta else {
+        return;
+    };
+    if let Some(phys) = &meta.phys {
+        write_chunk(out, b"pHYs", &phys.to_bytes());
+    }
+    if let Some(time) = &meta.time {
+        write_chunk(out, b"tIME", &time.to_bytes());
+    }
 }
 
 /// IHDR + row byte count + optional PLTE / tRNS chunk payloads.
@@ -350,12 +388,17 @@ pub fn encode_apng_with_options(
     out.extend_from_slice(&PNG_MAGIC);
     write_chunk(&mut out, b"IHDR", &ihdr.to_bytes());
     write_chunk(&mut out, b"acTL", &actl.to_bytes());
+    // sBIT precedes PLTE + IDAT per RFC 2083 §4.3.
+    write_metadata_before_plte(&mut out, opts.metadata.as_ref());
     if let Some(p) = plte.as_deref() {
         write_chunk(&mut out, b"PLTE", p);
     }
     if let Some(t) = trns.as_deref() {
         write_chunk(&mut out, b"tRNS", t);
     }
+    // pHYs / tIME precede IDAT (and APNG's fcTL/fdAT stream that
+    // bracket subsequent frames).
+    write_metadata_before_idat(&mut out, opts.metadata.as_ref());
 
     let mut seq: u32 = 0;
     for (idx, frame) in frames.iter().enumerate() {

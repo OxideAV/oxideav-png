@@ -31,10 +31,13 @@
 //!
 //! Not implemented:
 //! * Sub-byte encode (decode only — encoder always writes 8/16-bit)
+//! * Round-tripped metadata: `sBIT`, `pHYs`, `tIME` — surfaced via
+//!   [`parse_metadata`] on decode and re-emitted by the encoder when
+//!   [`PngEncoderOptions::metadata`] is populated.
 //! * Colour management / metadata chunks (`cICP`, `sRGB`, `gAMA`, `cHRM`,
-//!   `iCCP`, `tEXt`, `zTXt`, `iTXt`, `tIME`, `pHYs`, `sBIT`, `bKGD`, `hIST`,
-//!   `sPLT`). CRC is verified on read and then they are dropped — they are
-//!   not round-tripped through the container and not surfaced on decode.
+//!   `iCCP`, `tEXt`, `zTXt`, `iTXt`, `bKGD`, `hIST`, `sPLT`). CRC is
+//!   verified on read and then they are dropped — they are not
+//!   round-tripped through the container and not surfaced on decode.
 //! * `tRNS` alpha application to decoded `Gray8` / `Gray16Le` / `Rgb24` /
 //!   `Rgb48Le` pixels. For colour type 3 (palette), `tRNS` per-entry alpha
 //!   is preserved verbatim in `CodecParameters::extradata` alongside `PLTE`
@@ -65,13 +68,15 @@ pub mod encoder;
 pub mod error;
 pub mod filter;
 pub mod image;
+pub mod metadata;
 #[cfg(feature = "registry")]
 pub mod registry;
 
 // Public unconditional API — works whether or not `registry` is enabled.
 pub use decoder::CODEC_ID_STR;
 pub use decoder::{
-    decode_apng, decode_apng_info, decode_png, decode_png_to_rgba, parse_apng, ApngInfo, Ihdr,
+    decode_apng, decode_apng_info, decode_png, decode_png_to_rgba, parse_apng, parse_metadata,
+    ApngInfo, Ihdr,
 };
 pub use encoder::{
     encode_apng, encode_apng_with_options, encode_png_image, encode_png_image_with_options,
@@ -79,6 +84,7 @@ pub use encoder::{
 };
 pub use error::{PngError, Result};
 pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
+pub use metadata::{Phys, PhysUnit, PngMetadata, Sbit, Time};
 
 // Public registry-gated API — keeps the framework integration surface
 // (Decoder/Encoder/Demuxer/Muxer trait impls, `register*` helpers,

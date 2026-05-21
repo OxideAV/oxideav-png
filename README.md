@@ -28,6 +28,26 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
 - Per-row filter heuristic (min-sum-abs-delta per §12.8)
 - APNG output when multiple frames submitted or `frame_rate` is set
 
+## Metadata round-trip
+
+- `sBIT` (significant bits, RFC 2083 §4.2.6) — per-channel; variant matches
+  the IHDR colour type (`Grayscale` / `Rgb` / `GrayscaleAlpha` / `Rgba`).
+  Bounds-checked against `sample_depth` (8 for indexed, IHDR bit-depth
+  otherwise).
+- `pHYs` (physical pixel dimensions, RFC 2083 §4.2.5) — `Metre` or
+  `Unknown` unit; `.dpi()` helper applies the spec's 0.0254 m/inch
+  conversion.
+- `tIME` (last-modification time, RFC 2083 §4.2.8) — UTC; accepts the
+  `second = 60` leap-second sentinel, rejects 61.
+
+Decode: [`parse_metadata`] returns a [`PngMetadata`] with the three
+optional fields populated for any chunks present. Encode:
+[`PngEncoderOptions`]`::metadata` holds the same struct; populated
+fields are emitted at spec-compliant chunk positions (sBIT before
+`PLTE`/`IDAT`; pHYs and tIME before `IDAT`). Duplicates of any of the
+three on decode are rejected per the "Multiple OK? No" rule in RFC
+2083 §4.3.
+
 ## Not preserved
 
 - Adam7 interlaced encode (decode only — encoder always writes non-interlaced)
@@ -35,9 +55,9 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
 - `tRNS` alpha applied to `Gray*` / `Rgb*` pixels on decode (the chunk is
   parsed + CRC-validated but not blended into the output plane; for `Pal8`
   the per-entry alpha is still carried through `extradata`)
-- Colour-management + metadata chunks: `cICP`, `sRGB`, `gAMA`, `cHRM`,
-  `iCCP`, `tEXt`, `zTXt`, `iTXt`, `tIME`, `pHYs`, `sBIT`, `bKGD`, `hIST`,
-  `sPLT`. Each is CRC-checked on read and then dropped
+- Colour-management + remaining metadata chunks: `cICP`, `sRGB`, `gAMA`,
+  `cHRM`, `iCCP`, `tEXt`, `zTXt`, `iTXt`, `bKGD`, `hIST`, `sPLT`. Each
+  is CRC-checked on read and then dropped
 
 ## Usage
 

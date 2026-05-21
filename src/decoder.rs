@@ -44,6 +44,7 @@ use miniz_oxide::inflate::decompress_to_vec_zlib;
 use crate::apng::{parse_fdat, Actl, Blend, Disposal, Fctl};
 use crate::chunk::{read_chunk, ChunkRef, PNG_MAGIC};
 use crate::filter::{unfilter_row, FilterType};
+use crate::metadata::{Phys, PngMetadata, Sbit, Time};
 
 pub const CODEC_ID_STR: &str = "png";
 
@@ -211,6 +212,64 @@ pub(crate) fn parse_all_chunks(buf: &[u8]) -> Result<Vec<ChunkRef<'_>>> {
         }
         if pos >= buf.len() {
             return Err(Error::invalid("PNG: stream ended before IEND"));
+        }
+    }
+    Ok(out)
+}
+
+/// Extract round-trippable PNG ancillary metadata (`sBIT`, `pHYs`,
+/// `tIME`) from a PNG / APNG file.
+///
+/// Standalone (no `oxideav-core`) entry point: works whether or not
+/// the `registry` feature is enabled. Returns
+/// [`PngMetadata::default`] (all-`None`) when none of the supported
+/// chunks are present. Reports an `InvalidData` error if any supported
+/// chunk appears more than once — RFC 2083 §4.3 marks `sBIT`, `pHYs`,
+/// and `tIME` as "Multiple OK? No".
+///
+/// CRC validation is performed by the underlying chunk walker
+/// ([`crate::chunk::read_chunk`]) so a tampered chunk fails before
+/// reaching this parser.
+pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
+    let chunks = parse_all_chunks(buf)?;
+    let ihdr = Ihdr::parse(
+        chunks
+            .iter()
+            .find(|c| c.is_type(b"IHDR"))
+            .ok_or_else(|| Error::invalid("PNG: missing IHDR"))?
+            .data,
+    )?;
+    // sBIT sample-depth ceiling: 8 for indexed (RFC 2083 §4.2.6 final
+    // paragraph "the sample depth, which is 8 for indexed-color images,
+    // and the bit depth given in IHDR for other color types").
+    let sample_depth = if ihdr.colour_type == 3 {
+        8
+    } else {
+        ihdr.bit_depth
+    };
+
+    let mut out = PngMetadata::default();
+    for c in &chunks {
+        match &c.chunk_type {
+            b"sBIT" => {
+                if out.sbit.is_some() {
+                    return Err(Error::invalid("PNG: duplicate sBIT chunk"));
+                }
+                out.sbit = Some(Sbit::parse(c.data, ihdr.colour_type, sample_depth)?);
+            }
+            b"pHYs" => {
+                if out.phys.is_some() {
+                    return Err(Error::invalid("PNG: duplicate pHYs chunk"));
+                }
+                out.phys = Some(Phys::parse(c.data)?);
+            }
+            b"tIME" => {
+                if out.time.is_some() {
+                    return Err(Error::invalid("PNG: duplicate tIME chunk"));
+                }
+                out.time = Some(Time::parse(c.data)?);
+            }
+            _ => {}
         }
     }
     Ok(out)
