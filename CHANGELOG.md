@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `PngEncoderOptions::metadata: Option<PngMetadata>` so encoders can
   embed any subset of the three chunks at spec-compliant positions
   (sBIT before PLTE+IDAT; pHYs / tIME before IDAT).
+- `Bkgd` (`Grayscale(u16)` / `Rgb(u16,u16,u16)` / `Palette(u8)`) and
+  `Hist { frequencies: Vec<u16> }` covering the `bKGD` and `hIST`
+  ancillary chunks (RFC 2083 §4.2.1 / §4.2.4, W3C PNG3 §11.3.4.1 /
+  §11.3.4.2). Both round-trip through `PngMetadata` and emit at the
+  spec-mandated "after PLTE, before IDAT" position. `bKGD` grayscale
+  / RGB samples are range-checked against `(1 << IHDR.bit_depth) - 1`;
+  indexed `bKGD` rejects palette indices ≥ the PLTE entry count; `hIST`
+  decode rejects orphan chunks (no `PLTE`) and length mismatches.
 
 ## [0.1.6](https://github.com/OxideAV/oxideav-png/compare/v0.1.5...v0.1.6) - 2026-05-06
 

@@ -40,11 +40,17 @@ pub struct PngEncoderOptions {
     /// Compressed payload gets ~5–15% larger but the image is
     /// progressively renderable.
     pub interlace: bool,
-    /// Optional `sBIT` / `pHYs` / `tIME` ancillary metadata to embed.
-    /// Each `Some(_)` field is written; chunk ordering follows RFC
-    /// 2083 §4.3 (`sBIT` before `PLTE` + `IDAT`; `pHYs` before `IDAT`;
-    /// `tIME` is unrestricted but we put it before `IDAT` too for
-    /// determinism). `None` skips the chunk entirely.
+    /// Optional `sBIT` / `pHYs` / `tIME` / `bKGD` / `hIST` ancillary
+    /// metadata to embed. Each `Some(_)` field is written; chunk
+    /// ordering follows RFC 2083 §4.3 / W3C PNG3 §5.6 Table 1:
+    ///
+    /// * `sBIT` — before `PLTE` and `IDAT`.
+    /// * `bKGD` / `hIST` — after `PLTE`, before `IDAT`.
+    /// * `pHYs` — before `IDAT`.
+    /// * `tIME` — unconstrained; we emit it before `IDAT` for
+    ///   determinism.
+    ///
+    /// `None` skips the chunk entirely.
     pub metadata: Option<PngMetadata>,
 }
 
@@ -110,12 +116,19 @@ fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
     }
 }
 
-/// Emit `pHYs` and `tIME` — both go between any PLTE/tRNS pair and
-/// the IDAT stream.
+/// Emit `bKGD`, `hIST`, `pHYs`, `tIME` — all four go between any
+/// `PLTE`/`tRNS` pair and the `IDAT` stream. `bKGD` + `hIST` are
+/// emitted first per W3C PNG3 §5.6 ("After PLTE; before IDAT").
 fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
     let Some(meta) = meta else {
         return;
     };
+    if let Some(bkgd) = &meta.bkgd {
+        write_chunk(out, b"bKGD", &bkgd.to_bytes());
+    }
+    if let Some(hist) = &meta.hist {
+        write_chunk(out, b"hIST", &hist.to_bytes());
+    }
     if let Some(phys) = &meta.phys {
         write_chunk(out, b"pHYs", &phys.to_bytes());
     }

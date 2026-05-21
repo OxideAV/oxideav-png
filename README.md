@@ -39,14 +39,23 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   conversion.
 - `tIME` (last-modification time, RFC 2083 §4.2.8) — UTC; accepts the
   `second = 60` leap-second sentinel, rejects 61.
+- `bKGD` (background colour, RFC 2083 §4.2.1 / W3C PNG3 §11.3.4.1) —
+  per-IHDR-colour-type variant (`Grayscale(u16)` / `Rgb(u16,u16,u16)` /
+  `Palette(u8)`). Grayscale + RGB samples are range-checked against
+  `(1 << IHDR.bit_depth) - 1` so a sub-16-bit image can't carry stray
+  high bits (PNG3 §11.3.4.1 final paragraph). Indexed `bKGD` indices are
+  bounds-checked against the `PLTE` entry count.
+- `hIST` (palette histogram, RFC 2083 §4.2.4 / W3C PNG3 §11.3.4.2) —
+  one `u16` per `PLTE` entry; the entry count must match exactly.
+  Requires `PLTE` to be present (decode rejects orphan `hIST`).
 
-Decode: [`parse_metadata`] returns a [`PngMetadata`] with the three
-optional fields populated for any chunks present. Encode:
+Decode: [`parse_metadata`] returns a [`PngMetadata`] with each
+supported field populated for any chunks present. Encode:
 [`PngEncoderOptions`]`::metadata` holds the same struct; populated
-fields are emitted at spec-compliant chunk positions (sBIT before
-`PLTE`/`IDAT`; pHYs and tIME before `IDAT`). Duplicates of any of the
-three on decode are rejected per the "Multiple OK? No" rule in RFC
-2083 §4.3.
+fields are emitted at spec-compliant chunk positions (`sBIT` before
+`PLTE`/`IDAT`; `bKGD` / `hIST` after `PLTE`, before `IDAT`; `pHYs`
+and `tIME` before `IDAT`). Duplicates of any supported chunk on decode
+are rejected per the "Multiple OK? No" rule in RFC 2083 §4.3.
 
 ## Not preserved
 
@@ -56,8 +65,8 @@ three on decode are rejected per the "Multiple OK? No" rule in RFC
   parsed + CRC-validated but not blended into the output plane; for `Pal8`
   the per-entry alpha is still carried through `extradata`)
 - Colour-management + remaining metadata chunks: `cICP`, `sRGB`, `gAMA`,
-  `cHRM`, `iCCP`, `tEXt`, `zTXt`, `iTXt`, `bKGD`, `hIST`, `sPLT`. Each
-  is CRC-checked on read and then dropped
+  `cHRM`, `iCCP`, `tEXt`, `zTXt`, `iTXt`, `sPLT`, `eXIf`. Each is
+  CRC-checked on read and then dropped
 
 ## Usage
 

@@ -1,8 +1,9 @@
-//! PNG ancillary metadata chunks — `sBIT`, `pHYs`, `tIME`.
+//! PNG ancillary metadata chunks — `sBIT`, `pHYs`, `tIME`, `bKGD`, `hIST`.
 //!
-//! All three are short, fixed-layout chunks with no embedded compression and
-//! no cross-chunk dependencies, which makes them the natural first pass at
-//! round-tripping PNG metadata through this codec.
+//! All are short, fixed-layout chunks with no embedded compression and
+//! no cross-chunk dependencies (with the single exception that `hIST`
+//! must accompany a `PLTE` and match its length), which makes them the
+//! natural first pass at round-tripping PNG metadata through this codec.
 //!
 //! Spec references (RFC 2083 = PNG 1.0; the W3C PNG 3rd edition preserves
 //! the same layouts):
@@ -34,9 +35,29 @@
 //!   `u8`). UTC; `second` may legally be `60` for a leap second. No
 //!   ordering constraint.
 //!
-//! All three chunks may freely appear in the file; the wider PNG spec only
-//! says "may appear at most once". We enforce that on parse — duplicates
-//! are an `InvalidData` error.
+//! - `bKGD` — RFC 2083 §4.2.1 / W3C PNG3 §11.3.4.1 "Background color".
+//!   Layout depends on the IHDR colour type:
+//!
+//!   | Colour type      | Payload                                  | Length  |
+//!   |------------------|------------------------------------------|---------|
+//!   | 0, 4 (grey ±α)   | `grey: u16 BE`                           | 2 bytes |
+//!   | 2, 6 (RGB ±α)    | `r: u16 BE, g: u16 BE, b: u16 BE`        | 6 bytes |
+//!   | 3 (indexed)      | `palette_index: u8`                      | 1 byte  |
+//!
+//!   For sub-16-bit images "the least significant bits are used. Encoders
+//!   should set the other bits to 0, and decoders must mask the other bits
+//!   to 0 before the value is used" (W3C PNG3 §11.3.4.1 final paragraph).
+//!   `bKGD` must follow `PLTE` and precede the first `IDAT`. Multiple
+//!   `bKGD` chunks are forbidden.
+//!
+//! - `hIST` — RFC 2083 §4.2.4 / W3C PNG3 §11.3.4.2 "Image histogram".
+//!   `2 × N` bytes, `N = PLTE entry count`. Each `u16 BE` is the
+//!   approximate usage count for the matching palette index; only meaningful
+//!   when a `PLTE` is present. `hIST` must follow `PLTE` and precede the
+//!   first `IDAT`. Multiple `hIST` chunks are forbidden.
+//!
+//! All chunks here are marked "Multiple OK? No" in the PNG spec; we
+//! enforce that on parse — duplicates are an `InvalidData` error.
 
 use crate::error::{PngError as Error, Result};
 
@@ -264,6 +285,134 @@ impl Time {
     }
 }
 
+/// `bKGD` payload (RFC 2083 §4.2.1 / W3C PNG3 §11.3.4.1).
+///
+/// The variant matches the IHDR colour type. Grayscale and RGB values are
+/// stored as `u16` regardless of the image bit depth; for sub-16-bit
+/// images the value occupies the low-order bits and the high-order bits
+/// **must** be zero per W3C PNG3 §11.3.4.1 final paragraph. Parse
+/// enforces that constraint when the caller supplies the IHDR bit depth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bkgd {
+    /// Colour types 0 and 4 (grayscale, ±α): grey level.
+    Grayscale(u16),
+    /// Colour types 2 and 6 (RGB, ±α): RGB samples.
+    Rgb(u16, u16, u16),
+    /// Colour type 3 (indexed): palette index.
+    Palette(u8),
+}
+
+impl Bkgd {
+    /// Parse a `bKGD` payload. `colour_type` selects the variant per
+    /// W3C PNG3 §11.3.4.1 Table 22. `bit_depth` is the IHDR bit depth;
+    /// it bounds-checks grayscale / RGB samples so that high bits beyond
+    /// `bit_depth` are zero (PNG3 §11.3.4.1 final paragraph: "decoders
+    /// must mask the other bits to 0 before the value is used" — we
+    /// reject rather than silently mask so the encoder can't fabricate
+    /// payloads that disagree with IHDR).
+    pub fn parse(data: &[u8], colour_type: u8, bit_depth: u8) -> Result<Self> {
+        let expected = match colour_type {
+            0 | 4 => 2,
+            2 | 6 => 6,
+            3 => 1,
+            other => {
+                return Err(Error::invalid(format!(
+                    "PNG bKGD: colour type {other} has no defined layout"
+                )))
+            }
+        };
+        if data.len() != expected {
+            return Err(Error::invalid(format!(
+                "PNG bKGD: colour type {colour_type} expected {expected} bytes, got {}",
+                data.len()
+            )));
+        }
+        // Cap = (2^bit_depth) - 1, computed in u32 so 16-bit doesn't
+        // overflow u16's MAX.
+        let cap_u16 = || -> u16 {
+            if bit_depth >= 16 {
+                u16::MAX
+            } else {
+                ((1u32 << bit_depth) - 1) as u16
+            }
+        };
+        let check_sample = |v: u16| -> Result<u16> {
+            let cap = cap_u16();
+            if v > cap {
+                return Err(Error::invalid(format!(
+                    "PNG bKGD: sample {v} exceeds 2^{bit_depth} - 1 ({cap})"
+                )));
+            }
+            Ok(v)
+        };
+        Ok(match colour_type {
+            0 | 4 => Self::Grayscale(check_sample(u16::from_be_bytes([data[0], data[1]]))?),
+            2 | 6 => Self::Rgb(
+                check_sample(u16::from_be_bytes([data[0], data[1]]))?,
+                check_sample(u16::from_be_bytes([data[2], data[3]]))?,
+                check_sample(u16::from_be_bytes([data[4], data[5]]))?,
+            ),
+            3 => Self::Palette(data[0]),
+            _ => unreachable!(),
+        })
+    }
+
+    /// Emit the on-wire payload (1 / 2 / 6 bytes depending on variant).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match *self {
+            Self::Grayscale(g) => g.to_be_bytes().to_vec(),
+            Self::Rgb(r, g, b) => {
+                let mut out = Vec::with_capacity(6);
+                out.extend_from_slice(&r.to_be_bytes());
+                out.extend_from_slice(&g.to_be_bytes());
+                out.extend_from_slice(&b.to_be_bytes());
+                out
+            }
+            Self::Palette(idx) => vec![idx],
+        }
+    }
+}
+
+/// `hIST` payload (RFC 2083 §4.2.4 / W3C PNG3 §11.3.4.2).
+///
+/// One `u16` frequency per `PLTE` entry. Zero means "palette index unused
+/// in the image"; otherwise the value is the encoder's chosen proportional
+/// count (any scale, RFC 2083 §4.2.4 "the exact scale factor is chosen by
+/// the encoder").
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Hist {
+    pub frequencies: Vec<u16>,
+}
+
+impl Hist {
+    /// Parse an `hIST` chunk. `palette_entries` is the number of `PLTE`
+    /// entries the host PNG declares; spec requires "exactly one entry
+    /// for each entry in the PLTE chunk" (W3C PNG3 §11.3.4.2).
+    pub fn parse(data: &[u8], palette_entries: usize) -> Result<Self> {
+        if data.len() != palette_entries * 2 {
+            return Err(Error::invalid(format!(
+                "PNG hIST: expected {} bytes for {palette_entries} palette entries, got {}",
+                palette_entries * 2,
+                data.len()
+            )));
+        }
+        let mut frequencies = Vec::with_capacity(palette_entries);
+        for chunk in data.chunks_exact(2) {
+            frequencies.push(u16::from_be_bytes([chunk[0], chunk[1]]));
+        }
+        Ok(Self { frequencies })
+    }
+
+    /// Emit the on-wire payload (`2 × len()` bytes).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.frequencies.len() * 2);
+        for f in &self.frequencies {
+            out.extend_from_slice(&f.to_be_bytes());
+        }
+        out
+    }
+}
+
 /// Bundle of metadata chunks that round-trip through the encoder.
 ///
 /// Populated by [`crate::parse_metadata`] on decode and consumed by
@@ -274,13 +423,19 @@ pub struct PngMetadata {
     pub sbit: Option<Sbit>,
     pub phys: Option<Phys>,
     pub time: Option<Time>,
+    pub bkgd: Option<Bkgd>,
+    pub hist: Option<Hist>,
 }
 
 impl PngMetadata {
     /// True when no metadata chunks are populated. Used by the encoder
     /// as a quick "nothing to emit" check.
     pub fn is_empty(&self) -> bool {
-        self.sbit.is_none() && self.phys.is_none() && self.time.is_none()
+        self.sbit.is_none()
+            && self.phys.is_none()
+            && self.time.is_none()
+            && self.bkgd.is_none()
+            && self.hist.is_none()
     }
 }
 
@@ -452,5 +607,113 @@ mod tests {
             ..Default::default()
         };
         assert!(!m2.is_empty());
+        let m3 = PngMetadata {
+            bkgd: Some(Bkgd::Palette(0)),
+            ..Default::default()
+        };
+        assert!(!m3.is_empty());
+        let m4 = PngMetadata {
+            hist: Some(Hist {
+                frequencies: vec![1, 2, 3],
+            }),
+            ..Default::default()
+        };
+        assert!(!m4.is_empty());
+    }
+
+    #[test]
+    fn bkgd_grayscale_roundtrip() {
+        // Colour type 0, 8-bit: grey level 200 in low byte, MSB zero.
+        let b = Bkgd::Grayscale(200);
+        let raw = b.to_bytes();
+        assert_eq!(raw, vec![0x00, 0xC8]); // big-endian 0x00C8 == 200.
+        let back = Bkgd::parse(&raw, 0, 8).unwrap();
+        assert_eq!(back, b);
+    }
+
+    #[test]
+    fn bkgd_grayscale_16bit_full_range() {
+        // 16-bit grey 0xFFFF is fine.
+        let b = Bkgd::Grayscale(0xFFFF);
+        let raw = b.to_bytes();
+        let back = Bkgd::parse(&raw, 0, 16).unwrap();
+        assert_eq!(back, b);
+    }
+
+    #[test]
+    fn bkgd_grayscale_rejects_value_above_bitdepth_cap() {
+        // 8-bit cap is 0xFF; 0x0100 must be rejected per PNG3
+        // §11.3.4.1 "decoders must mask the other bits to 0".
+        let raw = 0x0100u16.to_be_bytes();
+        let err = Bkgd::parse(&raw, 0, 8).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn bkgd_rgb_roundtrip_8bit() {
+        // 8-bit RGB background ⇒ payload is `00 R 00 G 00 B`.
+        let b = Bkgd::Rgb(0x80, 0x40, 0x10);
+        let raw = b.to_bytes();
+        assert_eq!(raw, vec![0x00, 0x80, 0x00, 0x40, 0x00, 0x10]);
+        let back = Bkgd::parse(&raw, 2, 8).unwrap();
+        assert_eq!(back, b);
+    }
+
+    #[test]
+    fn bkgd_rgb_rejects_sample_above_bitdepth_cap() {
+        // 4-bit cap = 15; supplying 16 must fail.
+        let bad = [0x00, 0x10, 0x00, 0x00, 0x00, 0x00];
+        let err = Bkgd::parse(&bad, 2, 4).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn bkgd_palette_roundtrip() {
+        let b = Bkgd::Palette(7);
+        let raw = b.to_bytes();
+        assert_eq!(raw, vec![7]);
+        let back = Bkgd::parse(&raw, 3, 8).unwrap();
+        assert_eq!(back, b);
+    }
+
+    #[test]
+    fn bkgd_rejects_wrong_payload_length() {
+        // Colour type 6 wants 6 bytes; only 4 supplied.
+        let err = Bkgd::parse(&[0; 4], 6, 8).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn bkgd_rejects_unknown_colour_type() {
+        let err = Bkgd::parse(&[0; 2], 5, 8).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn hist_roundtrip() {
+        let h = Hist {
+            frequencies: vec![0, 1, 65535, 12345],
+        };
+        let raw = h.to_bytes();
+        assert_eq!(raw.len(), 8);
+        let back = Hist::parse(&raw, 4).unwrap();
+        assert_eq!(back, h);
+    }
+
+    #[test]
+    fn hist_rejects_length_mismatch_against_palette() {
+        // 3 PLTE entries but payload covers only 2 → reject.
+        let bad = [0u8; 4];
+        let err = Hist::parse(&bad, 3).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn hist_empty_palette_is_zero_bytes() {
+        // Zero palette entries ⇒ zero hIST bytes. The parser should
+        // happily accept an empty payload in that case (still pointless
+        // but not a spec violation in itself).
+        let h = Hist::parse(&[], 0).unwrap();
+        assert!(h.frequencies.is_empty());
     }
 }

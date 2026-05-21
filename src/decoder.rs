@@ -44,7 +44,7 @@ use miniz_oxide::inflate::decompress_to_vec_zlib;
 use crate::apng::{parse_fdat, Actl, Blend, Disposal, Fctl};
 use crate::chunk::{read_chunk, ChunkRef, PNG_MAGIC};
 use crate::filter::{unfilter_row, FilterType};
-use crate::metadata::{Phys, PngMetadata, Sbit, Time};
+use crate::metadata::{Bkgd, Hist, Phys, PngMetadata, Sbit, Time};
 
 pub const CODEC_ID_STR: &str = "png";
 
@@ -218,18 +218,26 @@ pub(crate) fn parse_all_chunks(buf: &[u8]) -> Result<Vec<ChunkRef<'_>>> {
 }
 
 /// Extract round-trippable PNG ancillary metadata (`sBIT`, `pHYs`,
-/// `tIME`) from a PNG / APNG file.
+/// `tIME`, `bKGD`, `hIST`) from a PNG / APNG file.
 ///
 /// Standalone (no `oxideav-core`) entry point: works whether or not
 /// the `registry` feature is enabled. Returns
 /// [`PngMetadata::default`] (all-`None`) when none of the supported
 /// chunks are present. Reports an `InvalidData` error if any supported
-/// chunk appears more than once — RFC 2083 §4.3 marks `sBIT`, `pHYs`,
-/// and `tIME` as "Multiple OK? No".
+/// chunk appears more than once — RFC 2083 §4.3 marks all five as
+/// "Multiple OK? No".
 ///
 /// CRC validation is performed by the underlying chunk walker
 /// ([`crate::chunk::read_chunk`]) so a tampered chunk fails before
 /// reaching this parser.
+///
+/// Cross-chunk constraints enforced here:
+/// * `hIST` requires a `PLTE` (W3C PNG3 §11.3.4.2 "A histogram chunk
+///   can appear only when a PLTE chunk appears"); the entry count must
+///   match the `PLTE` entry count.
+/// * `bKGD` for indexed images (colour type 3) similarly requires a
+///   `PLTE` chunk; the palette index byte must address an existing
+///   entry.
 pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
     let chunks = parse_all_chunks(buf)?;
     let ihdr = Ihdr::parse(
@@ -247,6 +255,23 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
     } else {
         ihdr.bit_depth
     };
+    // PLTE length / entry count — driven by IHDR's colour type. The
+    // chunk's payload byte count must be a multiple of 3; the entry
+    // count is that / 3. We need it to validate hIST length and bKGD
+    // palette indices.
+    let plte_entries = chunks
+        .iter()
+        .find(|c| c.is_type(b"PLTE"))
+        .map(|c| {
+            if c.data.len() % 3 != 0 {
+                return Err(Error::invalid(format!(
+                    "PNG PLTE: payload length {} not a multiple of 3",
+                    c.data.len()
+                )));
+            }
+            Ok(c.data.len() / 3)
+        })
+        .transpose()?;
 
     let mut out = PngMetadata::default();
     for c in &chunks {
@@ -268,6 +293,37 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                     return Err(Error::invalid("PNG: duplicate tIME chunk"));
                 }
                 out.time = Some(Time::parse(c.data)?);
+            }
+            b"bKGD" => {
+                if out.bkgd.is_some() {
+                    return Err(Error::invalid("PNG: duplicate bKGD chunk"));
+                }
+                let b = Bkgd::parse(c.data, ihdr.colour_type, ihdr.bit_depth)?;
+                if let Bkgd::Palette(idx) = b {
+                    match plte_entries {
+                        None => {
+                            return Err(Error::invalid(
+                                "PNG bKGD: indexed colour type requires a PLTE chunk",
+                            ))
+                        }
+                        Some(n) if (idx as usize) >= n => {
+                            return Err(Error::invalid(format!(
+                                "PNG bKGD: palette index {idx} out of range (PLTE has {n} entries)",
+                            )))
+                        }
+                        _ => {}
+                    }
+                }
+                out.bkgd = Some(b);
+            }
+            b"hIST" => {
+                if out.hist.is_some() {
+                    return Err(Error::invalid("PNG: duplicate hIST chunk"));
+                }
+                let n = plte_entries.ok_or_else(|| {
+                    Error::invalid("PNG hIST: chunk requires a PLTE chunk (PNG3 §11.3.4.2)")
+                })?;
+                out.hist = Some(Hist::parse(c.data, n)?);
             }
             _ => {}
         }

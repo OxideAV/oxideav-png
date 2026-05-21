@@ -3,8 +3,8 @@
 //! position and the decoder reads them back byte-for-byte.
 
 use oxideav_png::{
-    decode_png, encode_png_image, encode_png_image_with_options, parse_metadata, Phys, PhysUnit,
-    PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat, Sbit, Time,
+    decode_png, encode_png_image, encode_png_image_with_options, parse_metadata, Bkgd, Hist, Phys,
+    PhysUnit, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat, Sbit, Time,
 };
 
 fn rgba_2x2() -> PngImage {
@@ -31,6 +31,26 @@ fn gray8_2x2() -> PngImage {
         stride: 2,
         data: vec![0, 64, 128, 255],
         palette: Vec::new(),
+    }
+}
+
+/// 4×1 Pal8 image with a 4-entry palette (red, green, blue, white). Used
+/// by the bKGD-palette and hIST tests; both need a PLTE to exist on the
+/// encoded stream.
+fn pal8_4x1() -> PngImage {
+    let palette: Vec<u8> = vec![
+        255, 0, 0, // entry 0 = red
+        0, 255, 0, // entry 1 = green
+        0, 0, 255, // entry 2 = blue
+        255, 255, 255, // entry 3 = white
+    ];
+    PngImage {
+        width: 4,
+        height: 1,
+        pixel_format: PngPixelFormat::Pal8,
+        stride: 4,
+        data: vec![0, 1, 2, 3],
+        palette,
     }
 }
 
@@ -171,6 +191,10 @@ fn all_three_chunks_roundtrip() {
             minute: 0,
             second: 60, // RFC 2083 §4.2.8: 60 is the leap-second sentinel.
         }),
+        // bKGD on colour type 6 ⇒ RGB triple; hIST not meaningful here
+        // (no PLTE on RGBA).
+        bkgd: Some(Bkgd::Rgb(255, 255, 255)),
+        hist: None,
     };
     let opts = PngEncoderOptions {
         metadata: Some(meta_in.clone()),
@@ -275,6 +299,149 @@ fn parse_metadata_detects_duplicate_phys() {
     assert!(
         msg.contains("duplicate pHYs"),
         "expected duplicate-pHYs error, got {msg}"
+    );
+}
+
+#[test]
+fn bkgd_rgb_8bit_roundtrip() {
+    // Colour type 6 (Rgba) sample image; bKGD payload is 6 bytes BE.
+    let img = rgba_2x2();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            bkgd: Some(Bkgd::Rgb(0x80, 0x40, 0x10)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.bkgd, Some(Bkgd::Rgb(0x80, 0x40, 0x10)));
+    // Image must still decode bit-exactly.
+    let back = decode_png(&bytes).expect("decode pixels");
+    assert_eq!(back.data, img.data);
+}
+
+#[test]
+fn bkgd_grayscale_roundtrip() {
+    // Colour type 0 (Gray8): bKGD is one 2-byte BE u16, MSB = 0 for 8-bit.
+    let img = gray8_2x2();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            bkgd: Some(Bkgd::Grayscale(123)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.bkgd, Some(Bkgd::Grayscale(123)));
+}
+
+#[test]
+fn bkgd_palette_index_roundtrip() {
+    // Colour type 3: bKGD payload is a single u8 palette index.
+    let img = pal8_4x1();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            bkgd: Some(Bkgd::Palette(2)), // blue, the 3rd entry
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.bkgd, Some(Bkgd::Palette(2)));
+    let back = decode_png(&bytes).expect("decode pixels");
+    assert_eq!(back.data, img.data);
+}
+
+#[test]
+fn hist_matches_palette_entry_count() {
+    // 4-entry palette ⇒ hIST carries exactly 4 frequencies.
+    let img = pal8_4x1();
+    let h = Hist {
+        frequencies: vec![1, 1, 1, 1],
+    };
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            hist: Some(h.clone()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.hist, Some(h));
+}
+
+#[test]
+fn chunk_ordering_bkgd_and_hist_follow_plte_precede_idat() {
+    // PNG3 §5.6 Table 1: bKGD / hIST go after PLTE and before IDAT. We
+    // verify the byte positions explicitly.
+    let img = pal8_4x1();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            bkgd: Some(Bkgd::Palette(0)),
+            hist: Some(Hist {
+                frequencies: vec![10, 5, 2, 1],
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
+    let plte_pos = pos(b"PLTE").expect("PLTE");
+    let bkgd_pos = pos(b"bKGD").expect("bKGD");
+    let hist_pos = pos(b"hIST").expect("hIST");
+    let idat_pos = pos(b"IDAT").expect("IDAT");
+    assert!(plte_pos < bkgd_pos, "PLTE before bKGD");
+    assert!(plte_pos < hist_pos, "PLTE before hIST");
+    assert!(bkgd_pos < idat_pos, "bKGD before IDAT");
+    assert!(hist_pos < idat_pos, "hIST before IDAT");
+}
+
+#[test]
+fn parse_metadata_rejects_hist_without_plte() {
+    // Hand-craft an hIST on top of an RGBA stream (no PLTE). PNG3
+    // §11.3.4.2: "A histogram chunk can appear only when a PLTE chunk
+    // appears."
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    // Inject hIST after IHDR (IHDR ends at offset 8+25=33).
+    let inject_pos = 8 + 25;
+    let hist_data = [0x00, 0x05]; // any 2 bytes
+    let mut single = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut single, b"hIST", &hist_data);
+    let mut tampered = Vec::with_capacity(bytes.len() + single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("hIST without PLTE must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("requires a PLTE"),
+        "expected hIST-needs-PLTE error, got {msg}"
+    );
+}
+
+#[test]
+fn parse_metadata_rejects_bkgd_palette_index_out_of_range() {
+    // Pal8 image has 4 entries; bKGD index 7 is out of range.
+    let img = pal8_4x1();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            bkgd: Some(Bkgd::Palette(7)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let err = parse_metadata(&bytes).expect_err("oob palette index must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("out of range"),
+        "expected oob-index error, got {msg}"
     );
 }
 
