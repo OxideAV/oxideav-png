@@ -3,9 +3,9 @@
 //! position and the decoder reads them back byte-for-byte.
 
 use oxideav_png::{
-    decode_png, encode_png_image, encode_png_image_with_options, parse_metadata, Bkgd, Exif, Hist,
-    Phys, PhysUnit, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat, RenderingIntent,
-    Sbit, Srgb, Time,
+    decode_png, encode_png_image, encode_png_image_with_options, parse_metadata, Bkgd, Cicp, Exif,
+    Hist, Phys, PhysUnit, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat,
+    RenderingIntent, Sbit, Srgb, Time,
 };
 
 fn rgba_2x2() -> PngImage {
@@ -199,6 +199,13 @@ fn all_three_chunks_roundtrip() {
         exif: None,
         srgb: Some(Srgb {
             rendering_intent: RenderingIntent::Saturation,
+        }),
+        cicp: Some(Cicp {
+            // §11.3.2.6 Example 4 — Display P3 full-range.
+            color_primaries: 12,
+            transfer_function: 13,
+            matrix_coefficients: 0,
+            video_full_range_flag: 1,
         }),
     };
     let opts = PngEncoderOptions {
@@ -682,5 +689,133 @@ fn parse_metadata_rejects_reserved_srgb_intent() {
     assert!(
         msg.contains("rendering intent"),
         "expected reserved-intent error, got {msg}"
+    );
+}
+
+#[test]
+fn cicp_roundtrip() {
+    // PNG3 §11.3.2.6 Example 4 — Display P3 (full-range): 0C 0D 00 01.
+    let img = rgba_2x2();
+    let cicp = Cicp {
+        color_primaries: 12,
+        transfer_function: 13,
+        matrix_coefficients: 0,
+        video_full_range_flag: 1,
+    };
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            cicp: Some(cicp),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.cicp, Some(cicp));
+    // The pixel plane must still decode bit-exactly with the colour
+    // metadata attached.
+    let back = decode_png(&bytes).expect("decode pixels");
+    assert_eq!(back.data, img.data);
+}
+
+#[test]
+fn chunk_ordering_cicp_precedes_plte_and_idat() {
+    // PNG3 §5.6 Table 1: cICP is "Before PLTE and IDAT". Use a palette
+    // image so PLTE is actually present in the output stream.
+    let img = pal8_4x1();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            cicp: Some(Cicp {
+                color_primaries: 1,
+                transfer_function: 1,
+                matrix_coefficients: 0,
+                video_full_range_flag: 0,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
+    let cicp_pos = pos(b"cICP").expect("cICP");
+    let plte_pos = pos(b"PLTE").expect("PLTE");
+    let idat_pos = pos(b"IDAT").expect("IDAT");
+    assert!(cicp_pos < plte_pos, "cICP must precede PLTE");
+    assert!(cicp_pos < idat_pos, "cICP must precede IDAT");
+}
+
+#[test]
+fn chunk_ordering_cicp_precedes_other_colour_chunks() {
+    // PNG3 §4.3 Table 1 makes cICP the highest-precedence colour chunk.
+    // When both cICP and sRGB are emitted, cICP must come first so that
+    // a viewer that walks the file in order picks the higher-precedence
+    // signal up first.
+    let img = rgba_2x2();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            cicp: Some(Cicp {
+                color_primaries: 9,
+                transfer_function: 16,
+                matrix_coefficients: 0,
+                video_full_range_flag: 1,
+            }),
+            srgb: Some(Srgb {
+                rendering_intent: RenderingIntent::Perceptual,
+            }),
+            sbit: Some(Sbit::Rgba(8, 8, 8, 8)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
+    let cicp_pos = pos(b"cICP").expect("cICP");
+    let sbit_pos = pos(b"sBIT").expect("sBIT");
+    let srgb_pos = pos(b"sRGB").expect("sRGB");
+    assert!(cicp_pos < sbit_pos, "cICP must come before sBIT");
+    assert!(cicp_pos < srgb_pos, "cICP must come before sRGB");
+}
+
+#[test]
+fn parse_metadata_detects_duplicate_cicp() {
+    // §5.6 Table 1: cICP is "Multiple allowed: No". Two consecutive cICP
+    // chunks must be rejected by the dedup check.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25; // immediately after IHDR.
+    let mut single = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut single, b"cICP", &[1u8, 13, 0, 1]);
+    let mut tampered = Vec::with_capacity(bytes.len() + 2 * single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("two cICP chunks must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("duplicate cICP"),
+        "expected duplicate-cICP error, got {msg}"
+    );
+}
+
+#[test]
+fn parse_metadata_rejects_nonzero_cicp_matrix_coefficients() {
+    // §11.3.2.6 pins matrix_coefficients at 0 for PNG; anything else
+    // must be rejected on decode.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut single = Vec::new();
+    // color_primaries=1, transfer=13, matrix=1 (BT.709) — illegal for PNG.
+    oxideav_png::chunk::write_chunk(&mut single, b"cICP", &[1u8, 13, 1, 1]);
+    let mut tampered = Vec::with_capacity(bytes.len() + single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("non-zero matrix_coefficients must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("matrix_coefficients"),
+        "expected matrix_coefficients error, got {msg}"
     );
 }

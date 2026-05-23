@@ -37,6 +37,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `4..=255` are rejected on decode. Round-trips through `PngMetadata`,
   emitted before `PLTE` + `IDAT` (§5.6 Table 1) alongside `sBIT`;
   duplicate `sRGB` chunks are rejected on decode.
+- `Cicp { color_primaries, transfer_function, matrix_coefficients,
+  video_full_range_flag }` covering the `cICP` ancillary chunk (W3C
+  PNG3 §11.3.2.6 / Table 18). Four-byte payload re-using the ITU-T
+  H.273 colour-primaries / transfer-function / video-range registries;
+  `matrix_coefficients` is pinned at `0` per §11.3.2.6 ("PNG is
+  RGB-only") and `video_full_range_flag` is bounds-checked to `0..=1`
+  (anything else is reserved by H.273 §8.3) — both rejected on decode
+  outside their ranges. The first two bytes are round-tripped verbatim
+  so forward-compatible H.273 code points still survive the codec.
+  Round-trips through `PngMetadata`, emitted ahead of `sBIT` / `sRGB`
+  in the pre-`PLTE` / pre-`IDAT` bucket (§4.3 Table 1 ranks `cICP` as
+  the highest-precedence colour chunk); duplicate `cICP` chunks are
+  rejected on decode.
 
 ## [0.1.6](https://github.com/OxideAV/oxideav-png/compare/v0.1.5...v0.1.6) - 2026-05-06
 

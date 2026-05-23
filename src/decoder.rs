@@ -44,7 +44,7 @@ use miniz_oxide::inflate::decompress_to_vec_zlib;
 use crate::apng::{parse_fdat, Actl, Blend, Disposal, Fctl};
 use crate::chunk::{read_chunk, ChunkRef, PNG_MAGIC};
 use crate::filter::{unfilter_row, FilterType};
-use crate::metadata::{Bkgd, Exif, Hist, Phys, PngMetadata, Sbit, Srgb, Time};
+use crate::metadata::{Bkgd, Cicp, Exif, Hist, Phys, PngMetadata, Sbit, Srgb, Time};
 
 pub const CODEC_ID_STR: &str = "png";
 
@@ -218,7 +218,8 @@ pub(crate) fn parse_all_chunks(buf: &[u8]) -> Result<Vec<ChunkRef<'_>>> {
 }
 
 /// Extract round-trippable PNG ancillary metadata (`sBIT`, `pHYs`,
-/// `tIME`, `bKGD`, `hIST`, `eXIf`, `sRGB`) from a PNG / APNG file.
+/// `tIME`, `bKGD`, `hIST`, `eXIf`, `sRGB`, `cICP`) from a PNG / APNG
+/// file.
 ///
 /// Standalone (no `oxideav-core`) entry point: works whether or not
 /// the `registry` feature is enabled. Returns
@@ -336,6 +337,12 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                     return Err(Error::invalid("PNG: duplicate sRGB chunk"));
                 }
                 out.srgb = Some(Srgb::parse(c.data)?);
+            }
+            b"cICP" => {
+                if out.cicp.is_some() {
+                    return Err(Error::invalid("PNG: duplicate cICP chunk"));
+                }
+                out.cicp = Some(Cicp::parse(c.data)?);
             }
             _ => {}
         }

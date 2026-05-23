@@ -59,15 +59,28 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   `PLTE` + `IDAT` (§5.6 Table 1) alongside `sBIT`. The chunk's presence
   asserts sRGB-space samples; the codec records the intent and leaves
   any actual colour transform to the caller.
+- `cICP` (coding-independent code points, W3C PNG3 §11.3.2.6 / Table
+  18) — four `u8`s naming the ITU-T H.273 code points for color
+  primaries, transfer function, matrix coefficients, and the
+  full-range flag. `matrix_coefficients` is pinned at `0` per §11.3.2.6
+  ("RGB is currently the only supported color model in PNG, and as
+  such Matrix Coefficients shall be set to `0`"); decode rejects any
+  non-zero value. `video_full_range_flag` is bounds-checked to `0..=1`
+  (H.273 §8.3 reserves every other value). The other two bytes are
+  round-tripped verbatim (the H.273 registries include "Reserved"
+  entries we deliberately don't gate, so forward-compatible code
+  points still survive a copy through the codec). Emitted before
+  `PLTE` + `IDAT` (§5.6 Table 1) and ahead of `sBIT` / `sRGB` —
+  Table 1 in §4.3 makes `cICP` the highest-precedence colour chunk.
 
 Decode: [`parse_metadata`] returns a [`PngMetadata`] with each
 supported field populated for any chunks present. Encode:
 [`PngEncoderOptions`]`::metadata` holds the same struct; populated
-fields are emitted at spec-compliant chunk positions (`sBIT` / `sRGB`
-before `PLTE`/`IDAT`; `bKGD` / `hIST` after `PLTE`, before `IDAT`;
-`pHYs`, `tIME`, and `eXIf` before `IDAT`). Duplicates of any supported
-chunk on decode are rejected per the "Multiple OK? No" rule in RFC 2083
-§4.3 / W3C PNG3 §5.6.
+fields are emitted at spec-compliant chunk positions (`cICP` / `sBIT` /
+`sRGB` before `PLTE`/`IDAT`; `bKGD` / `hIST` after `PLTE`, before
+`IDAT`; `pHYs`, `tIME`, and `eXIf` before `IDAT`). Duplicates of any
+supported chunk on decode are rejected per the "Multiple OK? No" rule
+in RFC 2083 §4.3 / W3C PNG3 §5.6.
 
 ## Not preserved
 
@@ -76,9 +89,9 @@ chunk on decode are rejected per the "Multiple OK? No" rule in RFC 2083
 - `tRNS` alpha applied to `Gray*` / `Rgb*` pixels on decode (the chunk is
   parsed + CRC-validated but not blended into the output plane; for `Pal8`
   the per-entry alpha is still carried through `extradata`)
-- Colour-management + remaining metadata chunks: `cICP`, `gAMA`,
-  `cHRM`, `iCCP`, `tEXt`, `zTXt`, `iTXt`, `sPLT`. Each is
-  CRC-checked on read and then dropped
+- Colour-management + remaining metadata chunks: `gAMA`, `cHRM`,
+  `iCCP`, `tEXt`, `zTXt`, `iTXt`, `sPLT`. Each is CRC-checked on
+  read and then dropped
 
 ## Usage
 

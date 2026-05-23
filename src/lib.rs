@@ -32,13 +32,16 @@
 //! Not implemented:
 //! * Sub-byte encode (decode only — encoder always writes 8/16-bit)
 //! * Round-tripped metadata: `sBIT`, `pHYs`, `tIME`, `bKGD`, `hIST`,
-//!   `eXIf`, `sRGB` — surfaced via [`parse_metadata`] on decode and
-//!   re-emitted by the encoder when [`PngEncoderOptions::metadata`] is
-//!   populated. `eXIf` is carried as an opaque (TIFF-header-validated)
-//!   blob; `sRGB` carries the ICC rendering intent.
-//! * Colour management / metadata chunks (`cICP`, `gAMA`, `cHRM`,
-//!   `iCCP`, `tEXt`, `zTXt`, `iTXt`, `sPLT`). CRC is verified on read and
-//!   then they are dropped — they are not round-tripped through the
+//!   `eXIf`, `sRGB`, `cICP` — surfaced via [`parse_metadata`] on decode
+//!   and re-emitted by the encoder when [`PngEncoderOptions::metadata`]
+//!   is populated. `eXIf` is carried as an opaque (TIFF-header-
+//!   validated) blob; `sRGB` carries the ICC rendering intent; `cICP`
+//!   carries the H.273 colour-primaries / transfer-function /
+//!   video-range code points with `matrix_coefficients` pinned at 0
+//!   (PNG is RGB-only per §11.3.2.6).
+//! * Colour management / metadata chunks (`gAMA`, `cHRM`, `iCCP`,
+//!   `tEXt`, `zTXt`, `iTXt`, `sPLT`). CRC is verified on read and then
+//!   they are dropped — they are not round-tripped through the
 //!   container and not surfaced on decode.
 //! * `tRNS` alpha application to decoded `Gray8` / `Gray16Le` / `Rgb24` /
 //!   `Rgb48Le` pixels. For colour type 3 (palette), `tRNS` per-entry alpha
@@ -87,7 +90,7 @@ pub use encoder::{
 pub use error::{PngError, Result};
 pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
 pub use metadata::{
-    Bkgd, Exif, Hist, Phys, PhysUnit, PngMetadata, RenderingIntent, Sbit, Srgb, Time,
+    Bkgd, Cicp, Exif, Hist, Phys, PhysUnit, PngMetadata, RenderingIntent, Sbit, Srgb, Time,
 };
 
 // Public registry-gated API — keeps the framework integration surface

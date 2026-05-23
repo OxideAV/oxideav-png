@@ -1,5 +1,5 @@
 //! PNG ancillary metadata chunks — `sBIT`, `pHYs`, `tIME`, `bKGD`,
-//! `hIST`, `eXIf`, `sRGB`.
+//! `hIST`, `eXIf`, `sRGB`, `cICP`.
 //!
 //! All but `eXIf` are short, fixed-layout chunks with no embedded
 //! compression and no cross-chunk dependencies (with the single
@@ -81,6 +81,20 @@
 //!   colour space; values `4..=255` are reserved (§11.3.2.5) and
 //!   rejected on parse. `sRGB` must precede `PLTE` and the first
 //!   `IDAT` (§5.6 Table 1); only one is permitted.
+//!
+//! - `cICP` — W3C PNG3 §11.3.2.6 "Coding-independent code points for
+//!   video signal type identification". Exactly four `u8` fields per
+//!   Table 18: `color_primaries`, `transfer_function`,
+//!   `matrix_coefficients`, `video_full_range_flag`. The first three
+//!   re-use the registries from [ITU-T H.273]; the spec further pins
+//!   `matrix_coefficients = 0` for PNG ("RGB is currently the only
+//!   supported color model in PNG, and as such `Matrix Coefficients`
+//!   shall be set to `0`"). `video_full_range_flag` is `0`
+//!   (narrow-range / video-quantisation) or `1` (full-range / computer-
+//!   graphics quantisation) — every other value is reserved by H.273
+//!   §8.3. `cICP` must precede `PLTE` and `IDAT` (§5.6 Table 1) and
+//!   only one is permitted; when present, it is the highest-precedence
+//!   colour chunk (§4.3 Table 1).
 //!
 //! All chunks here are marked "Multiple OK? No" in the PNG spec; we
 //! enforce that on parse — duplicates are an `InvalidData` error.
@@ -570,6 +584,91 @@ impl Srgb {
     }
 }
 
+/// `cICP` payload (W3C PNG3 §11.3.2.6).
+///
+/// Carries the four [ITU-T H.273] coding-independent code points that
+/// classify the image's signal characteristics:
+///
+/// * `color_primaries` — chromaticity coordinates of the source RGB
+///   primaries and the white point (H.273 §8.1, e.g. `1` = BT.709,
+///   `9` = BT.2020, `12` = SMPTE EG 432-1 / Display P3).
+/// * `transfer_function` — the opto-electronic transfer characteristic
+///   used when the image was authored (H.273 §8.2, e.g. `1` = BT.709,
+///   `13` = sRGB / IEC 61966-2-1, `16` = SMPTE ST 2084 / PQ,
+///   `18` = ARIB STD-B67 / HLG).
+/// * `matrix_coefficients` — colour-component derivation matrix
+///   identifier (H.273 §8.3). PNG fixes this at `0` ("Identity / RGB")
+///   per §11.3.2.6 ("RGB is currently the only supported color model in
+///   PNG, and as such Matrix Coefficients shall be set to `0`"). Parse
+///   rejects any other value.
+/// * `video_full_range_flag` — `0` = narrow-range (video-quantised,
+///   e.g. BT.709 reference black `64` / nominal peak `940` for 10-bit),
+///   `1` = full-range (the conventional `0..=2^N-1` quantisation used by
+///   most computer-graphics PNGs). H.273 §8.3 reserves every other
+///   value; parse rejects anything outside `0..=1`.
+///
+/// The spec carries no constraints on the `color_primaries` /
+/// `transfer_function` bytes beyond their definitions in H.273, so the
+/// parser preserves any caller-supplied byte (round-trip integrity)
+/// even when it names a "Reserved" H.273 code-point. Validation of
+/// those two bytes against the H.273 registry is left to consumers that
+/// need stricter checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cicp {
+    pub color_primaries: u8,
+    pub transfer_function: u8,
+    pub matrix_coefficients: u8,
+    pub video_full_range_flag: u8,
+}
+
+impl Cicp {
+    /// Parse a `cICP` chunk payload. The chunk is exactly four bytes
+    /// (Table 18); other lengths, `matrix_coefficients != 0`, and
+    /// `video_full_range_flag` outside `0..=1` are all rejected.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        if data.len() != 4 {
+            return Err(Error::invalid(format!(
+                "PNG cICP: expected 4 bytes, got {}",
+                data.len()
+            )));
+        }
+        let color_primaries = data[0];
+        let transfer_function = data[1];
+        let matrix_coefficients = data[2];
+        let video_full_range_flag = data[3];
+        // PNG3 §11.3.2.6: PNG is RGB only, so the H.273 matrix
+        // coefficients value must be 0 (identity / RGB).
+        if matrix_coefficients != 0 {
+            return Err(Error::invalid(format!(
+                "PNG cICP: matrix_coefficients {matrix_coefficients} must be 0 (PNG is RGB-only)",
+            )));
+        }
+        // H.273 §8.3 / PNG3 §11.3.2.6 Note: only 0 (narrow range) and
+        // 1 (full range) are defined; everything else is reserved.
+        if video_full_range_flag > 1 {
+            return Err(Error::invalid(format!(
+                "PNG cICP: video_full_range_flag {video_full_range_flag} not in 0..=1 (reserved)",
+            )));
+        }
+        Ok(Self {
+            color_primaries,
+            transfer_function,
+            matrix_coefficients,
+            video_full_range_flag,
+        })
+    }
+
+    /// Emit the on-wire payload (four bytes, in spec order).
+    pub fn to_bytes(&self) -> [u8; 4] {
+        [
+            self.color_primaries,
+            self.transfer_function,
+            self.matrix_coefficients,
+            self.video_full_range_flag,
+        ]
+    }
+}
+
 /// Bundle of metadata chunks that round-trip through the encoder.
 ///
 /// Populated by [`crate::parse_metadata`] on decode and consumed by
@@ -584,6 +683,7 @@ pub struct PngMetadata {
     pub hist: Option<Hist>,
     pub exif: Option<Exif>,
     pub srgb: Option<Srgb>,
+    pub cicp: Option<Cicp>,
 }
 
 impl PngMetadata {
@@ -597,6 +697,7 @@ impl PngMetadata {
             && self.hist.is_none()
             && self.exif.is_none()
             && self.srgb.is_none()
+            && self.cicp.is_none()
     }
 }
 
@@ -794,6 +895,16 @@ mod tests {
             ..Default::default()
         };
         assert!(!m6.is_empty());
+        let m7 = PngMetadata {
+            cicp: Some(Cicp {
+                color_primaries: 1,
+                transfer_function: 13,
+                matrix_coefficients: 0,
+                video_full_range_flag: 1,
+            }),
+            ..Default::default()
+        };
+        assert!(!m7.is_empty());
     }
 
     #[test]
@@ -983,5 +1094,91 @@ mod tests {
             Srgb::parse(&[0, 0]).unwrap_err(),
             Error::InvalidData(_)
         ));
+    }
+
+    #[test]
+    fn cicp_bt709_narrow_range_example_roundtrip() {
+        // §11.3.2.6 Example 3 — narrow-range BT.709 image.
+        let raw = [0x01, 0x01, 0x00, 0x00];
+        let c = Cicp::parse(&raw).unwrap();
+        assert_eq!(c.color_primaries, 1);
+        assert_eq!(c.transfer_function, 1);
+        assert_eq!(c.matrix_coefficients, 0);
+        assert_eq!(c.video_full_range_flag, 0);
+        assert_eq!(c.to_bytes(), raw);
+    }
+
+    #[test]
+    fn cicp_bt2100_pq_full_range_example_roundtrip() {
+        // §11.3.2.6 Example 1 — BT.2100 PQ, full-range.
+        let raw = [0x09, 0x10, 0x00, 0x01];
+        let c = Cicp::parse(&raw).unwrap();
+        assert_eq!(c.color_primaries, 9);
+        assert_eq!(c.transfer_function, 16);
+        assert_eq!(c.matrix_coefficients, 0);
+        assert_eq!(c.video_full_range_flag, 1);
+        assert_eq!(c.to_bytes(), raw);
+    }
+
+    #[test]
+    fn cicp_display_p3_example_roundtrip() {
+        // §11.3.2.6 Example 4 — Display P3 (full-range).
+        let raw = [0x0C, 0x0D, 0x00, 0x01];
+        let c = Cicp::parse(&raw).unwrap();
+        assert_eq!(c.color_primaries, 12);
+        assert_eq!(c.transfer_function, 13);
+        assert_eq!(c.matrix_coefficients, 0);
+        assert_eq!(c.video_full_range_flag, 1);
+        assert_eq!(c.to_bytes(), raw);
+    }
+
+    #[test]
+    fn cicp_rejects_nonzero_matrix_coefficients() {
+        // §11.3.2.6: "RGB is currently the only supported color model in
+        // PNG, and as such Matrix Coefficients shall be set to 0."
+        let bad = [1u8, 13, 1, 1];
+        let err = Cicp::parse(&bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn cicp_rejects_reserved_video_range_flag() {
+        // H.273 §8.3 reserves anything outside 0..=1.
+        let bad = [1u8, 13, 0, 2];
+        let err = Cicp::parse(&bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+        let bad = [1u8, 13, 0, 255];
+        let err = Cicp::parse(&bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn cicp_rejects_wrong_length() {
+        // Exactly four bytes per Table 18.
+        assert!(matches!(
+            Cicp::parse(&[1, 13, 0]).unwrap_err(),
+            Error::InvalidData(_)
+        ));
+        assert!(matches!(
+            Cicp::parse(&[1, 13, 0, 1, 0]).unwrap_err(),
+            Error::InvalidData(_)
+        ));
+        assert!(matches!(
+            Cicp::parse(&[]).unwrap_err(),
+            Error::InvalidData(_)
+        ));
+    }
+
+    #[test]
+    fn cicp_preserves_reserved_color_primaries_byte() {
+        // The first two bytes index into H.273 registries that include
+        // "Reserved" entries; parse intentionally round-trips any byte
+        // (no enum gating) so the encoder can faithfully rewrite caller-
+        // supplied values, even forward-compatible ones.
+        let raw = [0xFE, 0xFE, 0x00, 0x01];
+        let c = Cicp::parse(&raw).unwrap();
+        assert_eq!(c.color_primaries, 0xFE);
+        assert_eq!(c.transfer_function, 0xFE);
+        assert_eq!(c.to_bytes(), raw);
     }
 }

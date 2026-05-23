@@ -41,11 +41,13 @@ pub struct PngEncoderOptions {
     /// progressively renderable.
     pub interlace: bool,
     /// Optional `sBIT` / `pHYs` / `tIME` / `bKGD` / `hIST` / `eXIf` /
-    /// `sRGB` ancillary metadata to embed. Each `Some(_)` field is
-    /// written; chunk ordering follows RFC 2083 §4.3 / W3C PNG3 §5.6
-    /// Table 1:
+    /// `sRGB` / `cICP` ancillary metadata to embed. Each `Some(_)`
+    /// field is written; chunk ordering follows RFC 2083 §4.3 / W3C
+    /// PNG3 §5.6 Table 1:
     ///
-    /// * `sBIT` / `sRGB` — before `PLTE` and `IDAT`.
+    /// * `cICP` / `sBIT` / `sRGB` — before `PLTE` and `IDAT` (`cICP`
+    ///   first since §4.3 Table 1 makes it the highest-precedence
+    ///   colour chunk).
     /// * `bKGD` / `hIST` — after `PLTE`, before `IDAT`.
     /// * `pHYs` — before `IDAT`.
     /// * `tIME` — unconstrained; we emit it before `IDAT` for
@@ -108,13 +110,18 @@ pub fn encode_png_image_with_options(
 }
 
 /// Emit the metadata chunks the PNG spec places "before PLTE and IDAT":
-/// `sBIT` (RFC 2083 §4.3) and `sRGB` (W3C PNG3 §5.6 Table 1). Emitted in
-/// that order for determinism; the spec imposes no relative ordering
-/// between them within the pre-PLTE bucket.
+/// `cICP` (W3C PNG3 §11.3.2.6), `sBIT` (RFC 2083 §4.3) and `sRGB` (W3C
+/// PNG3 §5.6 Table 1). Emitted with `cICP` first since §4.3 Table 1
+/// ranks it as the highest-precedence colour chunk; the remaining
+/// relative order is unconstrained by the spec but fixed here for
+/// deterministic output.
 fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
     let Some(meta) = meta else {
         return;
     };
+    if let Some(cicp) = &meta.cicp {
+        write_chunk(out, b"cICP", &cicp.to_bytes());
+    }
     if let Some(sbit) = &meta.sbit {
         write_chunk(out, b"sBIT", &sbit.to_bytes());
     }
