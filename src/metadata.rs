@@ -1,5 +1,5 @@
 //! PNG ancillary metadata chunks — `sBIT`, `pHYs`, `tIME`, `bKGD`,
-//! `hIST`, `eXIf`.
+//! `hIST`, `eXIf`, `sRGB`.
 //!
 //! All but `eXIf` are short, fixed-layout chunks with no embedded
 //! compression and no cross-chunk dependencies (with the single
@@ -72,6 +72,15 @@
 //!   are reserved" (§11.3.4.5.2). We reject any other header so a
 //!   malformed blob can't masquerade as Exif. `eXIf` must precede the
 //!   first `IDAT` (§5.6 Table 1) and only one is permitted.
+//!
+//! - `sRGB` — W3C PNG3 §11.3.2.5 "Standard RGB color space". A single
+//!   byte naming the ICC rendering intent the image samples should be
+//!   displayed with (`0` Perceptual / `1` Relative colorimetric /
+//!   `2` Saturation / `3` Absolute colorimetric — Table 16). The
+//!   chunk's mere presence asserts the samples conform to the sRGB
+//!   colour space; values `4..=255` are reserved (§11.3.2.5) and
+//!   rejected on parse. `sRGB` must precede `PLTE` and the first
+//!   `IDAT` (§5.6 Table 1); only one is permitted.
 //!
 //! All chunks here are marked "Multiple OK? No" in the PNG spec; we
 //! enforce that on parse — duplicates are an `InvalidData` error.
@@ -482,6 +491,85 @@ impl Exif {
     }
 }
 
+/// `sRGB.rendering_intent` per W3C PNG3 §11.3.2.5 Table 16.
+///
+/// Names the ICC rendering intent a conforming viewer should use when
+/// displaying the (sRGB-space) image samples. The four values are the
+/// only ones defined; `4..=255` are reserved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderingIntent {
+    /// `0` — Perceptual: good adaptation to the output-device gamut at
+    /// the expense of colorimetric accuracy (e.g. photographs).
+    Perceptual,
+    /// `1` — Relative colorimetric: colour-appearance matching relative
+    /// to the output-device white point (e.g. logos).
+    RelativeColorimetric,
+    /// `2` — Saturation: preserves saturation at the expense of hue and
+    /// lightness (e.g. charts and graphs).
+    Saturation,
+    /// `3` — Absolute colorimetric: preserves absolute colorimetry (e.g.
+    /// proofs destined for a different output device).
+    AbsoluteColorimetric,
+}
+
+impl RenderingIntent {
+    /// Map the on-wire byte to a variant. Values `4..=255` are reserved
+    /// (W3C PNG3 §11.3.2.5) and rejected.
+    pub fn from_byte(value: u8) -> Result<Self> {
+        Ok(match value {
+            0 => Self::Perceptual,
+            1 => Self::RelativeColorimetric,
+            2 => Self::Saturation,
+            3 => Self::AbsoluteColorimetric,
+            other => {
+                return Err(Error::invalid(format!(
+                    "PNG sRGB: rendering intent {other} not in 0..=3 (reserved)"
+                )))
+            }
+        })
+    }
+
+    /// The on-wire byte for this variant.
+    pub fn to_byte(self) -> u8 {
+        match self {
+            Self::Perceptual => 0,
+            Self::RelativeColorimetric => 1,
+            Self::Saturation => 2,
+            Self::AbsoluteColorimetric => 3,
+        }
+    }
+}
+
+/// `sRGB` payload (W3C PNG3 §11.3.2.5).
+///
+/// A one-byte chunk whose presence asserts the image samples conform to
+/// the sRGB colour space; the byte selects the ICC [`RenderingIntent`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Srgb {
+    pub rendering_intent: RenderingIntent,
+}
+
+impl Srgb {
+    /// Parse an `sRGB` chunk payload (exactly one byte; the rendering
+    /// intent). Rejects any other length and any reserved intent value.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        if data.len() != 1 {
+            return Err(Error::invalid(format!(
+                "PNG sRGB: expected 1 byte, got {}",
+                data.len()
+            )));
+        }
+        Ok(Self {
+            rendering_intent: RenderingIntent::from_byte(data[0])?,
+        })
+    }
+
+    /// Emit the on-wire payload (the single rendering-intent byte).
+    pub fn to_bytes(&self) -> [u8; 1] {
+        [self.rendering_intent.to_byte()]
+    }
+}
+
 /// Bundle of metadata chunks that round-trip through the encoder.
 ///
 /// Populated by [`crate::parse_metadata`] on decode and consumed by
@@ -495,6 +583,7 @@ pub struct PngMetadata {
     pub bkgd: Option<Bkgd>,
     pub hist: Option<Hist>,
     pub exif: Option<Exif>,
+    pub srgb: Option<Srgb>,
 }
 
 impl PngMetadata {
@@ -507,6 +596,7 @@ impl PngMetadata {
             && self.bkgd.is_none()
             && self.hist.is_none()
             && self.exif.is_none()
+            && self.srgb.is_none()
     }
 }
 
@@ -697,6 +787,13 @@ mod tests {
             ..Default::default()
         };
         assert!(!m5.is_empty());
+        let m6 = PngMetadata {
+            srgb: Some(Srgb {
+                rendering_intent: RenderingIntent::Perceptual,
+            }),
+            ..Default::default()
+        };
+        assert!(!m6.is_empty());
     }
 
     #[test]
@@ -846,5 +943,45 @@ mod tests {
         let bad = [0x49, 0x49, 0x00, 0x2A];
         let err = Exif::parse(&bad).unwrap_err();
         assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn srgb_roundtrips_every_defined_intent() {
+        // All four Table 16 intents survive byte → variant → byte.
+        for (byte, intent) in [
+            (0u8, RenderingIntent::Perceptual),
+            (1, RenderingIntent::RelativeColorimetric),
+            (2, RenderingIntent::Saturation),
+            (3, RenderingIntent::AbsoluteColorimetric),
+        ] {
+            let s = Srgb {
+                rendering_intent: intent,
+            };
+            assert_eq!(s.to_bytes(), [byte]);
+            let back = Srgb::parse(&[byte]).unwrap();
+            assert_eq!(back, s);
+        }
+    }
+
+    #[test]
+    fn srgb_rejects_reserved_intent() {
+        // §11.3.2.5: only 0..=3 are defined; 4 is reserved.
+        let err = Srgb::parse(&[4]).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+        let err = Srgb::parse(&[255]).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn srgb_rejects_wrong_length() {
+        // The chunk is exactly one byte; zero or two bytes is invalid.
+        assert!(matches!(
+            Srgb::parse(&[]).unwrap_err(),
+            Error::InvalidData(_)
+        ));
+        assert!(matches!(
+            Srgb::parse(&[0, 0]).unwrap_err(),
+            Error::InvalidData(_)
+        ));
     }
 }

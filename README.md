@@ -52,15 +52,22 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   TIFF blob. Decode validates only the byte-order header (`II`/42 LE
   or `MM`/42 BE, §11.3.4.5.2) and round-trips the bytes verbatim; the
   TIFF directory is not interpreted. Emitted before `IDAT` (§5.6).
+- `sRGB` (standard RGB colour space, W3C PNG3 §11.3.2.5) — one-byte
+  ICC rendering intent (`RenderingIntent`: `Perceptual` / `Relative
+  colorimetric` / `Saturation` / `Absolute colorimetric`, Table 16).
+  Reserved values `4..=255` are rejected on decode. Emitted before
+  `PLTE` + `IDAT` (§5.6 Table 1) alongside `sBIT`. The chunk's presence
+  asserts sRGB-space samples; the codec records the intent and leaves
+  any actual colour transform to the caller.
 
 Decode: [`parse_metadata`] returns a [`PngMetadata`] with each
 supported field populated for any chunks present. Encode:
 [`PngEncoderOptions`]`::metadata` holds the same struct; populated
-fields are emitted at spec-compliant chunk positions (`sBIT` before
-`PLTE`/`IDAT`; `bKGD` / `hIST` after `PLTE`, before `IDAT`; `pHYs`,
-`tIME`, and `eXIf` before `IDAT`). Duplicates of any supported chunk
-on decode are rejected per the "Multiple OK? No" rule in RFC 2083 §4.3
-/ W3C PNG3 §5.6.
+fields are emitted at spec-compliant chunk positions (`sBIT` / `sRGB`
+before `PLTE`/`IDAT`; `bKGD` / `hIST` after `PLTE`, before `IDAT`;
+`pHYs`, `tIME`, and `eXIf` before `IDAT`). Duplicates of any supported
+chunk on decode are rejected per the "Multiple OK? No" rule in RFC 2083
+§4.3 / W3C PNG3 §5.6.
 
 ## Not preserved
 
@@ -69,7 +76,7 @@ on decode are rejected per the "Multiple OK? No" rule in RFC 2083 §4.3
 - `tRNS` alpha applied to `Gray*` / `Rgb*` pixels on decode (the chunk is
   parsed + CRC-validated but not blended into the output plane; for `Pal8`
   the per-entry alpha is still carried through `extradata`)
-- Colour-management + remaining metadata chunks: `cICP`, `sRGB`, `gAMA`,
+- Colour-management + remaining metadata chunks: `cICP`, `gAMA`,
   `cHRM`, `iCCP`, `tEXt`, `zTXt`, `iTXt`, `sPLT`. Each is
   CRC-checked on read and then dropped
 

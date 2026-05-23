@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any other value, but does not interpret the TIFF directory. Round-trips
   through `PngMetadata`, emitted before `IDAT` (§5.6 Table 1); duplicate
   `eXIf` chunks are rejected on decode.
+- `Srgb { rendering_intent: RenderingIntent }` covering the `sRGB`
+  ancillary chunk (W3C PNG3 §11.3.2.5). One-byte payload selecting the
+  ICC rendering intent (`0` Perceptual / `1` Relative colorimetric /
+  `2` Saturation / `3` Absolute colorimetric, Table 16); reserved values
+  `4..=255` are rejected on decode. Round-trips through `PngMetadata`,
+  emitted before `PLTE` + `IDAT` (§5.6 Table 1) alongside `sBIT`;
+  duplicate `sRGB` chunks are rejected on decode.
 
 ## [0.1.6](https://github.com/OxideAV/oxideav-png/compare/v0.1.5...v0.1.6) - 2026-05-06
 

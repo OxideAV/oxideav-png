@@ -32,10 +32,11 @@
 //! Not implemented:
 //! * Sub-byte encode (decode only — encoder always writes 8/16-bit)
 //! * Round-tripped metadata: `sBIT`, `pHYs`, `tIME`, `bKGD`, `hIST`,
-//!   `eXIf` — surfaced via [`parse_metadata`] on decode and re-emitted by
-//!   the encoder when [`PngEncoderOptions::metadata`] is populated.
-//!   `eXIf` is carried as an opaque (TIFF-header-validated) blob.
-//! * Colour management / metadata chunks (`cICP`, `sRGB`, `gAMA`, `cHRM`,
+//!   `eXIf`, `sRGB` — surfaced via [`parse_metadata`] on decode and
+//!   re-emitted by the encoder when [`PngEncoderOptions::metadata`] is
+//!   populated. `eXIf` is carried as an opaque (TIFF-header-validated)
+//!   blob; `sRGB` carries the ICC rendering intent.
+//! * Colour management / metadata chunks (`cICP`, `gAMA`, `cHRM`,
 //!   `iCCP`, `tEXt`, `zTXt`, `iTXt`, `sPLT`). CRC is verified on read and
 //!   then they are dropped — they are not round-tripped through the
 //!   container and not surfaced on decode.
@@ -85,7 +86,9 @@ pub use encoder::{
 };
 pub use error::{PngError, Result};
 pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
-pub use metadata::{Bkgd, Exif, Hist, Phys, PhysUnit, PngMetadata, Sbit, Time};
+pub use metadata::{
+    Bkgd, Exif, Hist, Phys, PhysUnit, PngMetadata, RenderingIntent, Sbit, Srgb, Time,
+};
 
 // Public registry-gated API — keeps the framework integration surface
 // (Decoder/Encoder/Demuxer/Muxer trait impls, `register*` helpers,

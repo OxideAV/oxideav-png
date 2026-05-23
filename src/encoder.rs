@@ -40,11 +40,12 @@ pub struct PngEncoderOptions {
     /// Compressed payload gets ~5–15% larger but the image is
     /// progressively renderable.
     pub interlace: bool,
-    /// Optional `sBIT` / `pHYs` / `tIME` / `bKGD` / `hIST` / `eXIf`
-    /// ancillary metadata to embed. Each `Some(_)` field is written; chunk
-    /// ordering follows RFC 2083 §4.3 / W3C PNG3 §5.6 Table 1:
+    /// Optional `sBIT` / `pHYs` / `tIME` / `bKGD` / `hIST` / `eXIf` /
+    /// `sRGB` ancillary metadata to embed. Each `Some(_)` field is
+    /// written; chunk ordering follows RFC 2083 §4.3 / W3C PNG3 §5.6
+    /// Table 1:
     ///
-    /// * `sBIT` — before `PLTE` and `IDAT`.
+    /// * `sBIT` / `sRGB` — before `PLTE` and `IDAT`.
     /// * `bKGD` / `hIST` — after `PLTE`, before `IDAT`.
     /// * `pHYs` — before `IDAT`.
     /// * `tIME` — unconstrained; we emit it before `IDAT` for
@@ -106,14 +107,19 @@ pub fn encode_png_image_with_options(
     Ok(out)
 }
 
-/// Emit `sBIT` (the only metadata chunk RFC 2083 §4.3 places
-/// "before PLTE and IDAT").
+/// Emit the metadata chunks the PNG spec places "before PLTE and IDAT":
+/// `sBIT` (RFC 2083 §4.3) and `sRGB` (W3C PNG3 §5.6 Table 1). Emitted in
+/// that order for determinism; the spec imposes no relative ordering
+/// between them within the pre-PLTE bucket.
 fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
     let Some(meta) = meta else {
         return;
     };
     if let Some(sbit) = &meta.sbit {
         write_chunk(out, b"sBIT", &sbit.to_bytes());
+    }
+    if let Some(srgb) = &meta.srgb {
+        write_chunk(out, b"sRGB", &srgb.to_bytes());
     }
 }
 

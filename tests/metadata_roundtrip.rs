@@ -4,7 +4,8 @@
 
 use oxideav_png::{
     decode_png, encode_png_image, encode_png_image_with_options, parse_metadata, Bkgd, Exif, Hist,
-    Phys, PhysUnit, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat, Sbit, Time,
+    Phys, PhysUnit, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat, RenderingIntent,
+    Sbit, Srgb, Time,
 };
 
 fn rgba_2x2() -> PngImage {
@@ -196,6 +197,9 @@ fn all_three_chunks_roundtrip() {
         bkgd: Some(Bkgd::Rgb(255, 255, 255)),
         hist: None,
         exif: None,
+        srgb: Some(Srgb {
+            rendering_intent: RenderingIntent::Saturation,
+        }),
     };
     let opts = PngEncoderOptions {
         metadata: Some(meta_in.clone()),
@@ -590,5 +594,93 @@ fn parse_metadata_rejects_exif_with_bad_tiff_header() {
     assert!(
         msg.contains("TIFF byte-order header"),
         "expected bad-TIFF-header error, got {msg}"
+    );
+}
+
+#[test]
+fn srgb_roundtrip() {
+    // PNG3 §11.3.2.5: one-byte rendering intent. Round-trip the
+    // "Relative colorimetric" intent through encode/decode.
+    let img = rgba_2x2();
+    let srgb = Srgb {
+        rendering_intent: RenderingIntent::RelativeColorimetric,
+    };
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            srgb: Some(srgb),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.srgb, Some(srgb));
+    // Pixels must still decode bit-exactly.
+    let back = decode_png(&bytes).expect("decode pixels");
+    assert_eq!(back.data, img.data);
+}
+
+#[test]
+fn chunk_ordering_srgb_precedes_plte_and_idat() {
+    // PNG3 §5.6 Table 1: sRGB is "Before PLTE and IDAT". Verify the byte
+    // positions against a palette image so PLTE is actually present.
+    let img = pal8_4x1();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            srgb: Some(Srgb {
+                rendering_intent: RenderingIntent::Perceptual,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
+    let srgb_pos = pos(b"sRGB").expect("sRGB");
+    let plte_pos = pos(b"PLTE").expect("PLTE");
+    let idat_pos = pos(b"IDAT").expect("IDAT");
+    assert!(srgb_pos < plte_pos, "sRGB must precede PLTE");
+    assert!(srgb_pos < idat_pos, "sRGB must precede IDAT");
+}
+
+#[test]
+fn parse_metadata_detects_duplicate_srgb() {
+    // Hand-craft a PNG with two sRGB chunks; the dedup check must fire.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25; // after IHDR
+    let mut single = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut single, b"sRGB", &[0u8]);
+    let mut tampered = Vec::with_capacity(bytes.len() + 2 * single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("two sRGB chunks must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("duplicate sRGB"),
+        "expected duplicate-sRGB error, got {msg}"
+    );
+}
+
+#[test]
+fn parse_metadata_rejects_reserved_srgb_intent() {
+    // PNG3 §11.3.2.5 Table 16 defines only intents 0..=3; a chunk
+    // carrying 4 must be rejected on decode.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut single = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut single, b"sRGB", &[4u8]);
+    let mut tampered = Vec::with_capacity(bytes.len() + single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("reserved sRGB intent must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("rendering intent"),
+        "expected reserved-intent error, got {msg}"
     );
 }
