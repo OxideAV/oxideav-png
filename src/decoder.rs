@@ -44,7 +44,7 @@ use miniz_oxide::inflate::decompress_to_vec_zlib;
 use crate::apng::{parse_fdat, Actl, Blend, Disposal, Fctl};
 use crate::chunk::{read_chunk, ChunkRef, PNG_MAGIC};
 use crate::filter::{unfilter_row, FilterType};
-use crate::metadata::{Bkgd, Hist, Phys, PngMetadata, Sbit, Time};
+use crate::metadata::{Bkgd, Exif, Hist, Phys, PngMetadata, Sbit, Time};
 
 pub const CODEC_ID_STR: &str = "png";
 
@@ -218,14 +218,14 @@ pub(crate) fn parse_all_chunks(buf: &[u8]) -> Result<Vec<ChunkRef<'_>>> {
 }
 
 /// Extract round-trippable PNG ancillary metadata (`sBIT`, `pHYs`,
-/// `tIME`, `bKGD`, `hIST`) from a PNG / APNG file.
+/// `tIME`, `bKGD`, `hIST`, `eXIf`) from a PNG / APNG file.
 ///
 /// Standalone (no `oxideav-core`) entry point: works whether or not
 /// the `registry` feature is enabled. Returns
 /// [`PngMetadata::default`] (all-`None`) when none of the supported
 /// chunks are present. Reports an `InvalidData` error if any supported
-/// chunk appears more than once — RFC 2083 §4.3 marks all five as
-/// "Multiple OK? No".
+/// chunk appears more than once — RFC 2083 §4.3 / W3C PNG3 §5.6 mark
+/// all six as "Multiple OK? No".
 ///
 /// CRC validation is performed by the underlying chunk walker
 /// ([`crate::chunk::read_chunk`]) so a tampered chunk fails before
@@ -324,6 +324,12 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                     Error::invalid("PNG hIST: chunk requires a PLTE chunk (PNG3 §11.3.4.2)")
                 })?;
                 out.hist = Some(Hist::parse(c.data, n)?);
+            }
+            b"eXIf" => {
+                if out.exif.is_some() {
+                    return Err(Error::invalid("PNG: duplicate eXIf chunk"));
+                }
+                out.exif = Some(Exif::parse(c.data)?);
             }
             _ => {}
         }

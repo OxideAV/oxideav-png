@@ -1,9 +1,13 @@
-//! PNG ancillary metadata chunks — `sBIT`, `pHYs`, `tIME`, `bKGD`, `hIST`.
+//! PNG ancillary metadata chunks — `sBIT`, `pHYs`, `tIME`, `bKGD`,
+//! `hIST`, `eXIf`.
 //!
-//! All are short, fixed-layout chunks with no embedded compression and
-//! no cross-chunk dependencies (with the single exception that `hIST`
-//! must accompany a `PLTE` and match its length), which makes them the
-//! natural first pass at round-tripping PNG metadata through this codec.
+//! All but `eXIf` are short, fixed-layout chunks with no embedded
+//! compression and no cross-chunk dependencies (with the single
+//! exception that `hIST` must accompany a `PLTE` and match its length),
+//! which makes them the natural first pass at round-tripping PNG
+//! metadata through this codec. `eXIf` is variable-length but is treated
+//! as an opaque TIFF-formatted blob: we validate only its byte-order
+//! header and round-trip the bytes verbatim.
 //!
 //! Spec references (RFC 2083 = PNG 1.0; the W3C PNG 3rd edition preserves
 //! the same layouts):
@@ -55,6 +59,19 @@
 //!   approximate usage count for the matching palette index; only meaningful
 //!   when a `PLTE` is present. `hIST` must follow `PLTE` and precede the
 //!   first `IDAT`. Multiple `hIST` chunks are forbidden.
+//!
+//! - `eXIf` — W3C PNG3 §11.3.4.5 "Exchangeable Image File (Exif)
+//!   Profile". Variable-length: the payload is an Exif/TIFF profile in
+//!   the [CIPA-DC-008] §4.7.2 interoperability layout, **minus** the JPEG
+//!   `APP1` marker, length field, and `"Exif\0"` ID code. PNG treats it
+//!   as opaque metadata "concerning the original image data"; we neither
+//!   parse nor interpret the TIFF directory, only round-trip it. The spec
+//!   does require the first four bytes to be one of the two TIFF byte-order
+//!   magic words — `49 49 2A 00` (`"II"`, little-endian, 16-bit `42`) or
+//!   `4D 4D 00 2A` (`"MM"`, big-endian, 16-bit `42`) — "all other values
+//!   are reserved" (§11.3.4.5.2). We reject any other header so a
+//!   malformed blob can't masquerade as Exif. `eXIf` must precede the
+//!   first `IDAT` (§5.6 Table 1) and only one is permitted.
 //!
 //! All chunks here are marked "Multiple OK? No" in the PNG spec; we
 //! enforce that on parse — duplicates are an `InvalidData` error.
@@ -413,6 +430,58 @@ impl Hist {
     }
 }
 
+/// `eXIf` payload (W3C PNG3 §11.3.4.5).
+///
+/// An opaque Exif/TIFF profile. The PNG spec defines no internal
+/// structure beyond requiring a valid TIFF byte-order header, so we
+/// store the raw bytes and round-trip them verbatim. The leading
+/// four bytes are validated against the two legal TIFF magic words on
+/// [`Self::parse`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Exif {
+    /// Raw profile bytes, exactly as they appear in the chunk (TIFF
+    /// header onward; no JPEG `APP1` marker / length / `"Exif\0"` ID).
+    pub data: Vec<u8>,
+}
+
+/// TIFF little-endian (Intel) byte-order header: `"II"` followed by the
+/// 16-bit value `42` little-endian (W3C PNG3 §11.3.4.5.2).
+const TIFF_LE_MAGIC: [u8; 4] = [0x49, 0x49, 0x2A, 0x00];
+/// TIFF big-endian (Motorola) byte-order header: `"MM"` followed by the
+/// 16-bit value `42` big-endian (W3C PNG3 §11.3.4.5.2).
+const TIFF_BE_MAGIC: [u8; 4] = [0x4D, 0x4D, 0x00, 0x2A];
+
+impl Exif {
+    /// Parse an `eXIf` chunk payload. Rejects payloads shorter than the
+    /// 4-byte TIFF header and any header that is not one of the two
+    /// legal byte-order magic words (W3C PNG3 §11.3.4.5.2: "all other
+    /// values are reserved for possible future definition"). The TIFF
+    /// directory itself is not interpreted.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        if data.len() < 4 {
+            return Err(Error::invalid(format!(
+                "PNG eXIf: payload too short ({} bytes) for a TIFF header",
+                data.len()
+            )));
+        }
+        let header = [data[0], data[1], data[2], data[3]];
+        if header != TIFF_LE_MAGIC && header != TIFF_BE_MAGIC {
+            return Err(Error::invalid(format!(
+                "PNG eXIf: invalid TIFF byte-order header {header:02X?} \
+                 (expected \"II\"/{TIFF_LE_MAGIC:02X?} or \"MM\"/{TIFF_BE_MAGIC:02X?})"
+            )));
+        }
+        Ok(Self {
+            data: data.to_vec(),
+        })
+    }
+
+    /// Emit the on-wire payload (the raw profile bytes, unchanged).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.data.clone()
+    }
+}
+
 /// Bundle of metadata chunks that round-trip through the encoder.
 ///
 /// Populated by [`crate::parse_metadata`] on decode and consumed by
@@ -425,6 +494,7 @@ pub struct PngMetadata {
     pub time: Option<Time>,
     pub bkgd: Option<Bkgd>,
     pub hist: Option<Hist>,
+    pub exif: Option<Exif>,
 }
 
 impl PngMetadata {
@@ -436,6 +506,7 @@ impl PngMetadata {
             && self.time.is_none()
             && self.bkgd.is_none()
             && self.hist.is_none()
+            && self.exif.is_none()
     }
 }
 
@@ -619,6 +690,13 @@ mod tests {
             ..Default::default()
         };
         assert!(!m4.is_empty());
+        let m5 = PngMetadata {
+            exif: Some(Exif {
+                data: TIFF_LE_MAGIC.to_vec(),
+            }),
+            ..Default::default()
+        };
+        assert!(!m5.is_empty());
     }
 
     #[test]
@@ -715,5 +793,58 @@ mod tests {
         // but not a spec violation in itself).
         let h = Hist::parse(&[], 0).unwrap();
         assert!(h.frequencies.is_empty());
+    }
+
+    #[test]
+    fn exif_little_endian_roundtrip() {
+        // "II", 42 LE, then an opaque (here trivial) TIFF body. We don't
+        // interpret the body; it just rides along verbatim.
+        let mut raw = TIFF_LE_MAGIC.to_vec();
+        raw.extend_from_slice(&[0x08, 0x00, 0x00, 0x00, 0xDE, 0xAD]);
+        let e = Exif::parse(&raw).unwrap();
+        assert_eq!(e.to_bytes(), raw);
+        assert_eq!(e.data, raw);
+    }
+
+    #[test]
+    fn exif_big_endian_roundtrip() {
+        // "MM", 42 BE header.
+        let mut raw = TIFF_BE_MAGIC.to_vec();
+        raw.extend_from_slice(&[0x00, 0x00, 0x00, 0x08]);
+        let e = Exif::parse(&raw).unwrap();
+        assert_eq!(e.to_bytes(), raw);
+    }
+
+    #[test]
+    fn exif_accepts_bare_four_byte_header() {
+        // The minimal legal payload is the 4-byte byte-order header.
+        let e = Exif::parse(&TIFF_LE_MAGIC).unwrap();
+        assert_eq!(e.data, TIFF_LE_MAGIC);
+    }
+
+    #[test]
+    fn exif_rejects_short_payload() {
+        // Fewer than 4 bytes can't carry a TIFF header.
+        let err = Exif::parse(&[0x49, 0x49, 0x2A]).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn exif_rejects_bad_byte_order_magic() {
+        // §11.3.4.5.2: only "II"/42 and "MM"/42 are valid; everything
+        // else is reserved and must be rejected. JFIF's "JFIF" header is
+        // a representative wrong value.
+        let bad = [0x4A, 0x46, 0x49, 0x46, 0x00];
+        let err = Exif::parse(&bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn exif_rejects_wrong_endianness_marker() {
+        // "II" but with a big-endian 42 (00 2A) — the spec pins the
+        // 42 marker to match the declared byte order, so this is invalid.
+        let bad = [0x49, 0x49, 0x00, 0x2A];
+        let err = Exif::parse(&bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
     }
 }

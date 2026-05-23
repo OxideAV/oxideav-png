@@ -48,14 +48,19 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
 - `hIST` (palette histogram, RFC 2083 §4.2.4 / W3C PNG3 §11.3.4.2) —
   one `u16` per `PLTE` entry; the entry count must match exactly.
   Requires `PLTE` to be present (decode rejects orphan `hIST`).
+- `eXIf` (Exif profile, W3C PNG3 §11.3.4.5) — carried as an opaque
+  TIFF blob. Decode validates only the byte-order header (`II`/42 LE
+  or `MM`/42 BE, §11.3.4.5.2) and round-trips the bytes verbatim; the
+  TIFF directory is not interpreted. Emitted before `IDAT` (§5.6).
 
 Decode: [`parse_metadata`] returns a [`PngMetadata`] with each
 supported field populated for any chunks present. Encode:
 [`PngEncoderOptions`]`::metadata` holds the same struct; populated
 fields are emitted at spec-compliant chunk positions (`sBIT` before
-`PLTE`/`IDAT`; `bKGD` / `hIST` after `PLTE`, before `IDAT`; `pHYs`
-and `tIME` before `IDAT`). Duplicates of any supported chunk on decode
-are rejected per the "Multiple OK? No" rule in RFC 2083 §4.3.
+`PLTE`/`IDAT`; `bKGD` / `hIST` after `PLTE`, before `IDAT`; `pHYs`,
+`tIME`, and `eXIf` before `IDAT`). Duplicates of any supported chunk
+on decode are rejected per the "Multiple OK? No" rule in RFC 2083 §4.3
+/ W3C PNG3 §5.6.
 
 ## Not preserved
 
@@ -65,7 +70,7 @@ are rejected per the "Multiple OK? No" rule in RFC 2083 §4.3.
   parsed + CRC-validated but not blended into the output plane; for `Pal8`
   the per-entry alpha is still carried through `extradata`)
 - Colour-management + remaining metadata chunks: `cICP`, `sRGB`, `gAMA`,
-  `cHRM`, `iCCP`, `tEXt`, `zTXt`, `iTXt`, `sPLT`, `eXIf`. Each is
+  `cHRM`, `iCCP`, `tEXt`, `zTXt`, `iTXt`, `sPLT`. Each is
   CRC-checked on read and then dropped
 
 ## Usage

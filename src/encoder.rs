@@ -40,8 +40,8 @@ pub struct PngEncoderOptions {
     /// Compressed payload gets ~5–15% larger but the image is
     /// progressively renderable.
     pub interlace: bool,
-    /// Optional `sBIT` / `pHYs` / `tIME` / `bKGD` / `hIST` ancillary
-    /// metadata to embed. Each `Some(_)` field is written; chunk
+    /// Optional `sBIT` / `pHYs` / `tIME` / `bKGD` / `hIST` / `eXIf`
+    /// ancillary metadata to embed. Each `Some(_)` field is written; chunk
     /// ordering follows RFC 2083 §4.3 / W3C PNG3 §5.6 Table 1:
     ///
     /// * `sBIT` — before `PLTE` and `IDAT`.
@@ -49,6 +49,7 @@ pub struct PngEncoderOptions {
     /// * `pHYs` — before `IDAT`.
     /// * `tIME` — unconstrained; we emit it before `IDAT` for
     ///   determinism.
+    /// * `eXIf` — before `IDAT` (§5.6 Table 1).
     ///
     /// `None` skips the chunk entirely.
     pub metadata: Option<PngMetadata>,
@@ -116,9 +117,11 @@ fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
     }
 }
 
-/// Emit `bKGD`, `hIST`, `pHYs`, `tIME` — all four go between any
+/// Emit `bKGD`, `hIST`, `pHYs`, `tIME`, `eXIf` — all go between any
 /// `PLTE`/`tRNS` pair and the `IDAT` stream. `bKGD` + `hIST` are
-/// emitted first per W3C PNG3 §5.6 ("After PLTE; before IDAT").
+/// emitted first per W3C PNG3 §5.6 ("After PLTE; before IDAT"); `eXIf`
+/// is "Before IDAT" (§5.6 Table 1) with no PLTE relationship, so we
+/// place it last in this bucket.
 fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
     let Some(meta) = meta else {
         return;
@@ -134,6 +137,9 @@ fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
     }
     if let Some(time) = &meta.time {
         write_chunk(out, b"tIME", &time.to_bytes());
+    }
+    if let Some(exif) = &meta.exif {
+        write_chunk(out, b"eXIf", &exif.to_bytes());
     }
 }
 

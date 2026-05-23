@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   / RGB samples are range-checked against `(1 << IHDR.bit_depth) - 1`;
   indexed `bKGD` rejects palette indices ≥ the PLTE entry count; `hIST`
   decode rejects orphan chunks (no `PLTE`) and length mismatches.
+- `Exif { data: Vec<u8> }` covering the `eXIf` ancillary chunk (W3C
+  PNG3 §11.3.4.5). Carried as an opaque TIFF blob: decode validates the
+  byte-order header (`II`/42 LE or `MM`/42 BE, §11.3.4.5.2) and rejects
+  any other value, but does not interpret the TIFF directory. Round-trips
+  through `PngMetadata`, emitted before `IDAT` (§5.6 Table 1); duplicate
+  `eXIf` chunks are rejected on decode.
 
 ## [0.1.6](https://github.com/OxideAV/oxideav-png/compare/v0.1.5...v0.1.6) - 2026-05-06
 

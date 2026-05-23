@@ -31,9 +31,10 @@
 //!
 //! Not implemented:
 //! * Sub-byte encode (decode only — encoder always writes 8/16-bit)
-//! * Round-tripped metadata: `sBIT`, `pHYs`, `tIME`, `bKGD`, `hIST` —
-//!   surfaced via [`parse_metadata`] on decode and re-emitted by the
-//!   encoder when [`PngEncoderOptions::metadata`] is populated.
+//! * Round-tripped metadata: `sBIT`, `pHYs`, `tIME`, `bKGD`, `hIST`,
+//!   `eXIf` — surfaced via [`parse_metadata`] on decode and re-emitted by
+//!   the encoder when [`PngEncoderOptions::metadata`] is populated.
+//!   `eXIf` is carried as an opaque (TIFF-header-validated) blob.
 //! * Colour management / metadata chunks (`cICP`, `sRGB`, `gAMA`, `cHRM`,
 //!   `iCCP`, `tEXt`, `zTXt`, `iTXt`, `sPLT`). CRC is verified on read and
 //!   then they are dropped — they are not round-tripped through the
@@ -84,7 +85,7 @@ pub use encoder::{
 };
 pub use error::{PngError, Result};
 pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
-pub use metadata::{Bkgd, Hist, Phys, PhysUnit, PngMetadata, Sbit, Time};
+pub use metadata::{Bkgd, Exif, Hist, Phys, PhysUnit, PngMetadata, Sbit, Time};
 
 // Public registry-gated API — keeps the framework integration surface
 // (Decoder/Encoder/Demuxer/Muxer trait impls, `register*` helpers,

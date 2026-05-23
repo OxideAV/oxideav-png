@@ -3,8 +3,8 @@
 //! position and the decoder reads them back byte-for-byte.
 
 use oxideav_png::{
-    decode_png, encode_png_image, encode_png_image_with_options, parse_metadata, Bkgd, Hist, Phys,
-    PhysUnit, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat, Sbit, Time,
+    decode_png, encode_png_image, encode_png_image_with_options, parse_metadata, Bkgd, Exif, Hist,
+    Phys, PhysUnit, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat, Sbit, Time,
 };
 
 fn rgba_2x2() -> PngImage {
@@ -195,6 +195,7 @@ fn all_three_chunks_roundtrip() {
         // (no PLTE on RGBA).
         bkgd: Some(Bkgd::Rgb(255, 255, 255)),
         hist: None,
+        exif: None,
     };
     let opts = PngEncoderOptions {
         metadata: Some(meta_in.clone()),
@@ -467,5 +468,127 @@ fn parse_metadata_validates_sbit_against_ihdr() {
     assert!(
         msg.contains("significant-bit count"),
         "expected sBIT bounds error, got {msg}"
+    );
+}
+
+/// A small but realistic Exif/TIFF blob: little-endian header, one IFD
+/// offset, zero entries, no next-IFD. We don't interpret it — the codec
+/// treats `eXIf` as opaque — but it exercises a non-trivial body.
+fn sample_exif_le() -> Vec<u8> {
+    let mut v = Vec::new();
+    v.extend_from_slice(&[0x49, 0x49, 0x2A, 0x00]); // "II", 42 LE
+    v.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset = 8
+    v.extend_from_slice(&0u16.to_le_bytes()); // 0 directory entries
+    v.extend_from_slice(&0u32.to_le_bytes()); // next-IFD offset = 0 (none)
+    v
+}
+
+#[test]
+fn exif_roundtrip() {
+    let img = rgba_2x2();
+    let exif = Exif {
+        data: sample_exif_le(),
+    };
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            exif: Some(exif.clone()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.exif, Some(exif));
+    // Pixels must still decode bit-exactly.
+    let back = decode_png(&bytes).expect("decode pixels");
+    assert_eq!(back.data, img.data);
+}
+
+#[test]
+fn exif_big_endian_roundtrip() {
+    let img = gray8_2x2();
+    let mut data = vec![0x4D, 0x4D, 0x00, 0x2A]; // "MM", 42 BE
+    data.extend_from_slice(&8u32.to_be_bytes());
+    data.extend_from_slice(&0u16.to_be_bytes());
+    data.extend_from_slice(&0u32.to_be_bytes());
+    let exif = Exif { data };
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            exif: Some(exif.clone()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.exif, Some(exif));
+}
+
+#[test]
+fn chunk_ordering_exif_precedes_idat() {
+    // PNG3 §5.6 Table 1: eXIf is "Before IDAT". Verify the byte position.
+    let img = rgba_2x2();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            exif: Some(Exif {
+                data: sample_exif_le(),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let exif_pos = bytes
+        .windows(4)
+        .position(|w| w == b"eXIf")
+        .expect("eXIf chunk type tag present");
+    let idat_pos = bytes
+        .windows(4)
+        .position(|w| w == b"IDAT")
+        .expect("IDAT chunk type tag present");
+    assert!(exif_pos < idat_pos, "eXIf must precede IDAT");
+}
+
+#[test]
+fn parse_metadata_detects_duplicate_exif() {
+    // Hand-craft a PNG with two eXIf chunks; the dedup check must fire.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25; // after IHDR
+    let exif_data = sample_exif_le();
+    let mut single = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut single, b"eXIf", &exif_data);
+    let mut tampered = Vec::with_capacity(bytes.len() + 2 * single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("two eXIf chunks must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("duplicate eXIf"),
+        "expected duplicate-eXIf error, got {msg}"
+    );
+}
+
+#[test]
+fn parse_metadata_rejects_exif_with_bad_tiff_header() {
+    // PNG3 §11.3.4.5.2: only "II"/42 and "MM"/42 byte-order headers are
+    // valid. A blob with a bogus header must be rejected on decode.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let bad = [0x00, 0x01, 0x02, 0x03, 0x04]; // not a TIFF header
+    let mut single = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut single, b"eXIf", &bad);
+    let mut tampered = Vec::with_capacity(bytes.len() + single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("bad eXIf header must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("TIFF byte-order header"),
+        "expected bad-TIFF-header error, got {msg}"
     );
 }
