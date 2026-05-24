@@ -1181,9 +1181,20 @@ fn clear_region(
     w: usize,
     h: usize,
 ) {
+    // An APNG `fcTL` carries an attacker-controlled `x_offset`/`y_offset`
+    // (and width/height) that the spec says must lie within the canvas but
+    // a malformed stream need not honour. Clamp the start column to the
+    // canvas before turning it into a byte offset — otherwise `x` past
+    // `canvas_w` produces a `row_start` beyond the buffer and the
+    // (even empty) slice index panics. With `x >= canvas_w` the visible
+    // width collapses to zero, so there is nothing to clear.
+    if x >= canvas_w {
+        return;
+    }
+    let visible_w = w.min(canvas_w - x);
     for dy in y..(y + h).min(canvas_h) {
         let row_start = dy * stride_canvas + x * bpp;
-        let row_end = row_start + ((w.min(canvas_w - x.min(canvas_w))) * bpp);
+        let row_end = row_start + visible_w * bpp;
         for b in &mut canvas[row_start..row_end] {
             *b = 0;
         }

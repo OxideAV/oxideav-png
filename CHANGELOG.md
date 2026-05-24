@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `fuzz/fuzz_targets/decode.rs` cargo-fuzz target driving the standalone
+  decode entry points (`decode_png`, `decode_png_to_rgba`,
+  `parse_metadata`, `parse_apng`, `decode_apng`) over arbitrary bytes —
+  asserts the decoder never panics / aborts / overflows / OOMs on hostile
+  input. Covers chunk-CRC framing, the IDAT zlib stream, per-row filters,
+  sub-byte unpacking, Adam7 interlacing, PLTE/tRNS bounds, and the
+  APNG acTL/fcTL/fdAT container + disposal/blend paths.
+
 - `Splt` / `SpltEntry` covering the `sPLT` suggested-palette chunk (W3C
   PNG3 §11.3.4.4 / Table 25). A named standalone palette independent of
   `PLTE`: a 1-79-byte Latin-1 palette name (`tEXt`-keyword rules per
@@ -64,6 +72,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the pre-`PLTE` / pre-`IDAT` bucket (§4.3 Table 1 ranks `cICP` as
   the highest-precedence colour chunk); duplicate `cICP` chunks are
   rejected on decode.
+
+### Fixed
+
+- `decode_apng`: a malformed APNG `fcTL` whose `x_offset` / `y_offset`
+  placed a frame entirely outside the canvas panicked in the
+  Background-disposal clear path (`clear_region` turned the out-of-canvas
+  start column into a byte offset past the canvas buffer and indexed an
+  empty slice out of bounds). The clear now returns early when the start
+  column is at or beyond the canvas width — the visible region is zero so
+  there is nothing to clear. Found via the new `decode` fuzz target's
+  attack-surface analysis; regression test in
+  `tests/apng_malformed_offset.rs`.
 
 ## [0.1.6](https://github.com/OxideAV/oxideav-png/compare/v0.1.5...v0.1.6) - 2026-05-06
 

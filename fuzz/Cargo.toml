@@ -30,6 +30,15 @@ members = ["."]
 [profile.release]
 debug = 1
 
+# Decode-only target: feed arbitrary bytes straight at the standalone
+# decode entry points. No oracle / no encode round-trip — purely asserts
+# the decoder never panics / aborts / OOMs on hostile input.
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+
 [[bin]]
 name = "png_self_roundtrip"
 path = "fuzz_targets/png_self_roundtrip.rs"

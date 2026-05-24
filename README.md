@@ -105,6 +105,24 @@ OK? Yes" chunk) instead requires distinct palette names.
   `iCCP`, `tEXt`, `zTXt`, `iTXt`. Each is CRC-checked on read and then
   dropped
 
+## Robustness
+
+The decoder is fuzzed with `cargo-fuzz`. Three targets live under `fuzz/`:
+
+- `decode` — feeds arbitrary bytes straight at the standalone decode
+  entry points (`decode_png`, `decode_png_to_rgba`, `parse_metadata`,
+  `parse_apng`, `decode_apng`) and asserts none of them ever panic /
+  abort / overflow / OOM. Covers chunk-CRC framing, the IDAT zlib stream,
+  per-row filters, sub-byte unpacking, Adam7 interlacing, PLTE/tRNS
+  bounds, and the APNG container's disposal / blend paths.
+- `png_self_roundtrip` — encode → decode pixel-equality round-trip.
+- `libpng_encode_oxideav_decode` / `oxideav_encode_libpng_decode` —
+  cross-decode against a `dlopen`ed system libpng (skipped when absent).
+
+```sh
+cargo +nightly fuzz run decode
+```
+
 ## Usage
 
 ```toml
