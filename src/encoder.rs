@@ -41,9 +41,9 @@ pub struct PngEncoderOptions {
     /// progressively renderable.
     pub interlace: bool,
     /// Optional `sBIT` / `pHYs` / `tIME` / `bKGD` / `hIST` / `eXIf` /
-    /// `sRGB` / `cICP` ancillary metadata to embed. Each `Some(_)`
-    /// field is written; chunk ordering follows RFC 2083 §4.3 / W3C
-    /// PNG3 §5.6 Table 1:
+    /// `sRGB` / `cICP` / `sPLT` ancillary metadata to embed. Each
+    /// `Some(_)` field (and each `sPLT` in the `splt` `Vec`) is written;
+    /// chunk ordering follows RFC 2083 §4.3 / W3C PNG3 §5.6 Table 7:
     ///
     /// * `cICP` / `sBIT` / `sRGB` — before `PLTE` and `IDAT` (`cICP`
     ///   first since §4.3 Table 1 makes it the highest-precedence
@@ -52,9 +52,12 @@ pub struct PngEncoderOptions {
     /// * `pHYs` — before `IDAT`.
     /// * `tIME` — unconstrained; we emit it before `IDAT` for
     ///   determinism.
-    /// * `eXIf` — before `IDAT` (§5.6 Table 1).
+    /// * `eXIf` — before `IDAT` (§5.6 Table 7).
+    /// * `sPLT` — before `IDAT` (§5.6 Table 7). Multiple instances are
+    ///   permitted; emitted in `Vec` order. An invalid palette name /
+    ///   sample depth (or an 8-bit sample > 255) is an encode error.
     ///
-    /// `None` skips the chunk entirely.
+    /// `None` (or an empty `splt` `Vec`) skips the chunk entirely.
     pub metadata: Option<PngMetadata>,
 }
 
@@ -102,8 +105,8 @@ pub fn encode_png_image_with_options(
     }
     // pHYs + tIME go between PLTE/tRNS and IDAT (pHYs MUST be before
     // IDAT per RFC 2083 §4.2.5; tIME has no ordering constraint but we
-    // bucket it here for determinism).
-    write_metadata_before_idat(&mut out, opts.metadata.as_ref());
+    // bucket it here for determinism). sPLT also rides here.
+    write_metadata_before_idat(&mut out, opts.metadata.as_ref())?;
     write_chunk(&mut out, b"IDAT", &idat);
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
@@ -130,14 +133,17 @@ fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
     }
 }
 
-/// Emit `bKGD`, `hIST`, `pHYs`, `tIME`, `eXIf` — all go between any
-/// `PLTE`/`tRNS` pair and the `IDAT` stream. `bKGD` + `hIST` are
+/// Emit `bKGD`, `hIST`, `pHYs`, `tIME`, `eXIf`, `sPLT` — all go between
+/// any `PLTE`/`tRNS` pair and the `IDAT` stream. `bKGD` + `hIST` are
 /// emitted first per W3C PNG3 §5.6 ("After PLTE; before IDAT"); `eXIf`
-/// is "Before IDAT" (§5.6 Table 1) with no PLTE relationship, so we
-/// place it last in this bucket.
-fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
+/// and `sPLT` are "Before IDAT" (§5.6 Table 7) with no PLTE
+/// relationship, so they trail this bucket. `sPLT` is the one chunk
+/// permitting multiple instances; each entry of the `splt` `Vec` is
+/// emitted in order. Returns an error if any `sPLT` payload is invalid
+/// (bad palette name / sample depth, or an 8-bit sample > 255).
+fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> Result<()> {
     let Some(meta) = meta else {
-        return;
+        return Ok(());
     };
     if let Some(bkgd) = &meta.bkgd {
         write_chunk(out, b"bKGD", &bkgd.to_bytes());
@@ -154,6 +160,10 @@ fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
     if let Some(exif) = &meta.exif {
         write_chunk(out, b"eXIf", &exif.to_bytes());
     }
+    for splt in &meta.splt {
+        write_chunk(out, b"sPLT", &splt.to_bytes()?);
+    }
+    Ok(())
 }
 
 /// IHDR + row byte count + optional PLTE / tRNS chunk payloads.
@@ -428,9 +438,9 @@ pub fn encode_apng_with_options(
     if let Some(t) = trns.as_deref() {
         write_chunk(&mut out, b"tRNS", t);
     }
-    // pHYs / tIME precede IDAT (and APNG's fcTL/fdAT stream that
+    // pHYs / tIME / sPLT precede IDAT (and APNG's fcTL/fdAT stream that
     // bracket subsequent frames).
-    write_metadata_before_idat(&mut out, opts.metadata.as_ref());
+    write_metadata_before_idat(&mut out, opts.metadata.as_ref())?;
 
     let mut seq: u32 = 0;
     for (idx, frame) in frames.iter().enumerate() {

@@ -44,7 +44,7 @@ use miniz_oxide::inflate::decompress_to_vec_zlib;
 use crate::apng::{parse_fdat, Actl, Blend, Disposal, Fctl};
 use crate::chunk::{read_chunk, ChunkRef, PNG_MAGIC};
 use crate::filter::{unfilter_row, FilterType};
-use crate::metadata::{Bkgd, Cicp, Exif, Hist, Phys, PngMetadata, Sbit, Srgb, Time};
+use crate::metadata::{Bkgd, Cicp, Exif, Hist, Phys, PngMetadata, Sbit, Splt, Srgb, Time};
 
 pub const CODEC_ID_STR: &str = "png";
 
@@ -218,15 +218,17 @@ pub(crate) fn parse_all_chunks(buf: &[u8]) -> Result<Vec<ChunkRef<'_>>> {
 }
 
 /// Extract round-trippable PNG ancillary metadata (`sBIT`, `pHYs`,
-/// `tIME`, `bKGD`, `hIST`, `eXIf`, `sRGB`, `cICP`) from a PNG / APNG
-/// file.
+/// `tIME`, `bKGD`, `hIST`, `eXIf`, `sRGB`, `cICP`, `sPLT`) from a PNG /
+/// APNG file.
 ///
 /// Standalone (no `oxideav-core`) entry point: works whether or not
 /// the `registry` feature is enabled. Returns
-/// [`PngMetadata::default`] (all-`None`) when none of the supported
-/// chunks are present. Reports an `InvalidData` error if any supported
-/// chunk appears more than once — RFC 2083 §4.3 / W3C PNG3 §5.6 mark
-/// all six as "Multiple OK? No".
+/// [`PngMetadata::default`] (all-`None`, empty `splt`) when none of the
+/// supported chunks are present. Reports an `InvalidData` error if any
+/// single-instance chunk appears more than once — RFC 2083 §4.3 / W3C
+/// PNG3 §5.6 mark them all as "Multiple OK? No". `sPLT` ("Multiple OK?
+/// Yes") instead requires distinct palette names; a repeated name is an
+/// `InvalidData` error.
 ///
 /// CRC validation is performed by the underlying chunk walker
 /// ([`crate::chunk::read_chunk`]) so a tampered chunk fails before
@@ -343,6 +345,19 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                     return Err(Error::invalid("PNG: duplicate cICP chunk"));
                 }
                 out.cicp = Some(Cicp::parse(c.data)?);
+            }
+            b"sPLT" => {
+                // Multiple sPLT chunks are permitted, but each shall have
+                // a distinct palette name (W3C PNG3 §11.3.4.4 final
+                // paragraph). Reject a repeated name.
+                let splt = Splt::parse(c.data)?;
+                if out.splt.iter().any(|s| s.name == splt.name) {
+                    return Err(Error::invalid(format!(
+                        "PNG sPLT: duplicate palette name {:?} (names must be distinct)",
+                        splt.name
+                    )));
+                }
+                out.splt.push(splt);
             }
             _ => {}
         }

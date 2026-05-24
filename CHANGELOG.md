@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Splt` / `SpltEntry` covering the `sPLT` suggested-palette chunk (W3C
+  PNG3 §11.3.4.4 / Table 25). A named standalone palette independent of
+  `PLTE`: a 1-79-byte Latin-1 palette name (`tEXt`-keyword rules per
+  §11.3.3.1 — printable `0x20..=0x7E` / `0xA1..=0xFF`, no leading /
+  trailing / consecutive spaces), an 8- or 16-bit sample depth, and a
+  list of `RGBA` + `frequency` entries (6-byte stride at depth 8,
+  10-byte at depth 16; the post-depth payload must divide evenly by the
+  stride). Decode rejects a missing `NUL` separator, an invalid name, a
+  sample depth other than 8/16, and a misaligned entry region; encode
+  additionally rejects an 8-bit sample value > 255. `sPLT` is the lone
+  PNG metadata chunk that permits multiple instances (Table 7 "Multiple
+  OK? Yes"), so `PngMetadata::splt` is a `Vec<Splt>`; the decoder
+  accepts repeats but rejects duplicate palette names, and the encoder
+  emits each instance before `IDAT` (§5.6 Table 7) in `Vec` order.
 - `metadata` module: `Sbit`, `Phys`, `PhysUnit`, `Time`, `PngMetadata`
   with round-trip parsers + encoders for the `sBIT`, `pHYs`, and `tIME`
   ancillary chunks (RFC 2083 §4.2.5 / §4.2.6 / §4.2.8).

@@ -72,15 +72,27 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   points still survive a copy through the codec). Emitted before
   `PLTE` + `IDAT` (§5.6 Table 1) and ahead of `sBIT` / `sRGB` —
   Table 1 in §4.3 makes `cICP` the highest-precedence colour chunk.
+- `sPLT` (suggested palette, W3C PNG3 §11.3.4.4) — one or more named
+  standalone palettes (independent of `PLTE`) that a viewer may use to
+  display a truecolour image on indexed hardware. Each carries a
+  1-79-byte Latin-1 palette name (`tEXt`-keyword rules: printable
+  `0x20..=0x7E` / `0xA1..=0xFF`, no leading / trailing / consecutive
+  spaces), an 8- or 16-bit sample depth, and a list of `RGBA` +
+  `frequency` entries (6-byte stride at depth 8, 10-byte at depth 16).
+  `sPLT` is the one metadata chunk PNG permits to repeat; the decoder
+  accepts multiple instances but rejects duplicate palette names.
+  Emitted before `IDAT` (§5.6 Table 7); held as a `Vec<Splt>` so order
+  is preserved.
 
 Decode: [`parse_metadata`] returns a [`PngMetadata`] with each
 supported field populated for any chunks present. Encode:
 [`PngEncoderOptions`]`::metadata` holds the same struct; populated
 fields are emitted at spec-compliant chunk positions (`cICP` / `sBIT` /
 `sRGB` before `PLTE`/`IDAT`; `bKGD` / `hIST` after `PLTE`, before
-`IDAT`; `pHYs`, `tIME`, and `eXIf` before `IDAT`). Duplicates of any
-supported chunk on decode are rejected per the "Multiple OK? No" rule
-in RFC 2083 §4.3 / W3C PNG3 §5.6.
+`IDAT`; `pHYs`, `tIME`, `eXIf`, and `sPLT` before `IDAT`). Single-
+instance chunks are rejected on decode if repeated (the "Multiple OK?
+No" rule in RFC 2083 §4.3 / W3C PNG3 §5.6); `sPLT` (the lone "Multiple
+OK? Yes" chunk) instead requires distinct palette names.
 
 ## Not preserved
 
@@ -90,8 +102,8 @@ in RFC 2083 §4.3 / W3C PNG3 §5.6.
   parsed + CRC-validated but not blended into the output plane; for `Pal8`
   the per-entry alpha is still carried through `extradata`)
 - Colour-management + remaining metadata chunks: `gAMA`, `cHRM`,
-  `iCCP`, `tEXt`, `zTXt`, `iTXt`, `sPLT`. Each is CRC-checked on
-  read and then dropped
+  `iCCP`, `tEXt`, `zTXt`, `iTXt`. Each is CRC-checked on read and then
+  dropped
 
 ## Usage
 

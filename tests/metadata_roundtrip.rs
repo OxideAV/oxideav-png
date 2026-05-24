@@ -5,7 +5,7 @@
 use oxideav_png::{
     decode_png, encode_png_image, encode_png_image_with_options, parse_metadata, Bkgd, Cicp, Exif,
     Hist, Phys, PhysUnit, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat,
-    RenderingIntent, Sbit, Srgb, Time,
+    RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Time,
 };
 
 fn rgba_2x2() -> PngImage {
@@ -207,6 +207,7 @@ fn all_three_chunks_roundtrip() {
             matrix_coefficients: 0,
             video_full_range_flag: 1,
         }),
+        splt: Vec::new(),
     };
     let opts = PngEncoderOptions {
         metadata: Some(meta_in.clone()),
@@ -818,4 +819,196 @@ fn parse_metadata_rejects_nonzero_cicp_matrix_coefficients() {
         msg.contains("matrix_coefficients"),
         "expected matrix_coefficients error, got {msg}"
     );
+}
+
+// ---- sPLT (W3C PNG3 §11.3.4.4) ----------------------------------------
+
+#[test]
+fn splt_single_8bit_roundtrip() {
+    // One 8-bit suggested palette survives encode → decode intact.
+    let img = rgba_2x2();
+    let splt = Splt {
+        name: "web safe".to_string(),
+        sample_depth: 8,
+        entries: vec![
+            SpltEntry {
+                red: 255,
+                green: 0,
+                blue: 0,
+                alpha: 255,
+                frequency: 50000,
+            },
+            SpltEntry {
+                red: 0,
+                green: 255,
+                blue: 0,
+                alpha: 128,
+                frequency: 10000,
+            },
+        ],
+    };
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            splt: vec![splt.clone()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    // Image data still decodes.
+    let decoded = decode_png(&bytes).expect("decode");
+    assert_eq!(decoded.width, 2);
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.splt.len(), 1);
+    assert_eq!(meta.splt[0], splt);
+}
+
+#[test]
+fn splt_16bit_roundtrip() {
+    let img = rgba_2x2();
+    let splt = Splt {
+        name: "deep".to_string(),
+        sample_depth: 16,
+        entries: vec![SpltEntry {
+            red: 0xFFFE,
+            green: 0x8001,
+            blue: 0x0123,
+            alpha: 0xFFFF,
+            frequency: 0xCAFE,
+        }],
+    };
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            splt: vec![splt.clone()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.splt, vec![splt]);
+}
+
+#[test]
+fn splt_multiple_palettes_roundtrip_in_order() {
+    // PNG permits multiple sPLT chunks (distinct names); the Vec order is
+    // preserved across the round-trip.
+    let img = rgba_2x2();
+    let a = Splt {
+        name: "first".to_string(),
+        sample_depth: 8,
+        entries: vec![SpltEntry {
+            red: 1,
+            green: 2,
+            blue: 3,
+            alpha: 4,
+            frequency: 9,
+        }],
+    };
+    let b = Splt {
+        name: "second".to_string(),
+        sample_depth: 16,
+        entries: vec![SpltEntry {
+            red: 0x1111,
+            green: 0x2222,
+            blue: 0x3333,
+            alpha: 0x4444,
+            frequency: 0x5555,
+        }],
+    };
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            splt: vec![a.clone(), b.clone()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.splt, vec![a, b]);
+}
+
+#[test]
+fn chunk_ordering_splt_precedes_idat() {
+    // PNG3 §5.6 Table 7: sPLT is "Before IDAT".
+    let img = rgba_2x2();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            splt: vec![Splt {
+                name: "p".to_string(),
+                sample_depth: 8,
+                entries: vec![],
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let splt_pos = bytes
+        .windows(4)
+        .position(|w| w == b"sPLT")
+        .expect("sPLT chunk type tag present");
+    let idat_pos = bytes
+        .windows(4)
+        .position(|w| w == b"IDAT")
+        .expect("IDAT chunk type tag present");
+    assert!(splt_pos < idat_pos, "sPLT must precede IDAT");
+}
+
+#[test]
+fn parse_metadata_rejects_duplicate_splt_palette_name() {
+    // Two sPLT chunks with the SAME palette name are illegal (§11.3.4.4
+    // final paragraph: "each shall have a different palette name").
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25; // after IHDR.
+    let payload = Splt {
+        name: "same".to_string(),
+        sample_depth: 8,
+        entries: vec![],
+    }
+    .to_bytes()
+    .expect("splt payload");
+    let mut single = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut single, b"sPLT", &payload);
+    let mut tampered = Vec::with_capacity(bytes.len() + 2 * single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("duplicate sPLT name must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("duplicate palette name"),
+        "expected duplicate-palette-name error, got {msg}"
+    );
+}
+
+#[test]
+fn parse_metadata_allows_two_splt_with_distinct_names() {
+    // Distinct names ⇒ both are accepted and surfaced.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mk = |name: &str| {
+        let payload = Splt {
+            name: name.to_string(),
+            sample_depth: 8,
+            entries: vec![],
+        }
+        .to_bytes()
+        .unwrap();
+        let mut c = Vec::new();
+        oxideav_png::chunk::write_chunk(&mut c, b"sPLT", &payload);
+        c
+    };
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&mk("alpha"));
+    tampered.extend_from_slice(&mk("beta"));
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let meta = parse_metadata(&tampered).expect("two distinct sPLT names accepted");
+    assert_eq!(meta.splt.len(), 2);
+    assert_eq!(meta.splt[0].name, "alpha");
+    assert_eq!(meta.splt[1].name, "beta");
 }

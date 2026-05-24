@@ -1,13 +1,16 @@
 //! PNG ancillary metadata chunks — `sBIT`, `pHYs`, `tIME`, `bKGD`,
-//! `hIST`, `eXIf`, `sRGB`, `cICP`.
+//! `hIST`, `eXIf`, `sRGB`, `cICP`, `sPLT`.
 //!
-//! All but `eXIf` are short, fixed-layout chunks with no embedded
-//! compression and no cross-chunk dependencies (with the single
+//! All but `eXIf` and `sPLT` are short, fixed-layout chunks with no
+//! embedded compression and no cross-chunk dependencies (with the single
 //! exception that `hIST` must accompany a `PLTE` and match its length),
 //! which makes them the natural first pass at round-tripping PNG
 //! metadata through this codec. `eXIf` is variable-length but is treated
 //! as an opaque TIFF-formatted blob: we validate only its byte-order
-//! header and round-trip the bytes verbatim.
+//! header and round-trip the bytes verbatim. `sPLT` is variable-length
+//! and is the one chunk here that "Multiple OK? = Yes" (W3C PNG3 §5.6
+//! Table 7); we parse each instance fully and require distinct palette
+//! names across the datastream.
 //!
 //! Spec references (RFC 2083 = PNG 1.0; the W3C PNG 3rd edition preserves
 //! the same layouts):
@@ -96,8 +99,26 @@
 //!   only one is permitted; when present, it is the highest-precedence
 //!   colour chunk (§4.3 Table 1).
 //!
-//! All chunks here are marked "Multiple OK? No" in the PNG spec; we
-//! enforce that on parse — duplicates are an `InvalidData` error.
+//! - `sPLT` — W3C PNG3 §11.3.4.4 "Suggested palette". A standalone
+//!   palette (independent of `PLTE`) that viewers may use to display a
+//!   truecolour image on indexed-colour hardware. Layout per Table 25:
+//!   a 1-79-byte palette name, a `NUL` separator, a 1-byte sample depth
+//!   (`8` or `16`), then a sequence of entries. Each entry is `R G B A`
+//!   samples — one byte each when the sample depth is `8`, two bytes
+//!   (big-endian) each when `16` — followed by a 2-byte big-endian
+//!   `frequency`. The entry stride is therefore 6 bytes (depth 8) or
+//!   10 bytes (depth 16); the remaining payload after the sample-depth
+//!   byte must divide evenly by that stride. The palette name shares
+//!   the `tEXt` keyword restrictions (§11.3.3.1): printable Latin-1 in
+//!   `0x20..=0x7E` / `0xA1..=0xFF`, no leading / trailing / consecutive
+//!   spaces. `sPLT` "Before IDAT" (§5.6 Table 7) with no `PLTE`
+//!   relationship; multiple `sPLT` chunks are permitted but each shall
+//!   have a different palette name (we reject duplicate names on parse).
+//!
+//! Every chunk here except `sPLT` is marked "Multiple OK? No" in the
+//! PNG spec; we enforce that on parse — duplicates are an `InvalidData`
+//! error. `sPLT` ("Multiple OK? Yes") instead requires distinct palette
+//! names; a repeated name is the `InvalidData` error.
 
 use crate::error::{PngError as Error, Result};
 
@@ -669,11 +690,210 @@ impl Cicp {
     }
 }
 
+/// One entry of an [`Splt`] suggested palette (W3C PNG3 §11.3.4.4
+/// Table 25).
+///
+/// The four colour samples and the frequency are kept as `u16`
+/// regardless of the parent palette's sample depth. For an 8-bit
+/// palette the samples occupy `0..=255`; for 16-bit they use the full
+/// `u16` range. `frequency` is always a `u16` ("proportional to the
+/// fraction of the pixels … for which that palette entry is the closest
+/// match", §11.3.4.4); zero is a valid value meaning "least important".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpltEntry {
+    pub red: u16,
+    pub green: u16,
+    pub blue: u16,
+    pub alpha: u16,
+    pub frequency: u16,
+}
+
+/// `sPLT` payload (W3C PNG3 §11.3.4.4).
+///
+/// A named suggested palette independent of `PLTE`. [`Self::sample_depth`]
+/// is `8` or `16` and fixes the on-wire width of each colour sample
+/// (the entries are always stored here as `u16`); for an 8-bit palette
+/// the [`SpltEntry`] samples must fit in `0..=255`. The palette name
+/// obeys the `tEXt` keyword rules (§11.3.3.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Splt {
+    /// Palette name (1-79 printable Latin-1 bytes; no leading / trailing
+    /// / consecutive spaces). Stored as a `String`; on the wire it is
+    /// the raw Latin-1 bytes, so every byte is `< 0x100` and maps 1:1 to
+    /// a `char` in `U+0020..=U+00FF`.
+    pub name: String,
+    /// `8` or `16` — the per-sample bit width on the wire.
+    pub sample_depth: u8,
+    /// Palette entries, in the spec-mandated decreasing-frequency order
+    /// (we preserve whatever order the input used; the encoder writes
+    /// them back unchanged).
+    pub entries: Vec<SpltEntry>,
+}
+
+/// Validate an `sPLT` palette name / `tEXt` keyword (W3C PNG3 §11.3.3.1
+/// / §11.3.4.4): 1-79 bytes, printable Latin-1 (`0x20..=0x7E` or
+/// `0xA1..=0xFF`), no leading / trailing / consecutive spaces. Returns
+/// the validated raw bytes on success.
+fn validate_keyword(name: &str, context: &str) -> Result<Vec<u8>> {
+    // The name is Latin-1 on the wire: every char must be a single byte
+    // (`U+0000..=U+00FF`). Reject anything that wouldn't round-trip to a
+    // single byte before we even check the printable ranges.
+    let mut bytes = Vec::with_capacity(name.len());
+    for ch in name.chars() {
+        let cp = ch as u32;
+        if cp > 0xFF {
+            return Err(Error::invalid(format!(
+                "PNG {context}: name char U+{cp:04X} is not Latin-1 (single-byte)"
+            )));
+        }
+        bytes.push(cp as u8);
+    }
+    if bytes.is_empty() || bytes.len() > 79 {
+        return Err(Error::invalid(format!(
+            "PNG {context}: name length {} not in 1..=79",
+            bytes.len()
+        )));
+    }
+    for &b in &bytes {
+        let printable = (0x20..=0x7E).contains(&b) || (0xA1..=0xFF).contains(&b);
+        if !printable {
+            return Err(Error::invalid(format!(
+                "PNG {context}: name byte 0x{b:02X} not printable Latin-1 \
+                 (0x20..=0x7E or 0xA1..=0xFF)"
+            )));
+        }
+    }
+    // No leading / trailing / consecutive spaces (0x20).
+    if bytes.first() == Some(&0x20) || bytes.last() == Some(&0x20) {
+        return Err(Error::invalid(format!(
+            "PNG {context}: name has a leading or trailing space"
+        )));
+    }
+    if bytes.windows(2).any(|w| w == [0x20, 0x20]) {
+        return Err(Error::invalid(format!(
+            "PNG {context}: name has consecutive spaces"
+        )));
+    }
+    Ok(bytes)
+}
+
+impl Splt {
+    /// Parse an `sPLT` chunk payload (Table 25): palette name, `NUL`,
+    /// sample depth, then 6- or 10-byte entries. Rejects an invalid
+    /// palette name, a sample depth other than `8` / `16`, a missing
+    /// `NUL` separator, and an entry-region length that is not a
+    /// multiple of the per-entry stride.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        // Palette name runs up to (but not including) the first NUL.
+        let nul = data
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| Error::invalid("PNG sPLT: missing NUL separator after palette name"))?;
+        let name_bytes = &data[..nul];
+        let name_str: String = name_bytes.iter().map(|&b| b as char).collect();
+        // Re-run the keyword validator over the parsed name (length /
+        // printable / spacing rules).
+        validate_keyword(&name_str, "sPLT")?;
+
+        // After the NUL: 1 sample-depth byte, then the entry region.
+        let rest = &data[nul + 1..];
+        let sample_depth = *rest
+            .first()
+            .ok_or_else(|| Error::invalid("PNG sPLT: missing sample-depth byte"))?;
+        let stride = match sample_depth {
+            8 => 6,
+            16 => 10,
+            other => {
+                return Err(Error::invalid(format!(
+                    "PNG sPLT: sample depth {other} must be 8 or 16"
+                )))
+            }
+        };
+        let entry_region = &rest[1..];
+        if entry_region.len() % stride != 0 {
+            return Err(Error::invalid(format!(
+                "PNG sPLT: entry region {} bytes not a multiple of {stride} (sample depth {sample_depth})",
+                entry_region.len()
+            )));
+        }
+        let mut entries = Vec::with_capacity(entry_region.len() / stride);
+        for e in entry_region.chunks_exact(stride) {
+            let entry = if sample_depth == 8 {
+                SpltEntry {
+                    red: e[0] as u16,
+                    green: e[1] as u16,
+                    blue: e[2] as u16,
+                    alpha: e[3] as u16,
+                    frequency: u16::from_be_bytes([e[4], e[5]]),
+                }
+            } else {
+                SpltEntry {
+                    red: u16::from_be_bytes([e[0], e[1]]),
+                    green: u16::from_be_bytes([e[2], e[3]]),
+                    blue: u16::from_be_bytes([e[4], e[5]]),
+                    alpha: u16::from_be_bytes([e[6], e[7]]),
+                    frequency: u16::from_be_bytes([e[8], e[9]]),
+                }
+            };
+            entries.push(entry);
+        }
+        Ok(Self {
+            name: name_str,
+            sample_depth,
+            entries,
+        })
+    }
+
+    /// Emit the on-wire payload (palette name, `NUL`, sample depth,
+    /// then the 6- / 10-byte entries). Validates the palette name, the
+    /// sample depth, and — for an 8-bit palette — that every sample fits
+    /// in a single byte, so the encoder can't silently truncate.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let name_bytes = validate_keyword(&self.name, "sPLT")?;
+        if self.sample_depth != 8 && self.sample_depth != 16 {
+            return Err(Error::invalid(format!(
+                "PNG sPLT: sample depth {} must be 8 or 16",
+                self.sample_depth
+            )));
+        }
+        let mut out = Vec::with_capacity(name_bytes.len() + 2 + self.entries.len() * 10);
+        out.extend_from_slice(&name_bytes);
+        out.push(0); // NUL separator.
+        out.push(self.sample_depth);
+        for e in &self.entries {
+            if self.sample_depth == 8 {
+                for (sample, label) in [
+                    (e.red, "red"),
+                    (e.green, "green"),
+                    (e.blue, "blue"),
+                    (e.alpha, "alpha"),
+                ] {
+                    if sample > 0xFF {
+                        return Err(Error::invalid(format!(
+                            "PNG sPLT: {label} sample {sample} exceeds 255 for an 8-bit palette"
+                        )));
+                    }
+                    out.push(sample as u8);
+                }
+                out.extend_from_slice(&e.frequency.to_be_bytes());
+            } else {
+                out.extend_from_slice(&e.red.to_be_bytes());
+                out.extend_from_slice(&e.green.to_be_bytes());
+                out.extend_from_slice(&e.blue.to_be_bytes());
+                out.extend_from_slice(&e.alpha.to_be_bytes());
+                out.extend_from_slice(&e.frequency.to_be_bytes());
+            }
+        }
+        Ok(out)
+    }
+}
+
 /// Bundle of metadata chunks that round-trip through the encoder.
 ///
 /// Populated by [`crate::parse_metadata`] on decode and consumed by
 /// [`crate::PngEncoderOptions::metadata`] on encode. Any `None` field is
-/// simply omitted from the output PNG.
+/// simply omitted from the output PNG; the `splt` `Vec` is omitted when
+/// empty.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PngMetadata {
     pub sbit: Option<Sbit>,
@@ -684,6 +904,11 @@ pub struct PngMetadata {
     pub exif: Option<Exif>,
     pub srgb: Option<Srgb>,
     pub cicp: Option<Cicp>,
+    /// Zero or more suggested palettes (`sPLT`, W3C PNG3 §11.3.4.4). The
+    /// PNG spec permits multiple instances as long as each has a
+    /// distinct palette name; the decoder enforces that and the encoder
+    /// emits them in `Vec` order.
+    pub splt: Vec<Splt>,
 }
 
 impl PngMetadata {
@@ -698,6 +923,7 @@ impl PngMetadata {
             && self.exif.is_none()
             && self.srgb.is_none()
             && self.cicp.is_none()
+            && self.splt.is_empty()
     }
 }
 
@@ -1167,6 +1393,238 @@ mod tests {
             Cicp::parse(&[]).unwrap_err(),
             Error::InvalidData(_)
         ));
+    }
+
+    #[test]
+    fn splt_8bit_roundtrip() {
+        // Two-entry 8-bit palette; entries in decreasing-frequency order.
+        let s = Splt {
+            name: "256 color including Macintosh default".to_string(),
+            sample_depth: 8,
+            entries: vec![
+                SpltEntry {
+                    red: 0xFF,
+                    green: 0x80,
+                    blue: 0x00,
+                    alpha: 0xFF,
+                    frequency: 60000,
+                },
+                SpltEntry {
+                    red: 0x10,
+                    green: 0x20,
+                    blue: 0x30,
+                    alpha: 0x40,
+                    frequency: 0,
+                },
+            ],
+        };
+        let raw = s.to_bytes().unwrap();
+        // name(37) + NUL(1) + depth(1) + 2 entries × 6 = 51 bytes.
+        assert_eq!(raw.len(), 37 + 1 + 1 + 12);
+        // The depth byte sits right after the NUL terminator.
+        assert_eq!(raw[37], 0);
+        assert_eq!(raw[38], 8);
+        let back = Splt::parse(&raw).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn splt_16bit_roundtrip() {
+        // 16-bit palette: each sample is a big-endian u16 → 10-byte stride.
+        let s = Splt {
+            name: "Optimal 512".to_string(),
+            sample_depth: 16,
+            entries: vec![SpltEntry {
+                red: 0xDEAD,
+                green: 0xBEEF,
+                blue: 0x1234,
+                alpha: 0xFFFF,
+                frequency: 0xABCD,
+            }],
+        };
+        let raw = s.to_bytes().unwrap();
+        // name(11) + NUL(1) + depth(1) + 1 entry × 10 = 23 bytes.
+        assert_eq!(raw.len(), 11 + 1 + 1 + 10);
+        assert_eq!(raw[12], 16);
+        // First sample big-endian DEAD.
+        assert_eq!(&raw[13..15], &[0xDE, 0xAD]);
+        let back = Splt::parse(&raw).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn splt_empty_entry_list_roundtrip() {
+        // A palette with a name but zero entries is structurally legal
+        // (the entry region after the depth byte is empty, which divides
+        // evenly by any stride).
+        let s = Splt {
+            name: "empty".to_string(),
+            sample_depth: 8,
+            entries: vec![],
+        };
+        let raw = s.to_bytes().unwrap();
+        assert_eq!(raw.len(), 5 + 1 + 1);
+        let back = Splt::parse(&raw).unwrap();
+        assert_eq!(back, s);
+        assert!(back.entries.is_empty());
+    }
+
+    #[test]
+    fn splt_parse_rejects_missing_nul() {
+        // No NUL separator anywhere → can't delimit the palette name.
+        let bad = b"name-with-no-nul-and-then-bytes".to_vec();
+        let err = Splt::parse(&bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn splt_parse_rejects_bad_sample_depth() {
+        // "n\0" + depth 4 (only 8 / 16 are legal).
+        let bad = [b'n', 0x00, 4];
+        let err = Splt::parse(&bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn splt_parse_rejects_entry_length_not_multiple_of_stride() {
+        // depth 8 ⇒ stride 6; supply 5 trailing bytes (not a multiple).
+        let mut bad = vec![b'n', 0x00, 8];
+        bad.extend_from_slice(&[1, 2, 3, 4, 5]);
+        let err = Splt::parse(&bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn splt_parse_rejects_missing_sample_depth_byte() {
+        // Name + NUL but no sample-depth byte at all.
+        let bad = [b'n', 0x00];
+        let err = Splt::parse(&bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn splt_rejects_empty_name() {
+        // §11.3.3.1: keywords (and sPLT names) are 1..=79 bytes.
+        let bad = [0x00, 8]; // empty name, NUL, depth.
+        let err = Splt::parse(&bad).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+        // …and the encoder rejects it too.
+        let s = Splt {
+            name: String::new(),
+            sample_depth: 8,
+            entries: vec![],
+        };
+        assert!(matches!(s.to_bytes().unwrap_err(), Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn splt_rejects_name_over_79_bytes() {
+        let s = Splt {
+            name: "x".repeat(80),
+            sample_depth: 8,
+            entries: vec![],
+        };
+        assert!(matches!(s.to_bytes().unwrap_err(), Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn splt_rejects_name_with_control_char() {
+        // 0x1F is below the printable 0x20 floor.
+        let s = Splt {
+            name: "bad\u{1F}name".to_string(),
+            sample_depth: 8,
+            entries: vec![],
+        };
+        assert!(matches!(s.to_bytes().unwrap_err(), Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn splt_rejects_name_in_latin1_gap() {
+        // 0x80..=0xA0 are reserved (the gap between the two printable
+        // Latin-1 ranges). U+00A0 NO-BREAK SPACE is explicitly excluded.
+        let s = Splt {
+            name: "a\u{A0}b".to_string(),
+            sample_depth: 8,
+            entries: vec![],
+        };
+        assert!(matches!(s.to_bytes().unwrap_err(), Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn splt_rejects_leading_trailing_consecutive_spaces() {
+        for bad_name in [" lead", "trail ", "two  spaces"] {
+            let s = Splt {
+                name: bad_name.to_string(),
+                sample_depth: 8,
+                entries: vec![],
+            };
+            assert!(
+                matches!(s.to_bytes().unwrap_err(), Error::InvalidData(_)),
+                "expected reject for {bad_name:?}"
+            );
+        }
+        // A single interior space is fine.
+        let ok = Splt {
+            name: "one space".to_string(),
+            sample_depth: 8,
+            entries: vec![],
+        };
+        assert!(ok.to_bytes().is_ok());
+    }
+
+    #[test]
+    fn splt_rejects_non_latin1_name_char() {
+        // A multi-byte char can't be a single Latin-1 byte.
+        let s = Splt {
+            name: "café\u{1F600}".to_string(),
+            sample_depth: 8,
+            entries: vec![],
+        };
+        assert!(matches!(s.to_bytes().unwrap_err(), Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn splt_encode_rejects_8bit_sample_over_255() {
+        // An 8-bit palette can't carry a sample value of 256+.
+        let s = Splt {
+            name: "ok".to_string(),
+            sample_depth: 8,
+            entries: vec![SpltEntry {
+                red: 256,
+                green: 0,
+                blue: 0,
+                alpha: 0,
+                frequency: 0,
+            }],
+        };
+        assert!(matches!(s.to_bytes().unwrap_err(), Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn splt_high_latin1_name_roundtrips() {
+        // 0xC9 = É is in the upper printable Latin-1 range (0xA1..=0xFF).
+        let s = Splt {
+            name: "\u{C9}".to_string(),
+            sample_depth: 8,
+            entries: vec![],
+        };
+        let raw = s.to_bytes().unwrap();
+        // First byte is the raw Latin-1 0xC9.
+        assert_eq!(raw[0], 0xC9);
+        let back = Splt::parse(&raw).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn metadata_is_empty_accounts_for_splt() {
+        let mut m = PngMetadata::default();
+        assert!(m.is_empty());
+        m.splt.push(Splt {
+            name: "p".to_string(),
+            sample_depth: 8,
+            entries: vec![],
+        });
+        assert!(!m.is_empty());
     }
 
     #[test]
