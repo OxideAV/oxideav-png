@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `fuzz/fuzz_targets/apng_frame_walk.rs` cargo-fuzz target exercising
+  the APNG composite state machine. Constructs a byte-level valid base
+  APNG with the standalone encoder, then walks the chunk stream and
+  rewrites every `fcTL` payload (preserving sequence_number + sub-frame
+  dimensions, recomputing CRC32) with fuzz-derived
+  `dispose_op` / `blend_op` / `x_offset` / `y_offset` tuples. Feeds the
+  mutated stream through `parse_apng` + `decode_apng_info` across
+  1–8-frame chains. Drives the disposal-snapshot lifecycle
+  (`Disposal::Previous`), the background-clear fast-return path
+  (`Disposal::Background` with out-of-canvas offsets — the r124
+  `clear_region` panic site), and `Blend::Source` vs `Blend::Over`
+  composite paths against canvases up to 16×16. ~423K runs at 32s/run
+  on aarch64 with no crash.
+- `fuzz/fuzz_targets/encode_decode_roundtrip.rs` cargo-fuzz target
+  driving the standalone encode → decode → re-encode round-trip for
+  both static PNG (`encode_png_image` / `decode_png`) and animated
+  PNG (`encode_apng` / `decode_apng`). Asserts the decoder is a right
+  inverse of the encoder on encoder-emitted bitstreams (per-frame
+  pixel-byte equality) and that a second encode + decode cycle is
+  image-level idempotent. Mirrors the gif/mp4/mkv/tiff fuzz harness
+  shape; covers the no-`oxideav-core` standalone build path. ~189K
+  runs at 121s with no crash.
 - `fuzz/fuzz_targets/decode.rs` cargo-fuzz target driving the standalone
   decode entry points (`decode_png`, `decode_png_to_rgba`,
   `parse_metadata`, `parse_apng`, `decode_apng`) over arbitrary bytes —

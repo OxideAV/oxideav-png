@@ -56,3 +56,26 @@ name = "oxideav_encode_libpng_decode"
 path = "fuzz_targets/oxideav_encode_libpng_decode.rs"
 test = false
 doc = false
+
+# APNG-frame-walk: build a valid base APNG with the standalone encoder,
+# then mutate every fcTL chunk's dispose_op/blend_op/x_offset/y_offset
+# with fuzz-derived values (recomputing CRC32 so the parser accepts it),
+# and drive `parse_apng` + `decode_apng_info`. Exercises the composite
+# state machine — disposal snapshots, background clears, out-of-canvas
+# offsets, and alpha blending — across 1–8-frame chains.
+[[bin]]
+name = "apng_frame_walk"
+path = "fuzz_targets/apng_frame_walk.rs"
+test = false
+doc = false
+
+# Standalone encode→decode→re-encode round-trip for both static PNG and
+# APNG entry points. Asserts the decoder is a right inverse of the
+# encoder on encoder-emitted bitstreams, then re-encodes + re-decodes
+# to confirm image-level idempotence. Mirrors the gif/mp4/mkv/tiff
+# roundtrip shape; covers the no-`oxideav-core` standalone API path.
+[[bin]]
+name = "encode_decode_roundtrip"
+path = "fuzz_targets/encode_decode_roundtrip.rs"
+test = false
+doc = false
