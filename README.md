@@ -107,7 +107,7 @@ OK? Yes" chunk) instead requires distinct palette names.
 
 ## Robustness
 
-The decoder is fuzzed with `cargo-fuzz`. Three targets live under `fuzz/`:
+The decoder is fuzzed with `cargo-fuzz`. Five targets live under `fuzz/`:
 
 - `decode` — feeds arbitrary bytes straight at the standalone decode
   entry points (`decode_png`, `decode_png_to_rgba`, `parse_metadata`,
@@ -115,7 +115,20 @@ The decoder is fuzzed with `cargo-fuzz`. Three targets live under `fuzz/`:
   abort / overflow / OOM. Covers chunk-CRC framing, the IDAT zlib stream,
   per-row filters, sub-byte unpacking, Adam7 interlacing, PLTE/tRNS
   bounds, and the APNG container's disposal / blend paths.
-- `png_self_roundtrip` — encode → decode pixel-equality round-trip.
+- `apng_frame_walk` — builds a valid base APNG with the standalone
+  encoder, then mutates every `fcTL` chunk's `dispose_op` / `blend_op` /
+  `x_offset` / `y_offset` with fuzz-derived values (recomputing CRC32
+  so the parser still accepts the stream), and drives `parse_apng` +
+  `decode_apng_info` across 1-8-frame chains. Drives the composite
+  state machine — `Previous` snapshots, `Background` clears (the r124
+  out-of-canvas fix lives here), `Source` vs `Over` blend.
+- `encode_decode_roundtrip` — standalone encode → decode → re-encode
+  for both static PNG and APNG entry points. Asserts the decoder is a
+  right inverse of the encoder on encoder-emitted bitstreams, then
+  re-encodes + re-decodes to confirm image-level idempotence. Covers
+  the no-`oxideav-core` standalone API path.
+- `png_self_roundtrip` — encode → decode pixel-equality round-trip
+  through the framework `VideoFrame` surface.
 - `libpng_encode_oxideav_decode` / `oxideav_encode_libpng_decode` —
   cross-decode against a `dlopen`ed system libpng (skipped when absent).
 

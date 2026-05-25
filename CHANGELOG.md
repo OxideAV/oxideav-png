@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `fuzz/fuzz_targets/apng_frame_walk.rs` cargo-fuzz target exercising
+  the APNG composite state machine (`acTL` / `fcTL` / `fdAT`) on byte-
+  level *valid* inputs that are combinatorially adversarial in their
+  `blend_op` / `dispose_op` / `x_offset` / `y_offset` choices. Builds
+  a base APNG with the standalone encoder, then walks the chunk stream
+  and rewrites every `fcTL` payload (recomputing CRC32) before driving
+  `parse_apng` + `decode_apng_info` across 1-8-frame chains. Pushes
+  offsets into in-canvas, on-edge, just-past-canvas, and near-`u32::MAX`
+  bands so the `Disposal::Background` clear, `Disposal::Previous`
+  snapshot, and `Blend::Over` alpha-composite arms all get hit.
+- `fuzz/fuzz_targets/encode_decode_roundtrip.rs` cargo-fuzz target
+  asserting the standalone decoder is a right inverse of the standalone
+  encoder for both static PNG (`encode_png_image` / `decode_png`) and
+  animated PNG (`encode_apng` / `decode_apng`) on encoder-emitted
+  bitstreams. Re-encodes the decoded image (and APNG frame chain) and
+  decodes the result a second time to confirm image-level idempotence.
+  Mirrors the `gif::roundtrip` / `flac::roundtrip` shape and covers
+  the no-`oxideav-core` standalone build path.
 - `fuzz/fuzz_targets/decode.rs` cargo-fuzz target driving the standalone
   decode entry points (`decode_png`, `decode_png_to_rgba`,
   `parse_metadata`, `parse_apng`, `decode_apng`) over arbitrary bytes —
