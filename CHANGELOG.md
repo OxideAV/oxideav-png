@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/OxideAV/oxideav-png/compare/v0.1.6...v0.1.7) - 2026-05-25
+
+### Other
+
+- add apng_frame_walk + encode_decode_roundtrip targets
+- add decode target; fix APNG out-of-canvas fcTL offset panic
+- round-trip the sPLT suggested-palette chunk
+- round-trip the cICP (coding-independent code points) chunk
+- round-trip the sRGB chunk (W3C PNG3 §11.3.2.5)
+- round-trip the eXIf (Exif profile) ancillary chunk
+- round-trip bKGD + hIST ancillary chunks
+- round-trip sBIT / pHYs / tIME ancillary chunks
+
 ### Added
 
 - `fuzz/fuzz_targets/apng_frame_walk.rs` cargo-fuzz target exercising
