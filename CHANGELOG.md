@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Criterion bench harnesses (`benches/decode.rs`, `benches/encode.rs`,
+  `benches/roundtrip.rs`) covering the PNG + APNG decoder and encoder
+  hot paths across every pixel layout the codec supports: 1920×1080
+  RGBA (the 1080p baseline), 320×240 RGBA / RGB24 / Pal8 / Rgba64Le,
+  640×480 RGB24, 512×512 Gray8 / Gray16Le / Rgb48Le, plus Adam7
+  seven-pass interlaced encode + decode and a 4-frame APNG round-trip
+  that exercises the `acTL` / `fcTL` / `fdAT` framing. A dedicated
+  `parse_metadata` scenario isolates the chunk-walk / CRC cost from
+  the IDAT inflate path. Each scenario synthesises a fresh input on
+  the fly with the public encoder API — no committed fixture files —
+  so the benches stay reproducible from a clean checkout. Mirrors
+  the `oxideav-bmp` / `oxideav-gif` / `oxideav-tiff` bench shape per
+  the workspace "saturated → fuzz/bench/profile" memo so r155+
+  optimisation rounds have a stable r154 baseline to A/B against.
+  Initial r154 numbers on this dev box: decode_rgba_320x240
+  ~302 MiB/s, decode_rgba_1920x1080 ~325 MiB/s, encode_rgba_320x240
+  ~13 MiB/s (encoder is filter-heuristic + miniz-deflate bound).
 - `fuzz/fuzz_targets/apng_frame_walk.rs` cargo-fuzz target exercising
   the APNG composite state machine (`acTL` / `fcTL` / `fdAT`) on byte-
   level *valid* inputs that are combinatorially adversarial in their

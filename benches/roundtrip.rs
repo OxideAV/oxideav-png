@@ -1,0 +1,254 @@
+//! Criterion benchmarks for the PNG encoder + decoder roundtrip — the
+//! realistic "encode an image, decode it back" path that an end-to-end
+//! consumer (transcode pipeline, thumbnail muxer) exercises.
+//!
+//! Round 154 (depth-mode benchmarks): pairs each pixel layout's encode
+//! path with its decode path so future "Lever N+1" changes can be
+//! A/B-compared at the pipeline level (not just one half). Each
+//! scenario re-decodes the encoder output inside the bench body, so a
+//! perf regression that quietly mis-encodes will surface as a panic
+//! rather than a silently-cheaper benchmark number.
+//!
+//! Scenarios:
+//!
+//!   - **roundtrip_rgba_1920x1080**: 1920×1080 RGBA encode → decode.
+//!   - **roundtrip_rgba_320x240**: 320×240 RGBA encode → decode.
+//!   - **roundtrip_rgb24_640x480**: 640×480 RGB encode → decode.
+//!   - **roundtrip_gray8_512x512**: 512×512 grayscale encode → decode.
+//!   - **roundtrip_rgb48_512x512**: 512×512 16-bit RGB encode → decode.
+//!   - **roundtrip_rgba_adam7_320x240**: 320×240 Adam7 interlaced
+//!     RGBA encode → decode — exercises both seven-pass paths.
+//!   - **roundtrip_apng_4_frames_320x240**: 4-frame APNG RGBA encode
+//!     → decode — exercises `acTL` + `fcTL`/`fdAT` + disposal/blend.
+//!
+//! Run with:
+//!     cargo bench -p oxideav-png --bench roundtrip
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+
+use oxideav_png::{
+    decode_apng, decode_png, encode_apng, encode_png_image, encode_png_image_with_options,
+    PngEncoderOptions, PngImage, PngPixelFormat,
+};
+
+fn xorshift_byte(state: &mut u32) -> u8 {
+    *state ^= *state << 13;
+    *state ^= *state >> 17;
+    *state ^= *state << 5;
+    (*state & 0xff) as u8
+}
+
+fn build_rgba(width: u32, height: u32) -> PngImage {
+    let w = width as usize;
+    let h = height as usize;
+    let mut data = vec![0u8; w * h * 4];
+    let mut state: u32 = 0x1234_5678;
+    for r in 0..h {
+        for c in 0..w {
+            let idx = (r * w + c) * 4;
+            let base_y = ((r * 255) / h.max(1)) as u32;
+            let base_x = ((c * 255) / w.max(1)) as u32;
+            data[idx] = (((base_x + base_y) / 2).min(255) as u8)
+                .wrapping_add(xorshift_byte(&mut state) & 0x07);
+            data[idx + 1] = base_y.min(255) as u8;
+            data[idx + 2] = base_x.min(255) as u8;
+            data[idx + 3] = 0xff;
+        }
+    }
+    PngImage {
+        width,
+        height,
+        pixel_format: PngPixelFormat::Rgba,
+        stride: w * 4,
+        data,
+        palette: Vec::new(),
+    }
+}
+
+fn build_rgb24(width: u32, height: u32) -> PngImage {
+    let w = width as usize;
+    let h = height as usize;
+    let mut data = vec![0u8; w * h * 3];
+    let mut state: u32 = 0x2345_6789;
+    for r in 0..h {
+        for c in 0..w {
+            let idx = (r * w + c) * 3;
+            let base_y = ((r * 255) / h.max(1)) as u32;
+            let base_x = ((c * 255) / w.max(1)) as u32;
+            data[idx] = (((base_x + base_y) / 2).min(255) as u8)
+                .wrapping_add(xorshift_byte(&mut state) & 0x07);
+            data[idx + 1] = base_y.min(255) as u8;
+            data[idx + 2] = base_x.min(255) as u8;
+        }
+    }
+    PngImage {
+        width,
+        height,
+        pixel_format: PngPixelFormat::Rgb24,
+        stride: w * 3,
+        data,
+        palette: Vec::new(),
+    }
+}
+
+fn build_gray8(width: u32, height: u32) -> PngImage {
+    let w = width as usize;
+    let h = height as usize;
+    let mut data = vec![0u8; w * h];
+    let mut state: u32 = 0x3456_789a;
+    for r in 0..h {
+        for c in 0..w {
+            let base_x = ((c * 255) / w.max(1)) as u32;
+            data[r * w + c] =
+                (base_x.min(255) as u8).wrapping_add(xorshift_byte(&mut state) & 0x07);
+        }
+    }
+    PngImage {
+        width,
+        height,
+        pixel_format: PngPixelFormat::Gray8,
+        stride: w,
+        data,
+        palette: Vec::new(),
+    }
+}
+
+fn build_rgb48(width: u32, height: u32) -> PngImage {
+    let w = width as usize;
+    let h = height as usize;
+    let mut data = vec![0u8; w * h * 6];
+    for r in 0..h {
+        for c in 0..w {
+            let idx = (r * w + c) * 6;
+            let rr = (((r + c) as u32) * 0x0103) & 0xffff;
+            let gg = (((r * 2 + c) as u32) * 0x0107) & 0xffff;
+            let bb = (((r + c * 2) as u32) * 0x010d) & 0xffff;
+            data[idx] = (rr & 0xff) as u8;
+            data[idx + 1] = (rr >> 8) as u8;
+            data[idx + 2] = (gg & 0xff) as u8;
+            data[idx + 3] = (gg >> 8) as u8;
+            data[idx + 4] = (bb & 0xff) as u8;
+            data[idx + 5] = (bb >> 8) as u8;
+        }
+    }
+    PngImage {
+        width,
+        height,
+        pixel_format: PngPixelFormat::Rgb48Le,
+        stride: w * 6,
+        data,
+        palette: Vec::new(),
+    }
+}
+
+fn bench_roundtrip_rgba_1920x1080(c: &mut Criterion) {
+    let image = build_rgba(1920, 1080);
+    let mut g = c.benchmark_group("roundtrip_rgba_1920x1080");
+    g.throughput(Throughput::Bytes((1920 * 1080 * 4) as u64));
+    g.sample_size(10);
+    g.bench_function(BenchmarkId::from_parameter("rgba/1920x1080"), |b| {
+        b.iter(|| {
+            let bytes = encode_png_image(criterion::black_box(&image)).expect("encode_png_image");
+            decode_png(criterion::black_box(&bytes)).expect("decode_png")
+        });
+    });
+    g.finish();
+}
+
+fn bench_roundtrip_rgba_320x240(c: &mut Criterion) {
+    let image = build_rgba(320, 240);
+    let mut g = c.benchmark_group("roundtrip_rgba_320x240");
+    g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
+    g.bench_function(BenchmarkId::from_parameter("rgba/320x240"), |b| {
+        b.iter(|| {
+            let bytes = encode_png_image(criterion::black_box(&image)).expect("encode_png_image");
+            decode_png(criterion::black_box(&bytes)).expect("decode_png")
+        });
+    });
+    g.finish();
+}
+
+fn bench_roundtrip_rgb24_640x480(c: &mut Criterion) {
+    let image = build_rgb24(640, 480);
+    let mut g = c.benchmark_group("roundtrip_rgb24_640x480");
+    g.throughput(Throughput::Bytes((640 * 480 * 3) as u64));
+    g.sample_size(20);
+    g.bench_function(BenchmarkId::from_parameter("rgb24/640x480"), |b| {
+        b.iter(|| {
+            let bytes = encode_png_image(criterion::black_box(&image)).expect("encode_png_image");
+            decode_png(criterion::black_box(&bytes)).expect("decode_png")
+        });
+    });
+    g.finish();
+}
+
+fn bench_roundtrip_gray8_512x512(c: &mut Criterion) {
+    let image = build_gray8(512, 512);
+    let mut g = c.benchmark_group("roundtrip_gray8_512x512");
+    g.throughput(Throughput::Bytes((512 * 512) as u64));
+    g.bench_function(BenchmarkId::from_parameter("gray8/512x512"), |b| {
+        b.iter(|| {
+            let bytes = encode_png_image(criterion::black_box(&image)).expect("encode_png_image");
+            decode_png(criterion::black_box(&bytes)).expect("decode_png")
+        });
+    });
+    g.finish();
+}
+
+fn bench_roundtrip_rgb48_512x512(c: &mut Criterion) {
+    let image = build_rgb48(512, 512);
+    let mut g = c.benchmark_group("roundtrip_rgb48_512x512");
+    g.throughput(Throughput::Bytes((512 * 512 * 6) as u64));
+    g.sample_size(10);
+    g.bench_function(BenchmarkId::from_parameter("rgb48/512x512"), |b| {
+        b.iter(|| {
+            let bytes = encode_png_image(criterion::black_box(&image)).expect("encode_png_image");
+            decode_png(criterion::black_box(&bytes)).expect("decode_png")
+        });
+    });
+    g.finish();
+}
+
+fn bench_roundtrip_rgba_adam7_320x240(c: &mut Criterion) {
+    let image = build_rgba(320, 240);
+    let opts = PngEncoderOptions {
+        interlace: true,
+        metadata: None,
+    };
+    let mut g = c.benchmark_group("roundtrip_rgba_adam7_320x240");
+    g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
+    g.bench_function(BenchmarkId::from_parameter("rgba/adam7/320x240"), |b| {
+        b.iter(|| {
+            let bytes = encode_png_image_with_options(criterion::black_box(&image), &opts)
+                .expect("encode_png_image_with_options");
+            decode_png(criterion::black_box(&bytes)).expect("decode_png")
+        });
+    });
+    g.finish();
+}
+
+fn bench_roundtrip_apng_4_frames_320x240(c: &mut Criterion) {
+    let frames = (0..4).map(|_| build_rgba(320, 240)).collect::<Vec<_>>();
+    let mut g = c.benchmark_group("roundtrip_apng_4_frames_320x240");
+    g.throughput(Throughput::Bytes((4 * 320 * 240 * 4) as u64));
+    g.sample_size(10);
+    g.bench_function(BenchmarkId::from_parameter("apng/4x320x240"), |b| {
+        b.iter(|| {
+            let bytes = encode_apng(criterion::black_box(&frames), 4, 0).expect("encode_apng");
+            decode_apng(criterion::black_box(&bytes)).expect("decode_apng")
+        });
+    });
+    g.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_roundtrip_rgba_1920x1080,
+    bench_roundtrip_rgba_320x240,
+    bench_roundtrip_rgb24_640x480,
+    bench_roundtrip_gray8_512x512,
+    bench_roundtrip_rgb48_512x512,
+    bench_roundtrip_rgba_adam7_320x240,
+    bench_roundtrip_apng_4_frames_320x240,
+);
+criterion_main!(benches);

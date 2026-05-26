@@ -136,6 +136,32 @@ The decoder is fuzzed with `cargo-fuzz`. Five targets live under `fuzz/`:
 cargo +nightly fuzz run decode
 ```
 
+## Benchmarks
+
+Three criterion harnesses live under `benches/` so future optimisation
+rounds can A/B-test changes against the r154 baseline:
+
+- `decode` — every supported pixel layout at "natural" sizes (1920×1080
+  RGBA, 640×480 RGB, 512×512 Gray8 / Gray16Le / Rgb48Le, 320×240 Rgba64Le
+  + Pal8 + `decode_png_to_rgba`), plus a `parse_metadata` scenario that
+  isolates chunk-walk + CRC cost from the IDAT inflate, plus a 4-frame
+  APNG decode covering the disposal / blend state machine.
+- `encode` — symmetric encode harness with an extra Adam7 seven-pass
+  scenario at 320×240 RGBA and a 4-frame APNG encode.
+- `roundtrip` — paired encode → decode at the same sizes, so a perf
+  regression that silently mis-encodes surfaces as a panic rather than
+  a deceptively-cheaper number.
+
+Each scenario synthesises a fresh input on the fly with the public
+encoder API — no committed fixture files — so the benches reproduce
+from a clean checkout.
+
+```sh
+cargo bench -p oxideav-png --bench decode
+cargo bench -p oxideav-png --bench encode
+cargo bench -p oxideav-png --bench roundtrip
+```
+
 ## Usage
 
 ```toml

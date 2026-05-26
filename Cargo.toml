@@ -38,3 +38,22 @@ registry = ["dep:oxideav-core"]
 # Loaded via dlopen at test time — no `*-sys` crate, no libpng source pulled
 # into the workspace. The test skips silently when libpng isn't installed.
 libloading = "0.8"
+
+# Round 154 (depth-mode benchmarks): Criterion drives the three bench
+# harnesses (`decode`, `encode`, `roundtrip`) that future PNG encoder /
+# decoder rounds can use to A/B their changes. Pinned to the same 0.5
+# line the other OxideAV crates with benches (bmp / gif / tiff /
+# cinepak / tta / flac) already track.
+criterion = "0.5"
+
+[[bench]]
+name = "decode"
+harness = false
+
+[[bench]]
+name = "encode"
+harness = false
+
+[[bench]]
+name = "roundtrip"
+harness = false
