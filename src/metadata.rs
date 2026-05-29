@@ -1,5 +1,5 @@
 //! PNG ancillary metadata chunks — `sBIT`, `pHYs`, `tIME`, `bKGD`,
-//! `hIST`, `eXIf`, `sRGB`, `cICP`, `sPLT`.
+//! `hIST`, `eXIf`, `sRGB`, `cICP`, `gAMA`, `cHRM`, `sPLT`, `tEXt`.
 //!
 //! All but `eXIf` and `sPLT` are short, fixed-layout chunks with no
 //! embedded compression and no cross-chunk dependencies (with the single
@@ -98,6 +98,26 @@
 //!   §8.3. `cICP` must precede `PLTE` and `IDAT` (§5.6 Table 1) and
 //!   only one is permitted; when present, it is the highest-precedence
 //!   colour chunk (§4.3 Table 1).
+//!
+//! - `gAMA` — RFC 2083 §4.2.3 / W3C PNG3 §11.3.2.2 "Image gamma". One
+//!   4-byte big-endian unsigned integer equal to the image gamma "times
+//!   100000" (γ 0.45 ⇒ `45000`). The value is preserved verbatim — a
+//!   stored `0` "is meaningless but … decoders should ignore it" (PNG3
+//!   §11.3.2.2), which is a `should`, not a `shall`, so parse keeps the
+//!   raw integer rather than rejecting it. Must precede `PLTE` and the
+//!   first `IDAT`; only one is permitted.
+//!
+//! - `cHRM` — RFC 2083 §4.2.2 / W3C PNG3 §11.3.2.1 "Primary
+//!   chromaticities and white point". Eight 4-byte big-endian unsigned
+//!   integers — white-point x/y, red x/y, green x/y, blue x/y — each the
+//!   1931 CIE x or y value "times 100000" (0.3127 ⇒ `31270`). 32 bytes
+//!   total; other lengths are rejected. Must precede `PLTE` and the
+//!   first `IDAT`; only one is permitted.
+//!
+//!   Both colour chunks are the lowest-precedence members of the §4.3
+//!   "Color Chunk Priority" table (cICP `1` > iCCP `2` > sRGB `3` >
+//!   cHRM/gAMA `4`); the encoder emits them after `cICP` / `sBIT` /
+//!   `sRGB` but still before `PLTE`.
 //!
 //! - `sPLT` — W3C PNG3 §11.3.4.4 "Suggested palette". A standalone
 //!   palette (independent of `PLTE`) that viewers may use to display a
@@ -690,6 +710,158 @@ impl Cicp {
     }
 }
 
+/// `gAMA` payload (RFC 2083 §4.2.3 / W3C PNG3 §11.3.2.2).
+///
+/// A single 4-byte unsigned integer that is the image gamma "times
+/// 100000" (RFC 2083 §4.2.3: "a gamma of 0.45 would be stored as the
+/// integer 45000"). The field names the gamma of the source device that
+/// produced the image with respect to the original scene; a viewer is
+/// "strongly encouraged" to compensate (RFC 2083 §2.7).
+///
+/// The on-wire value is stored verbatim in [`Self::gamma_times_100000`]
+/// rather than as a float, so a round-trip is byte-exact. A stored value
+/// of `0` "is meaningless but could appear by mistake. Decoders should
+/// ignore it" (W3C PNG3 §11.3.2.2); we honour that "should" by
+/// round-tripping the raw integer (any interpretation / discard is the
+/// caller's choice) and only reject a malformed *length*.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gama {
+    /// The image gamma multiplied by 100000 (so `45000` == γ 0.45).
+    pub gamma_times_100000: u32,
+}
+
+impl Gama {
+    /// Parse a `gAMA` chunk payload (exactly four bytes, big-endian).
+    /// Other lengths are rejected. The value is preserved verbatim — the
+    /// spec's "decoders should ignore a zero gamma" is a recommendation,
+    /// not a parse-time `shall`, so a `0` payload still round-trips.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        if data.len() != 4 {
+            return Err(Error::invalid(format!(
+                "PNG gAMA: expected 4 bytes, got {}",
+                data.len()
+            )));
+        }
+        Ok(Self {
+            gamma_times_100000: u32::from_be_bytes([data[0], data[1], data[2], data[3]]),
+        })
+    }
+
+    /// Emit the on-wire payload (the 4-byte big-endian gamma integer).
+    pub fn to_bytes(&self) -> [u8; 4] {
+        self.gamma_times_100000.to_be_bytes()
+    }
+
+    /// Convenience: the gamma as a floating-point value
+    /// (`gamma_times_100000 / 100000.0`). RFC 2083 §4.2.3 defines the
+    /// stored integer as "gamma times 100000".
+    pub fn gamma(&self) -> f64 {
+        self.gamma_times_100000 as f64 / 100_000.0
+    }
+}
+
+/// `cHRM` payload (RFC 2083 §4.2.2 / W3C PNG3 §11.3.2.1).
+///
+/// The 1931 CIE x,y chromaticities of the white point and the red,
+/// green, and blue display primaries, allowing device-independent colour
+/// matching. Eight 4-byte big-endian unsigned integers, each "the x or y
+/// value times 100000" (RFC 2083 §4.2.2: "a value of 0.3127 would be
+/// stored as the integer 31270"), in the fixed order white-point x/y,
+/// red x/y, green x/y, blue x/y.
+///
+/// Values are stored verbatim as the on-wire `× 100000` integers so a
+/// round-trip is byte-exact; [`Self::white_point`] / [`Self::red`] /
+/// [`Self::green`] / [`Self::blue`] return the `(x, y)` pair as floats.
+/// `cHRM` "is allowed in all PNG files, although it is of little value
+/// for grayscale images" (RFC 2083 §4.2.2); the codec carries it for any
+/// colour type and leaves that judgement to the caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Chrm {
+    pub white_point_x: u32,
+    pub white_point_y: u32,
+    pub red_x: u32,
+    pub red_y: u32,
+    pub green_x: u32,
+    pub green_y: u32,
+    pub blue_x: u32,
+    pub blue_y: u32,
+}
+
+impl Chrm {
+    /// Parse a `cHRM` chunk payload (exactly 32 bytes: eight 4-byte
+    /// big-endian unsigned integers). Other lengths are rejected.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        if data.len() != 32 {
+            return Err(Error::invalid(format!(
+                "PNG cHRM: expected 32 bytes, got {}",
+                data.len()
+            )));
+        }
+        let be = |i: usize| u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+        Ok(Self {
+            white_point_x: be(0),
+            white_point_y: be(4),
+            red_x: be(8),
+            red_y: be(12),
+            green_x: be(16),
+            green_y: be(20),
+            blue_x: be(24),
+            blue_y: be(28),
+        })
+    }
+
+    /// Emit the on-wire payload (32 bytes, in spec order).
+    pub fn to_bytes(&self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for (i, v) in [
+            self.white_point_x,
+            self.white_point_y,
+            self.red_x,
+            self.red_y,
+            self.green_x,
+            self.green_y,
+            self.blue_x,
+            self.blue_y,
+        ]
+        .iter()
+        .enumerate()
+        {
+            out[i * 4..i * 4 + 4].copy_from_slice(&v.to_be_bytes());
+        }
+        out
+    }
+
+    /// The white-point chromaticity as `(x, y)` floats (each stored
+    /// integer / 100000, per RFC 2083 §4.2.2).
+    pub fn white_point(&self) -> (f64, f64) {
+        (
+            self.white_point_x as f64 / 100_000.0,
+            self.white_point_y as f64 / 100_000.0,
+        )
+    }
+
+    /// The red-primary chromaticity as `(x, y)` floats.
+    pub fn red(&self) -> (f64, f64) {
+        (self.red_x as f64 / 100_000.0, self.red_y as f64 / 100_000.0)
+    }
+
+    /// The green-primary chromaticity as `(x, y)` floats.
+    pub fn green(&self) -> (f64, f64) {
+        (
+            self.green_x as f64 / 100_000.0,
+            self.green_y as f64 / 100_000.0,
+        )
+    }
+
+    /// The blue-primary chromaticity as `(x, y)` floats.
+    pub fn blue(&self) -> (f64, f64) {
+        (
+            self.blue_x as f64 / 100_000.0,
+            self.blue_y as f64 / 100_000.0,
+        )
+    }
+}
+
 /// One entry of an [`Splt`] suggested palette (W3C PNG3 §11.3.4.4
 /// Table 25).
 ///
@@ -998,6 +1170,11 @@ pub struct PngMetadata {
     pub exif: Option<Exif>,
     pub srgb: Option<Srgb>,
     pub cicp: Option<Cicp>,
+    /// Image gamma (`gAMA`, RFC 2083 §4.2.3 / W3C PNG3 §11.3.2.2).
+    pub gama: Option<Gama>,
+    /// Primary chromaticities + white point (`cHRM`, RFC 2083 §4.2.2 /
+    /// W3C PNG3 §11.3.2.1).
+    pub chrm: Option<Chrm>,
     /// Zero or more suggested palettes (`sPLT`, W3C PNG3 §11.3.4.4). The
     /// PNG spec permits multiple instances as long as each has a
     /// distinct palette name; the decoder enforces that and the encoder
@@ -1023,6 +1200,8 @@ impl PngMetadata {
             && self.exif.is_none()
             && self.srgb.is_none()
             && self.cicp.is_none()
+            && self.gama.is_none()
+            && self.chrm.is_none()
             && self.splt.is_empty()
             && self.texts.is_empty()
     }
@@ -1232,6 +1411,27 @@ mod tests {
             ..Default::default()
         };
         assert!(!m7.is_empty());
+        let m8 = PngMetadata {
+            gama: Some(Gama {
+                gamma_times_100000: 45_000,
+            }),
+            ..Default::default()
+        };
+        assert!(!m8.is_empty());
+        let m9 = PngMetadata {
+            chrm: Some(Chrm {
+                white_point_x: 31_270,
+                white_point_y: 32_900,
+                red_x: 64_000,
+                red_y: 33_000,
+                green_x: 30_000,
+                green_y: 60_000,
+                blue_x: 15_000,
+                blue_y: 6_000,
+            }),
+            ..Default::default()
+        };
+        assert!(!m9.is_empty());
     }
 
     #[test]
@@ -1492,6 +1692,125 @@ mod tests {
         ));
         assert!(matches!(
             Cicp::parse(&[]).unwrap_err(),
+            Error::InvalidData(_)
+        ));
+    }
+
+    #[test]
+    fn gama_roundtrip() {
+        // RFC 2083 §4.2.3: a gamma of 0.45 is stored as the integer
+        // 45000.
+        let g = Gama {
+            gamma_times_100000: 45_000,
+        };
+        let b = g.to_bytes();
+        assert_eq!(b, 45_000u32.to_be_bytes());
+        let back = Gama::parse(&b).unwrap();
+        assert_eq!(back, g);
+        assert!((back.gamma() - 0.45).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gama_preserves_zero_verbatim() {
+        // PNG3 §11.3.2.2: a zero gamma "is meaningless … decoders should
+        // ignore it" — a SHOULD, not a SHALL, so parse keeps the raw
+        // integer and round-trips it intact.
+        let b = 0u32.to_be_bytes();
+        let g = Gama::parse(&b).unwrap();
+        assert_eq!(g.gamma_times_100000, 0);
+        assert_eq!(g.to_bytes(), b);
+    }
+
+    #[test]
+    fn gama_preserves_full_u32_range() {
+        let g = Gama {
+            gamma_times_100000: u32::MAX,
+        };
+        let back = Gama::parse(&g.to_bytes()).unwrap();
+        assert_eq!(back, g);
+    }
+
+    #[test]
+    fn gama_rejects_wrong_length() {
+        assert!(matches!(
+            Gama::parse(&[0, 0, 0]).unwrap_err(),
+            Error::InvalidData(_)
+        ));
+        assert!(matches!(
+            Gama::parse(&[0, 0, 0, 0, 0]).unwrap_err(),
+            Error::InvalidData(_)
+        ));
+        assert!(matches!(
+            Gama::parse(&[]).unwrap_err(),
+            Error::InvalidData(_)
+        ));
+    }
+
+    #[test]
+    fn chrm_roundtrip_srgb_d65_primaries() {
+        // RFC 2083 §4.2.2 worked example: a chromaticity of 0.3127 is
+        // stored as 31270. These are the canonical sRGB / Rec.709
+        // primaries + D65 white point (× 100000).
+        let c = Chrm {
+            white_point_x: 31_270,
+            white_point_y: 32_900,
+            red_x: 64_000,
+            red_y: 33_000,
+            green_x: 30_000,
+            green_y: 60_000,
+            blue_x: 15_000,
+            blue_y: 6_000,
+        };
+        let b = c.to_bytes();
+        assert_eq!(b.len(), 32);
+        // White-point x lands in the first BE word.
+        assert_eq!(&b[..4], &31_270u32.to_be_bytes());
+        // Blue y lands in the last BE word.
+        assert_eq!(&b[28..], &6_000u32.to_be_bytes());
+        let back = Chrm::parse(&b).unwrap();
+        assert_eq!(back, c);
+        let (wx, wy) = back.white_point();
+        assert!((wx - 0.31270).abs() < 1e-9);
+        assert!((wy - 0.32900).abs() < 1e-9);
+        assert_eq!(back.red(), (0.64, 0.33));
+        assert_eq!(back.green(), (0.30, 0.60));
+        assert_eq!(back.blue(), (0.15, 0.06));
+    }
+
+    #[test]
+    fn chrm_field_order_is_white_red_green_blue() {
+        // Distinct value per field confirms the BE word offsets map to
+        // the right struct member (spec layout: WP x/y, R x/y, G x/y,
+        // B x/y).
+        let c = Chrm {
+            white_point_x: 1,
+            white_point_y: 2,
+            red_x: 3,
+            red_y: 4,
+            green_x: 5,
+            green_y: 6,
+            blue_x: 7,
+            blue_y: 8,
+        };
+        let b = c.to_bytes();
+        for (i, expect) in (1u32..=8).enumerate() {
+            assert_eq!(&b[i * 4..i * 4 + 4], &expect.to_be_bytes());
+        }
+        assert_eq!(Chrm::parse(&b).unwrap(), c);
+    }
+
+    #[test]
+    fn chrm_rejects_wrong_length() {
+        assert!(matches!(
+            Chrm::parse(&[0u8; 31]).unwrap_err(),
+            Error::InvalidData(_)
+        ));
+        assert!(matches!(
+            Chrm::parse(&[0u8; 33]).unwrap_err(),
+            Error::InvalidData(_)
+        ));
+        assert!(matches!(
+            Chrm::parse(&[]).unwrap_err(),
             Error::InvalidData(_)
         ));
     }

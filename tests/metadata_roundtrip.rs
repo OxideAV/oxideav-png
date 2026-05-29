@@ -3,8 +3,8 @@
 //! position and the decoder reads them back byte-for-byte.
 
 use oxideav_png::{
-    decode_png, encode_png_image, encode_png_image_with_options, parse_metadata, Bkgd, Cicp, Exif,
-    Hist, Phys, PhysUnit, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat,
+    decode_png, encode_png_image, encode_png_image_with_options, parse_metadata, Bkgd, Chrm, Cicp,
+    Exif, Gama, Hist, Phys, PhysUnit, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat,
     RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time,
 };
 
@@ -206,6 +206,21 @@ fn all_three_chunks_roundtrip() {
             transfer_function: 13,
             matrix_coefficients: 0,
             video_full_range_flag: 1,
+        }),
+        gama: Some(Gama {
+            // RFC 2083 §4.2.3: γ 1/2.2 ≈ 0.45455 ⇒ 45455.
+            gamma_times_100000: 45_455,
+        }),
+        chrm: Some(Chrm {
+            // sRGB / Rec.709 primaries + D65 white point (× 100000).
+            white_point_x: 31_270,
+            white_point_y: 32_900,
+            red_x: 64_000,
+            red_y: 33_000,
+            green_x: 30_000,
+            green_y: 60_000,
+            blue_x: 15_000,
+            blue_y: 6_000,
         }),
         splt: Vec::new(),
         texts: Vec::new(),
@@ -1203,4 +1218,261 @@ fn parse_metadata_rejects_text_without_separator() {
     tampered.extend_from_slice(&chunk);
     tampered.extend_from_slice(&bytes[inject_pos..]);
     assert!(parse_metadata(&tampered).is_err());
+}
+
+// ---- gAMA (RFC 2083 §4.2.3 / W3C PNG3 §11.3.2.2) ----------------------
+
+#[test]
+fn gama_roundtrip() {
+    // RFC 2083 §4.2.3: a gamma of 0.45 is stored as 45000. Round-trip it
+    // through encode/decode and confirm the pixels still decode exactly.
+    let img = rgba_2x2();
+    let gama = Gama {
+        gamma_times_100000: 45_000,
+    };
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            gama: Some(gama),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.gama, Some(gama));
+    let back = decode_png(&bytes).expect("decode pixels");
+    assert_eq!(back.data, img.data);
+}
+
+#[test]
+fn chunk_ordering_gama_precedes_plte_and_idat() {
+    // PNG3 §5.6 Table 1: gAMA is "Before PLTE and IDAT". Use a palette
+    // image so PLTE is present in the stream.
+    let img = pal8_4x1();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            gama: Some(Gama {
+                gamma_times_100000: 100_000,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
+    let gama_pos = pos(b"gAMA").expect("gAMA");
+    let plte_pos = pos(b"PLTE").expect("PLTE");
+    let idat_pos = pos(b"IDAT").expect("IDAT");
+    assert!(gama_pos < plte_pos, "gAMA must precede PLTE");
+    assert!(gama_pos < idat_pos, "gAMA must precede IDAT");
+}
+
+#[test]
+fn parse_metadata_detects_duplicate_gama() {
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25; // after IHDR
+    let mut single = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut single, b"gAMA", &45_000u32.to_be_bytes());
+    let mut tampered = Vec::with_capacity(bytes.len() + 2 * single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("two gAMA chunks must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("duplicate gAMA"),
+        "expected duplicate-gAMA error, got {msg}"
+    );
+}
+
+#[test]
+fn parse_metadata_rejects_gama_wrong_length() {
+    // gAMA is exactly four bytes; a 3-byte payload must be rejected.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut single = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut single, b"gAMA", &[0u8, 0, 0]);
+    let mut tampered = Vec::with_capacity(bytes.len() + single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("3-byte gAMA must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("gAMA"),
+        "expected gAMA length error, got {msg}"
+    );
+}
+
+// ---- cHRM (RFC 2083 §4.2.2 / W3C PNG3 §11.3.2.1) ----------------------
+
+fn srgb_chrm() -> Chrm {
+    // Canonical sRGB / Rec.709 primaries + D65 white point (× 100000),
+    // per RFC 2083 §4.2.2's example storage convention.
+    Chrm {
+        white_point_x: 31_270,
+        white_point_y: 32_900,
+        red_x: 64_000,
+        red_y: 33_000,
+        green_x: 30_000,
+        green_y: 60_000,
+        blue_x: 15_000,
+        blue_y: 6_000,
+    }
+}
+
+#[test]
+fn chrm_roundtrip() {
+    let img = rgba_2x2();
+    let chrm = srgb_chrm();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            chrm: Some(chrm),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.chrm, Some(chrm));
+    let back = decode_png(&bytes).expect("decode pixels");
+    assert_eq!(back.data, img.data);
+}
+
+#[test]
+fn chunk_ordering_chrm_precedes_plte_and_idat() {
+    let img = pal8_4x1();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            chrm: Some(srgb_chrm()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
+    let chrm_pos = pos(b"cHRM").expect("cHRM");
+    let plte_pos = pos(b"PLTE").expect("PLTE");
+    let idat_pos = pos(b"IDAT").expect("IDAT");
+    assert!(chrm_pos < plte_pos, "cHRM must precede PLTE");
+    assert!(chrm_pos < idat_pos, "cHRM must precede IDAT");
+}
+
+#[test]
+fn chunk_ordering_colour_chunks_follow_priority_table() {
+    // PNG3 §4.3 "Color Chunk Priority": cICP (1) > sRGB (3) > cHRM/gAMA
+    // (4). Emit all four and confirm the byte positions honour the
+    // precedence ordering, with gAMA ahead of cHRM by our deterministic
+    // convention.
+    let img = rgba_2x2();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            cicp: Some(Cicp {
+                color_primaries: 9,
+                transfer_function: 16,
+                matrix_coefficients: 0,
+                video_full_range_flag: 1,
+            }),
+            srgb: Some(Srgb {
+                rendering_intent: RenderingIntent::Perceptual,
+            }),
+            gama: Some(Gama {
+                gamma_times_100000: 45_455,
+            }),
+            chrm: Some(srgb_chrm()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let pos = |tag: &[u8; 4]| {
+        bytes
+            .windows(4)
+            .position(|w| w == tag)
+            .expect("chunk present")
+    };
+    let cicp = pos(b"cICP");
+    let srgb = pos(b"sRGB");
+    let gama = pos(b"gAMA");
+    let chrm = pos(b"cHRM");
+    let idat = pos(b"IDAT");
+    assert!(cicp < srgb, "cICP (priority 1) before sRGB (3)");
+    assert!(srgb < gama, "sRGB (priority 3) before gAMA (4)");
+    assert!(gama < chrm, "gAMA before cHRM (deterministic convention)");
+    assert!(chrm < idat, "all colour chunks precede IDAT");
+}
+
+#[test]
+fn parse_metadata_detects_duplicate_chrm() {
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut single = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut single, b"cHRM", &srgb_chrm().to_bytes());
+    let mut tampered = Vec::with_capacity(bytes.len() + 2 * single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("two cHRM chunks must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("duplicate cHRM"),
+        "expected duplicate-cHRM error, got {msg}"
+    );
+}
+
+#[test]
+fn parse_metadata_rejects_chrm_wrong_length() {
+    // cHRM is exactly 32 bytes; a 31-byte payload must be rejected.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut single = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut single, b"cHRM", &[0u8; 31]);
+    let mut tampered = Vec::with_capacity(bytes.len() + single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("31-byte cHRM must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("cHRM"),
+        "expected cHRM length error, got {msg}"
+    );
+}
+
+#[test]
+fn gama_chrm_combined_with_other_metadata_roundtrip() {
+    // Full colour-management stack plus structural metadata in one image
+    // exercises the encoder's chunk-bucketing across both before-PLTE and
+    // before-IDAT positions.
+    let img = pal8_4x1();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            gama: Some(Gama {
+                gamma_times_100000: 45_455,
+            }),
+            chrm: Some(srgb_chrm()),
+            sbit: Some(Sbit::Rgb(8, 8, 8)),
+            phys: Some(Phys {
+                pixels_per_unit_x: 2835,
+                pixels_per_unit_y: 2835,
+                unit: PhysUnit::Metre,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.gama.unwrap().gamma_times_100000, 45_455);
+    assert_eq!(meta.chrm, Some(srgb_chrm()));
+    assert_eq!(meta.sbit, Some(Sbit::Rgb(8, 8, 8)));
+    assert!(meta.phys.is_some());
+    let back = decode_png(&bytes).expect("decode pixels");
+    assert_eq!(back.data, img.data);
 }

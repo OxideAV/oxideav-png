@@ -71,6 +71,24 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   `PLTE` + `IDAT` (§5.6 Table 1) alongside `sBIT`. The chunk's presence
   asserts sRGB-space samples; the codec records the intent and leaves
   any actual colour transform to the caller.
+- `gAMA` (image gamma, RFC 2083 §4.2.3 / W3C PNG3 §11.3.2.2) — a single
+  4-byte big-endian unsigned integer equal to the image gamma "times
+  100000" (γ 0.45 ⇒ `45000`). Stored verbatim, so a round-trip is
+  byte-exact; the `.gamma()` helper divides by 100000.0. A `0` payload
+  "is meaningless but … decoders should ignore it" (PNG3 §11.3.2.2) — a
+  `should`, not a `shall`, so the codec preserves the raw integer rather
+  than rejecting it and leaves any discard to the caller. Emitted before
+  `PLTE` + `IDAT`.
+- `cHRM` (primary chromaticities + white point, RFC 2083 §4.2.2 / W3C
+  PNG3 §11.3.2.1) — eight 4-byte big-endian unsigned integers (white-
+  point x/y, red x/y, green x/y, blue x/y), each the 1931 CIE x or y
+  value "times 100000" (0.3127 ⇒ `31270`). 32 bytes total; other lengths
+  rejected. `.white_point()` / `.red()` / `.green()` / `.blue()` return
+  the `(x, y)` pair as floats. Emitted before `PLTE` + `IDAT`. Both
+  colour chunks are the lowest-precedence members of the §4.3 "Color
+  Chunk Priority" table (cICP `1` > sRGB `3` > cHRM/gAMA `4`), so the
+  encoder writes them after `cICP` / `sBIT` / `sRGB`, `gAMA` before
+  `cHRM`.
 - `cICP` (coding-independent code points, W3C PNG3 §11.3.2.6 / Table
   18) — four `u8`s naming the ITU-T H.273 code points for color
   primaries, transfer function, matrix coefficients, and the
@@ -113,8 +131,9 @@ Decode: [`parse_metadata`] returns a [`PngMetadata`] with each
 supported field populated for any chunks present. Encode:
 [`PngEncoderOptions`]`::metadata` holds the same struct; populated
 fields are emitted at spec-compliant chunk positions (`cICP` / `sBIT` /
-`sRGB` before `PLTE`/`IDAT`; `bKGD` / `hIST` after `PLTE`, before
-`IDAT`; `pHYs`, `tIME`, `eXIf`, `sPLT`, and `tEXt` before `IDAT`).
+`sRGB` / `gAMA` / `cHRM` before `PLTE`/`IDAT`, in §4.3 Color-Chunk-
+Priority order; `bKGD` / `hIST` after `PLTE`, before `IDAT`; `pHYs`,
+`tIME`, `eXIf`, `sPLT`, and `tEXt` before `IDAT`).
 Single-instance chunks are rejected on decode if repeated (the
 "Multiple OK? No" rule in RFC 2083 §4.3 / W3C PNG3 §5.6); `sPLT`
 requires distinct palette names; `tEXt` is the lone chunk where
@@ -127,9 +146,9 @@ identical keywords on multiple instances are explicitly permitted.
 - `tRNS` chunk emission for ct=0 / ct=2 (decode applies it during
   `decode_png_to_rgba`; the standalone encoder still only carries
   per-entry alpha for `Pal8` via the palette tail)
-- Colour-management + remaining metadata chunks: `gAMA`, `cHRM`,
-  `iCCP`, `zTXt`, `iTXt`. Each is CRC-checked on read and then
-  dropped
+- Remaining metadata chunks: `iCCP`, `zTXt`, `iTXt` (the three that
+  carry a zlib-compressed or ICC-profile payload). Each is CRC-checked
+  on read and then dropped
 
 ## Robustness
 

@@ -97,8 +97,8 @@ pub use encoder::{
 pub use error::{PngError, Result};
 pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
 pub use metadata::{
-    Bkgd, Cicp, Exif, Hist, Phys, PhysUnit, PngMetadata, RenderingIntent, Sbit, Splt, SpltEntry,
-    Srgb, Text, Time,
+    Bkgd, Chrm, Cicp, Exif, Gama, Hist, Phys, PhysUnit, PngMetadata, RenderingIntent, Sbit, Splt,
+    SpltEntry, Srgb, Text, Time,
 };
 
 // Public registry-gated API — keeps the framework integration surface

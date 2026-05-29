@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `gAMA` (image gamma, RFC 2083 §4.2.3 / W3C PNG3 §11.3.2.2) and `cHRM`
+  (primary chromaticities + white point, RFC 2083 §4.2.2 / W3C PNG3
+  §11.3.2.1) metadata round-trip. `gAMA` is one 4-byte big-endian
+  unsigned integer equal to the image gamma × 100000 (γ 0.45 ⇒ `45000`),
+  preserved verbatim (the spec's "decoders should ignore a zero gamma"
+  is a `should`, so the raw integer round-trips). `cHRM` is eight 4-byte
+  big-endian integers — white-point x/y, red x/y, green x/y, blue x/y —
+  each the 1931 CIE coordinate × 100000 (0.3127 ⇒ `31270`). Both new
+  structs expose float-coordinate helpers (`Gama::gamma`,
+  `Chrm::{white_point,red,green,blue}`). The encoder emits them before
+  `PLTE`/`IDAT` in §4.3 "Color Chunk Priority" order (cICP `1` > sRGB
+  `3` > cHRM/gAMA `4`), `gAMA` ahead of `cHRM`; the decoder reads them
+  back in `parse_metadata` and rejects malformed lengths and duplicate
+  chunks. Closes the README "Not preserved" entries for `gAMA` / `cHRM`.
+
 - `tRNS` keyed-transparency application during `decode_png_to_rgba` for
   colour type 0 (grayscale, 8 / 16-bit) and colour type 2 (truecolor,
   8 / 16-bit) per RFC 2083 §4.2.9. The chunk's 2-byte BE gray sample

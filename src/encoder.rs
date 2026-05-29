@@ -41,13 +41,14 @@ pub struct PngEncoderOptions {
     /// progressively renderable.
     pub interlace: bool,
     /// Optional `sBIT` / `pHYs` / `tIME` / `bKGD` / `hIST` / `eXIf` /
-    /// `sRGB` / `cICP` / `sPLT` ancillary metadata to embed. Each
-    /// `Some(_)` field (and each `sPLT` in the `splt` `Vec`) is written;
-    /// chunk ordering follows RFC 2083 §4.3 / W3C PNG3 §5.6 Table 7:
+    /// `sRGB` / `cICP` / `gAMA` / `cHRM` / `sPLT` / `tEXt` ancillary
+    /// metadata to embed. Each `Some(_)` field (and each `sPLT` / `tEXt`
+    /// in its `Vec`) is written; chunk ordering follows RFC 2083 §4.3 /
+    /// W3C PNG3 §5.6 Table 7:
     ///
-    /// * `cICP` / `sBIT` / `sRGB` — before `PLTE` and `IDAT` (`cICP`
-    ///   first since §4.3 Table 1 makes it the highest-precedence
-    ///   colour chunk).
+    /// * `cICP` / `sBIT` / `sRGB` / `gAMA` / `cHRM` — before `PLTE` and
+    ///   `IDAT`. The colour chunks follow §4.3 Table 1's "Color Chunk
+    ///   Priority" order (`cICP` `1` > `sRGB` `3` > `cHRM`/`gAMA` `4`).
     /// * `bKGD` / `hIST` — after `PLTE`, before `IDAT`.
     /// * `pHYs` — before `IDAT`.
     /// * `tIME` — unconstrained; we emit it before `IDAT` for
@@ -113,11 +114,13 @@ pub fn encode_png_image_with_options(
 }
 
 /// Emit the metadata chunks the PNG spec places "before PLTE and IDAT":
-/// `cICP` (W3C PNG3 §11.3.2.6), `sBIT` (RFC 2083 §4.3) and `sRGB` (W3C
-/// PNG3 §5.6 Table 1). Emitted with `cICP` first since §4.3 Table 1
-/// ranks it as the highest-precedence colour chunk; the remaining
-/// relative order is unconstrained by the spec but fixed here for
-/// deterministic output.
+/// `cICP` (W3C PNG3 §11.3.2.6), `sBIT` (RFC 2083 §4.3), `sRGB` (W3C
+/// PNG3 §5.6 Table 1), and the `gAMA` / `cHRM` colour-management pair
+/// (RFC 2083 §4.2.2 / §4.2.3). The colour chunks are emitted in §4.3
+/// "Color Chunk Priority" order (cICP `1` > sRGB `3` > cHRM/gAMA `4`;
+/// `iCCP` is not yet supported), with `sBIT` slotted after `cICP` for
+/// deterministic output. `gAMA` precedes `cHRM` so the simpler scalar
+/// gamma leads the chromaticity block.
 fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
     let Some(meta) = meta else {
         return;
@@ -130,6 +133,12 @@ fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
     }
     if let Some(srgb) = &meta.srgb {
         write_chunk(out, b"sRGB", &srgb.to_bytes());
+    }
+    if let Some(gama) = &meta.gama {
+        write_chunk(out, b"gAMA", &gama.to_bytes());
+    }
+    if let Some(chrm) = &meta.chrm {
+        write_chunk(out, b"cHRM", &chrm.to_bytes());
     }
 }
 
