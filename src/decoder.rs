@@ -408,6 +408,7 @@ pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
             idat_total_len += c.data.len();
         }
     }
+    validate_trns(&ihdr, trns, plte)?;
 
     let mut idat_concat = Vec::with_capacity(idat_total_len);
     for c in &chunks {
@@ -426,20 +427,114 @@ pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
     build_png_image(&ihdr, &frame_pixels, plte, trns)
 }
 
+/// Enforce the per-IHDR rules RFC 2083 §4.2.9 places on a `tRNS` chunk.
+///
+/// * Colour type 0 (grayscale): exactly 2 bytes — the transparent gray
+///   sample. The 2-byte width is fixed regardless of `bit_depth`
+///   (§4.2.9 "For consistency, 2 bytes are used regardless of the
+///   image bit depth").
+/// * Colour type 2 (truecolor): exactly 6 bytes — the transparent RGB
+///   triple, 2 bytes per channel.
+/// * Colour type 3 (indexed): one byte per palette entry, *at most* one
+///   alpha value per PLTE entry (§4.2.9 "tRNS chunk must not contain
+///   more alpha values than there are palette entries"). Fewer than
+///   the full PLTE count is permitted; missing tail entries are opaque.
+/// * Colour types 4 + 6: `tRNS` is "prohibited" (§4.2.9 final
+///   paragraph). The presence of the chunk is an InvalidData error.
+///
+/// `plte_len_bytes` is the byte-length of any PLTE chunk so the indexed
+/// case can range-check `trns.len()` against the entry count.
+fn validate_trns(ihdr: &Ihdr, trns: Option<&[u8]>, plte: Option<&[u8]>) -> Result<()> {
+    let Some(t) = trns else {
+        return Ok(());
+    };
+    match ihdr.colour_type {
+        0 => {
+            if t.len() != 2 {
+                return Err(Error::invalid(format!(
+                    "PNG tRNS (colour type 0): expected 2 bytes, got {}",
+                    t.len()
+                )));
+            }
+            // The 2-byte sample is stored as the gray value at the
+            // image's bit depth (RFC 2083 §4.2.9: "range 0 ..
+            // (2^bitdepth)-1"). The high-order bits beyond bit_depth
+            // must therefore be zero — anything else is a malformed
+            // tRNS and would never match a real sample.
+            let v = u16::from_be_bytes([t[0], t[1]]);
+            let max = (1u32 << ihdr.bit_depth) - 1;
+            if (v as u32) > max {
+                return Err(Error::invalid(format!(
+                    "PNG tRNS (colour type 0, bit depth {}): gray value {v} exceeds {}",
+                    ihdr.bit_depth, max
+                )));
+            }
+        }
+        2 => {
+            if t.len() != 6 {
+                return Err(Error::invalid(format!(
+                    "PNG tRNS (colour type 2): expected 6 bytes, got {}",
+                    t.len()
+                )));
+            }
+            let max = (1u32 << ihdr.bit_depth) - 1;
+            for (i, name) in ["R", "G", "B"].iter().enumerate() {
+                let v = u16::from_be_bytes([t[i * 2], t[i * 2 + 1]]);
+                if (v as u32) > max {
+                    return Err(Error::invalid(format!(
+                        "PNG tRNS (colour type 2, bit depth {}): {name} value {v} exceeds {}",
+                        ihdr.bit_depth, max
+                    )));
+                }
+            }
+        }
+        3 => {
+            let plte_len = plte.map(|p| p.len()).unwrap_or(0);
+            if plte_len == 0 {
+                return Err(Error::invalid(
+                    "PNG tRNS (colour type 3): missing PLTE chunk",
+                ));
+            }
+            let plte_entries = plte_len / 3;
+            if t.len() > plte_entries {
+                return Err(Error::invalid(format!(
+                    "PNG tRNS (colour type 3): {} alpha values exceed {} PLTE entries",
+                    t.len(),
+                    plte_entries
+                )));
+            }
+        }
+        4 | 6 => {
+            return Err(Error::invalid(format!(
+                "PNG tRNS: prohibited for colour type {} (alpha channel already present)",
+                ihdr.colour_type
+            )));
+        }
+        _ => {
+            // Unknown colour types fail earlier in IHDR parsing; nothing
+            // additional to validate here.
+        }
+    }
+    Ok(())
+}
+
 /// Decode a PNG (any supported colour type / bit depth) and promote the
 /// result to an 8-bit-per-channel [`RgbaBitmap`].
 ///
 /// One-shot convenience entry point for callers that just want pixels
 /// to blit — palette resolution (`Pal8` + `PLTE` + `tRNS`), grayscale
 /// widening, 16→8 truncation and α-fill for opaque formats are all
-/// handled internally:
+/// handled internally. For colour type 0 / 2 a `tRNS` chunk (RFC 2083
+/// §4.2.9) is applied at this layer too: the named source sample
+/// emerges with α=0, every other pixel with α=255 (when no `tRNS` is
+/// present the table column below collapses to "α=255 always").
 ///
 /// | Source format | RGBA promotion                                       |
 /// |---------------|------------------------------------------------------|
-/// | `Gray8`       | `(g,g,g,255)`                                        |
-/// | `Gray16Le`    | `(hi,hi,hi,255)` — high byte from the 16-bit sample  |
-/// | `Rgb24`       | `(r,g,b,255)`                                        |
-/// | `Rgb48Le`     | `(r_hi,g_hi,b_hi,255)` — high byte per channel       |
+/// | `Gray8`       | `(g,g,g, α)` — α=0 iff `tRNS.gray == g`              |
+/// | `Gray16Le`    | `(hi,hi,hi, α)` — α=0 iff `tRNS.gray == sample16` (both bytes per §4.2.9 note) |
+/// | `Rgb24`       | `(r,g,b, α)` — α=0 iff every channel matches `tRNS`  |
+/// | `Rgb48Le`     | `(r_hi,g_hi,b_hi, α)` — α=0 iff every 16-bit channel matches `tRNS` |
 /// | `Pal8`        | `PLTE` lookup + `tRNS` alpha (`255` for entries past `tRNS`'s end) |
 /// | `Ya8`         | `(g,g,g,a)`                                          |
 /// | `Rgba`        | identity — bytes copied through unchanged            |
@@ -474,6 +569,16 @@ pub fn decode_png_to_rgba(buf: &[u8]) -> Result<RgbaBitmap> {
 /// Promote an arbitrary [`PngImage`] (any supported pixel format) into
 /// an 8-bit-per-channel [`RgbaBitmap`]. `plte` / `trns` are used only
 /// for `Pal8` source images.
+///
+/// For colour types 0 (`Gray8` / `Gray16Le`) and 2 (`Rgb24` /
+/// `Rgb48Le`) a `tRNS` chunk names a single transparent sample value
+/// (RFC 2083 §4.2.9). Pixels matching it exactly are emitted with
+/// α=0; every other pixel stays opaque (α=255). The match is performed
+/// at the source bit depth — for 16-bit sources both bytes of the
+/// sample are compared *before* the 8-bit promotion drops the low
+/// byte, per §4.2.9 ("Although decoders may drop the low-order byte
+/// of the samples for display, this must not occur until after the
+/// data has been tested for transparency").
 fn png_image_to_rgba(
     img: &PngImage,
     plte: Option<&[u8]>,
@@ -484,6 +589,30 @@ fn png_image_to_rgba(
     let n = w * h;
     let mut out = vec![0u8; n * 4];
 
+    // For Gray*/Rgb* the tRNS payload (when present) is a single
+    // sample value at the source bit depth. RFC 2083 §4.2.9 stores
+    // every channel as a 2-byte big-endian value regardless of bit
+    // depth, so we decode it to u16 once and compare against the
+    // 16-bit-promoted source sample. For 8-bit sources the source
+    // sample is widened to u16 (the high byte is zero per spec) so
+    // the comparison stays uniform.
+    let trns_gray16: Option<u16> = match (img.pixel_format, trns) {
+        (PngPixelFormat::Gray8, Some(t)) | (PngPixelFormat::Gray16Le, Some(t)) if t.len() == 2 => {
+            Some(u16::from_be_bytes([t[0], t[1]]))
+        }
+        _ => None,
+    };
+    let trns_rgb16: Option<(u16, u16, u16)> = match (img.pixel_format, trns) {
+        (PngPixelFormat::Rgb24, Some(t)) | (PngPixelFormat::Rgb48Le, Some(t)) if t.len() == 6 => {
+            Some((
+                u16::from_be_bytes([t[0], t[1]]),
+                u16::from_be_bytes([t[2], t[3]]),
+                u16::from_be_bytes([t[4], t[5]]),
+            ))
+        }
+        _ => None,
+    };
+
     match img.pixel_format {
         PngPixelFormat::Gray8 => {
             for i in 0..n {
@@ -491,34 +620,71 @@ fn png_image_to_rgba(
                 out[i * 4] = g;
                 out[i * 4 + 1] = g;
                 out[i * 4 + 2] = g;
-                out[i * 4 + 3] = 255;
+                // tRNS keyed sample for ct=0 / bit_depth=8: the
+                // 2-byte tRNS stores the gray sample in the low
+                // byte (high byte is zero per spec), so the match
+                // condition is `tRNS_gray16 as u8 == g` *and* the
+                // high byte zero (already guaranteed by validation).
+                out[i * 4 + 3] = match trns_gray16 {
+                    Some(k) if (k as u8) == g => 0,
+                    _ => 255,
+                };
             }
         }
         PngPixelFormat::Gray16Le => {
             // Stored little-endian per sample: (lo, hi). Take the high
-            // byte for an 8-bit promotion.
+            // byte for an 8-bit promotion, but reconstruct the full
+            // 16-bit value first so tRNS matching compares both bytes
+            // (RFC 2083 §4.2.9 note: "it is important to compare both
+            // bytes of the sample values to determine whether a pixel
+            // is transparent").
             for i in 0..n {
-                let g = img.data[i * 2 + 1];
-                out[i * 4] = g;
-                out[i * 4 + 1] = g;
-                out[i * 4 + 2] = g;
-                out[i * 4 + 3] = 255;
+                let lo = img.data[i * 2];
+                let hi = img.data[i * 2 + 1];
+                out[i * 4] = hi;
+                out[i * 4 + 1] = hi;
+                out[i * 4 + 2] = hi;
+                let sample16 = u16::from_le_bytes([lo, hi]);
+                out[i * 4 + 3] = match trns_gray16 {
+                    Some(k) if k == sample16 => 0,
+                    _ => 255,
+                };
             }
         }
         PngPixelFormat::Rgb24 => {
             for i in 0..n {
-                out[i * 4] = img.data[i * 3];
-                out[i * 4 + 1] = img.data[i * 3 + 1];
-                out[i * 4 + 2] = img.data[i * 3 + 2];
-                out[i * 4 + 3] = 255;
+                let r = img.data[i * 3];
+                let g = img.data[i * 3 + 1];
+                let b = img.data[i * 3 + 2];
+                out[i * 4] = r;
+                out[i * 4 + 1] = g;
+                out[i * 4 + 2] = b;
+                out[i * 4 + 3] = match trns_rgb16 {
+                    Some((rk, gk, bk)) if (rk as u8) == r && (gk as u8) == g && (bk as u8) == b => {
+                        0
+                    }
+                    _ => 255,
+                };
             }
         }
         PngPixelFormat::Rgb48Le => {
             for i in 0..n {
-                out[i * 4] = img.data[i * 6 + 1];
-                out[i * 4 + 1] = img.data[i * 6 + 3];
-                out[i * 4 + 2] = img.data[i * 6 + 5];
-                out[i * 4 + 3] = 255;
+                let r_lo = img.data[i * 6];
+                let r_hi = img.data[i * 6 + 1];
+                let g_lo = img.data[i * 6 + 2];
+                let g_hi = img.data[i * 6 + 3];
+                let b_lo = img.data[i * 6 + 4];
+                let b_hi = img.data[i * 6 + 5];
+                out[i * 4] = r_hi;
+                out[i * 4 + 1] = g_hi;
+                out[i * 4 + 2] = b_hi;
+                let r16 = u16::from_le_bytes([r_lo, r_hi]);
+                let g16 = u16::from_le_bytes([g_lo, g_hi]);
+                let b16 = u16::from_le_bytes([b_lo, b_hi]);
+                out[i * 4 + 3] = match trns_rgb16 {
+                    Some((rk, gk, bk)) if rk == r16 && gk == g16 && bk == b16 => 0,
+                    _ => 255,
+                };
             }
         }
         PngPixelFormat::Pal8 => {
@@ -977,6 +1143,11 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
             compressed: std::mem::take(&mut current_compressed),
         });
     }
+
+    // RFC 2083 §4.2.9 tRNS validation also applies to the APNG default
+    // image / per-frame plane: ct=0/2 fixed length, ct=4/6 prohibited,
+    // ct=3 capped at PLTE entry count.
+    validate_trns(&ihdr, trns.as_deref(), plte.as_deref())?;
 
     // Per APNG spec acTL.num_frames is an advisory frame count. The
     // spec does not require a hard reject when the value disagrees with

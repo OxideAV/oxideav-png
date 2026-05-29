@@ -20,6 +20,18 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
 - `PLTE` + `tRNS` palettes — `PLTE` drives `Pal8` index resolution and the
   demuxer preserves both verbatim in `CodecParameters::extradata` so the
   encoder can faithfully rewrite them
+- `tRNS` keyed transparency on colour type 0 (grayscale) and colour
+  type 2 (RGB), 8- + 16-bit, applied by `decode_png_to_rgba` per
+  RFC 2083 §4.2.9. The 2-byte BE gray sample (or 3 × 2-byte BE RGB
+  triple) names one source pixel value that emerges with α=0; every
+  other pixel stays opaque. The match is done at the source bit depth
+  *before* the 16→8 promotion drops the low byte (§4.2.9 note: a 16-bit
+  gray sample of 0x0001 keyed transparent must not flag 0x0002 as
+  transparent too). `tRNS` is rejected outright on colour type 4 / 6
+  ("prohibited" per §4.2.9 final paragraph), and is length-policed on
+  ct=0 (exactly 2 bytes), ct=2 (exactly 6 bytes), and ct=3 (≤ PLTE
+  entry count); ct=0 / ct=2 samples are bounds-checked against
+  `(1 << bit_depth) - 1`.
 
 ## Encode support
 
@@ -112,9 +124,9 @@ identical keywords on multiple instances are explicitly permitted.
 
 - Adam7 interlaced encode (decode only — encoder always writes non-interlaced)
 - Sub-byte encode (decode only — encoder always writes 8/16-bit)
-- `tRNS` alpha applied to `Gray*` / `Rgb*` pixels on decode (the chunk is
-  parsed + CRC-validated but not blended into the output plane; for `Pal8`
-  the per-entry alpha is still carried through `extradata`)
+- `tRNS` chunk emission for ct=0 / ct=2 (decode applies it during
+  `decode_png_to_rgba`; the standalone encoder still only carries
+  per-entry alpha for `Pal8` via the palette tail)
 - Colour-management + remaining metadata chunks: `gAMA`, `cHRM`,
   `iCCP`, `zTXt`, `iTXt`. Each is CRC-checked on read and then
   dropped

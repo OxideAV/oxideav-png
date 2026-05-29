@@ -9,7 +9,8 @@
 //! * all five PNG row filters (None / Sub / Up / Average / Paeth)
 //! * Adam7 interlacing (seven-pass progressive)
 //! * multiple IDAT chunks
-//! * PLTE + tRNS palettes
+//! * PLTE + tRNS palettes; tRNS keyed transparency on grayscale +
+//!   truecolor sources (8 / 16-bit) applied via [`decode_png_to_rgba`]
 //! * APNG animation: `acTL`, `fcTL`, `fdAT` with `None`/`Background`/`Previous`
 //!   disposal and `Source`/`Over` blending.
 //!
@@ -48,11 +49,12 @@
 //!   `iCCP`, `zTXt`, `iTXt`). CRC is verified on read and then they
 //!   are dropped — they are not round-tripped through the container and
 //!   not surfaced on decode.
-//! * `tRNS` alpha application to decoded `Gray8` / `Gray16Le` / `Rgb24` /
-//!   `Rgb48Le` pixels. For colour type 3 (palette), `tRNS` per-entry alpha
-//!   is preserved verbatim in `CodecParameters::extradata` alongside `PLTE`
-//!   so encoders can rewrite it, but the decoded `Pal8` plane itself
-//!   carries no alpha.
+//! * `tRNS` chunk emission for colour type 0 (grayscale) / colour type 2
+//!   (truecolor). Decode applies the chunk during [`decode_png_to_rgba`]
+//!   per RFC 2083 §4.2.9 (single transparent gray sample or RGB triple,
+//!   compared at the source bit depth so the §4.2.9 note about both
+//!   bytes of a 16-bit sample holds); the standalone encoder still only
+//!   carries per-entry alpha for `Pal8` via the palette tail.
 //!
 //! ## Standalone (no `oxideav-core`) mode
 //!

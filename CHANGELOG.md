@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `tRNS` keyed-transparency application during `decode_png_to_rgba` for
+  colour type 0 (grayscale, 8 / 16-bit) and colour type 2 (truecolor,
+  8 / 16-bit) per RFC 2083 §4.2.9. The chunk's 2-byte BE gray sample
+  (or 3 × 2-byte BE RGB triple) names one source pixel value that must
+  emerge from the 8-bit-RGBA promotion with α=0; every other pixel
+  stays opaque (α=255). The match is performed against the source
+  sample at its full bit depth *before* the 16→8 promotion drops the
+  low byte (§4.2.9 note: "Although decoders may drop the low-order
+  byte of the samples for display, this must not occur until after
+  the data has been tested for transparency. For example, if the
+  grayscale level 0x0001 is specified to be transparent, it would be
+  incorrect to compare only the high-order byte and decide that
+  0x0002 is also transparent"). Closes the README "Not preserved"
+  bullet "tRNS alpha applied to Gray*/Rgb* pixels on decode".
+
+- `tRNS` structural validation in `decode_png` and `parse_apng`
+  (RFC 2083 §4.2.9): colour type 0 enforces a 2-byte payload; colour
+  type 2 enforces a 6-byte payload; colour types 4 and 6 reject the
+  chunk outright ("tRNS is prohibited for color types 4 and 6, since
+  a full alpha channel is already present"); colour type 3 caps the
+  alpha-list length at the `PLTE` entry count ("tRNS chunk must not
+  contain more alpha values than there are palette entries"); the
+  sample value for ct=0 / ct=2 must fit `(1 << bit_depth) - 1`
+  (§4.2.9 "range 0 .. (2^bitdepth)-1"). Previously the decoder
+  accepted any `tRNS` length on ct=0 / ct=2 / ct=4 / ct=6 without
+  diagnostic. Twelve integration tests in
+  `tests/trns_gray_rgb_promotion.rs` cover each accept + reject
+  path.
+
 - `tEXt` round-trip (RFC 2083 §4.2.7 / W3C PNG3 §11.3.3.3): a Latin-1
   keyword (1-79 printable bytes, no leading / trailing / consecutive
   spaces, no null, case-sensitive) plus NUL separator plus zero-or-more
