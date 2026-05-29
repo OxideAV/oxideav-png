@@ -32,8 +32,8 @@
 //! Not implemented:
 //! * Sub-byte encode (decode only — encoder always writes 8/16-bit)
 //! * Round-tripped metadata: `sBIT`, `pHYs`, `tIME`, `bKGD`, `hIST`,
-//!   `eXIf`, `sRGB`, `cICP`, `sPLT` — surfaced via [`parse_metadata`]
-//!   on decode and re-emitted by the encoder when
+//!   `eXIf`, `sRGB`, `cICP`, `sPLT`, `tEXt` — surfaced via
+//!   [`parse_metadata`] on decode and re-emitted by the encoder when
 //!   [`PngEncoderOptions::metadata`] is populated. `eXIf` is carried as
 //!   an opaque (TIFF-header-validated) blob; `sRGB` carries the ICC
 //!   rendering intent; `cICP` carries the H.273 colour-primaries /
@@ -41,9 +41,11 @@
 //!   `matrix_coefficients` pinned at 0 (PNG is RGB-only per §11.3.2.6);
 //!   `sPLT` carries one or more named suggested palettes (8- or 16-bit
 //!   RGBA + frequency entries), the one metadata chunk PNG allows to
-//!   repeat (distinct names required).
-//! * Colour management / metadata chunks (`gAMA`, `cHRM`, `iCCP`,
-//!   `tEXt`, `zTXt`, `iTXt`). CRC is verified on read and then they
+//!   repeat (distinct names required). `tEXt` carries free-form
+//!   Latin-1 keyword + text pairs (RFC 2083 §4.2.7), the one chunk
+//!   PNG allows to repeat with the same keyword.
+//! * Colour management / remaining metadata chunks (`gAMA`, `cHRM`,
+//!   `iCCP`, `zTXt`, `iTXt`). CRC is verified on read and then they
 //!   are dropped — they are not round-tripped through the container and
 //!   not surfaced on decode.
 //! * `tRNS` alpha application to decoded `Gray8` / `Gray16Le` / `Rgb24` /
@@ -94,7 +96,7 @@ pub use error::{PngError, Result};
 pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
 pub use metadata::{
     Bkgd, Cicp, Exif, Hist, Phys, PhysUnit, PngMetadata, RenderingIntent, Sbit, Splt, SpltEntry,
-    Srgb, Time,
+    Srgb, Text, Time,
 };
 
 // Public registry-gated API — keeps the framework integration surface

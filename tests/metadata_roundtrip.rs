@@ -5,7 +5,7 @@
 use oxideav_png::{
     decode_png, encode_png_image, encode_png_image_with_options, parse_metadata, Bkgd, Cicp, Exif,
     Hist, Phys, PhysUnit, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat,
-    RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Time,
+    RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time,
 };
 
 fn rgba_2x2() -> PngImage {
@@ -208,6 +208,7 @@ fn all_three_chunks_roundtrip() {
             video_full_range_flag: 1,
         }),
         splt: Vec::new(),
+        texts: Vec::new(),
     };
     let opts = PngEncoderOptions {
         metadata: Some(meta_in.clone()),
@@ -1011,4 +1012,195 @@ fn parse_metadata_allows_two_splt_with_distinct_names() {
     assert_eq!(meta.splt.len(), 2);
     assert_eq!(meta.splt[0].name, "alpha");
     assert_eq!(meta.splt[1].name, "beta");
+}
+
+#[test]
+fn text_single_roundtrip_through_encoder() {
+    // tEXt encode → decode end-to-end via parse_metadata. The
+    // standalone encoder must emit the chunk before IDAT, and
+    // parse_metadata must surface it in `texts`.
+    let img = rgba_2x2();
+    let mut opts = PngEncoderOptions::default();
+    let mut meta = PngMetadata::default();
+    meta.texts.push(Text {
+        keyword: "Title".to_string(),
+        text: "Sunset over the cape".to_string(),
+    });
+    opts.metadata = Some(meta);
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let parsed = parse_metadata(&bytes).expect("parse_metadata");
+    assert_eq!(parsed.texts.len(), 1);
+    assert_eq!(parsed.texts[0].keyword, "Title");
+    assert_eq!(parsed.texts[0].text, "Sunset over the cape");
+}
+
+#[test]
+fn text_multiple_with_same_keyword_roundtrip() {
+    // RFC 2083 §4.2.7: "more than one with the same keyword is
+    // permissible." Drive two `Comment` entries through encode +
+    // decode and confirm both survive in order — `tEXt` is the lone
+    // metadata chunk where keyword duplicates are explicitly OK.
+    let img = rgba_2x2();
+    let mut opts = PngEncoderOptions::default();
+    let mut meta = PngMetadata::default();
+    meta.texts.push(Text {
+        keyword: "Comment".to_string(),
+        text: "first comment".to_string(),
+    });
+    meta.texts.push(Text {
+        keyword: "Comment".to_string(),
+        text: "second comment".to_string(),
+    });
+    meta.texts.push(Text {
+        keyword: "Author".to_string(),
+        text: "anon".to_string(),
+    });
+    opts.metadata = Some(meta);
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let parsed = parse_metadata(&bytes).expect("parse_metadata");
+    assert_eq!(parsed.texts.len(), 3);
+    assert_eq!(parsed.texts[0].keyword, "Comment");
+    assert_eq!(parsed.texts[0].text, "first comment");
+    assert_eq!(parsed.texts[1].keyword, "Comment");
+    assert_eq!(parsed.texts[1].text, "second comment");
+    assert_eq!(parsed.texts[2].keyword, "Author");
+    assert_eq!(parsed.texts[2].text, "anon");
+}
+
+#[test]
+fn text_with_latin1_high_byte_roundtrips() {
+    // Cover the 0xA1..=0xFF Latin-1 band on both keyword and text.
+    // 'é' (U+00E9) sits at byte 0xE9, the keyword still uses only
+    // bytes valid per the printable-Latin-1 predicate.
+    let img = rgba_2x2();
+    let mut opts = PngEncoderOptions::default();
+    let mut meta = PngMetadata::default();
+    meta.texts.push(Text {
+        keyword: "Author".to_string(),
+        text: "Renée Lévesque".to_string(),
+    });
+    opts.metadata = Some(meta);
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let parsed = parse_metadata(&bytes).expect("parse_metadata");
+    assert_eq!(parsed.texts.len(), 1);
+    assert_eq!(parsed.texts[0].text, "Renée Lévesque");
+}
+
+#[test]
+fn text_chunk_precedes_idat_in_output() {
+    // §5.6: ancillary chunks like `tEXt` must precede `IDAT`. Walk
+    // the chunk stream and confirm the `tEXt` we emitted is found
+    // before the first `IDAT`. (Same shape as
+    // `chunk_ordering_sbit_precedes_idat`.)
+    let img = rgba_2x2();
+    let mut opts = PngEncoderOptions::default();
+    let mut meta = PngMetadata::default();
+    meta.texts.push(Text {
+        keyword: "Software".to_string(),
+        text: "oxideav-png".to_string(),
+    });
+    opts.metadata = Some(meta);
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+
+    // PNG signature is 8 bytes; chunks follow as len|type|data|crc.
+    let mut cur = 8usize;
+    let mut text_pos = None;
+    let mut idat_pos = None;
+    while cur + 8 <= bytes.len() {
+        let len = u32::from_be_bytes([bytes[cur], bytes[cur + 1], bytes[cur + 2], bytes[cur + 3]])
+            as usize;
+        let ty = &bytes[cur + 4..cur + 8];
+        if ty == b"tEXt" {
+            text_pos = Some(cur);
+        }
+        if ty == b"IDAT" && idat_pos.is_none() {
+            idat_pos = Some(cur);
+        }
+        cur += 12 + len; // 4 len + 4 type + len data + 4 crc
+    }
+    let tp = text_pos.expect("tEXt chunk must be present in the output");
+    let ip = idat_pos.expect("IDAT chunk must be present in the output");
+    assert!(tp < ip, "tEXt at {tp} must precede IDAT at {ip}");
+}
+
+#[test]
+fn text_empty_string_roundtrips_through_encoder() {
+    // §4.2.7: text may be zero bytes. Drive a keyword-only `tEXt`
+    // through encode + decode.
+    let img = rgba_2x2();
+    let mut opts = PngEncoderOptions::default();
+    let mut meta = PngMetadata::default();
+    meta.texts.push(Text {
+        keyword: "Comment".to_string(),
+        text: String::new(),
+    });
+    opts.metadata = Some(meta);
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let parsed = parse_metadata(&bytes).expect("parse_metadata");
+    assert_eq!(parsed.texts.len(), 1);
+    assert_eq!(parsed.texts[0].keyword, "Comment");
+    assert!(parsed.texts[0].text.is_empty());
+}
+
+#[test]
+fn parse_metadata_rejects_text_with_invalid_keyword() {
+    // Inject a raw `tEXt` whose keyword carries a leading space; the
+    // parser must reject the chunk per §4.2.7's keyword rules even
+    // though the encoder would have rejected the value first.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    // Walk to just after IHDR (8-byte signature + 25-byte IHDR chunk).
+    let inject_pos = 8 + 25;
+    let mut chunk = Vec::new();
+    // Build a raw payload: " Title\0body" (leading space → invalid).
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b" Title");
+    payload.push(0);
+    payload.extend_from_slice(b"body");
+    oxideav_png::chunk::write_chunk(&mut chunk, b"tEXt", &payload);
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&chunk);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    assert!(parse_metadata(&tampered).is_err());
+}
+
+#[test]
+fn parse_metadata_rejects_text_with_nul_in_text_string() {
+    // Inject a raw `tEXt` whose text portion contains a NUL — the
+    // chunk parser walks to the first NUL for the keyword/text split,
+    // then must reject any further NUL inside the remaining text bytes
+    // per §4.2.7's "Neither the keyword nor the text string can
+    // contain a null character."
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut chunk = Vec::new();
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"Keyword");
+    payload.push(0);
+    payload.extend_from_slice(b"first\0second");
+    oxideav_png::chunk::write_chunk(&mut chunk, b"tEXt", &payload);
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&chunk);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    assert!(parse_metadata(&tampered).is_err());
+}
+
+#[test]
+fn parse_metadata_rejects_text_without_separator() {
+    // A `tEXt` payload with no NUL at all cannot be split into
+    // keyword + text; parse must fail.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut chunk = Vec::new();
+    let payload = b"NoSeparatorAnywhere";
+    oxideav_png::chunk::write_chunk(&mut chunk, b"tEXt", payload);
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&chunk);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    assert!(parse_metadata(&tampered).is_err());
 }

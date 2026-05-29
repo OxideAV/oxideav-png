@@ -888,12 +888,106 @@ impl Splt {
     }
 }
 
+/// `tEXt` payload (RFC 2083 §4.2.7 / W3C PNG3 §11.3.3.3).
+///
+/// Latin-1 keyword + null separator + Latin-1 text. The text is stored
+/// raw on the wire as Latin-1 bytes, can contain any byte in the
+/// `U+0001..=U+00FF` range (no null — the spec reserves null as the
+/// keyword separator), can be any length from zero up to whatever the
+/// surrounding chunk's payload allows, and is not null-terminated
+/// (chunk length is the only end marker).
+///
+/// The keyword obeys the standard PNG text-keyword rules (RFC 2083
+/// §4.2.7): 1-79 printable Latin-1 bytes (`0x20..=0x7E` or
+/// `0xA1..=0xFF`), no leading / trailing / consecutive spaces, no null
+/// byte, case-sensitive. The same predicate that gates `sPLT` palette
+/// names applies here verbatim.
+///
+/// `tEXt` is the most permissive metadata chunk PNG defines: any number
+/// of `tEXt` chunks may appear, and more than one chunk with the same
+/// keyword is permitted (RFC 2083 §4.2.7 paragraph 3 — "more than one
+/// with the same keyword is permissible"). The decoder preserves the
+/// file's order, and the encoder emits them in `Vec` order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Text {
+    /// 1-79 printable Latin-1 bytes; no leading / trailing / consecutive
+    /// spaces, no null. Stored as a `String` whose codepoints all fit
+    /// in `U+0020..=U+00FF`.
+    pub keyword: String,
+    /// Zero or more Latin-1 bytes. Stored as a `String` whose
+    /// codepoints all fit in `U+0001..=U+00FF` (no null — the spec
+    /// reserves null as the keyword separator).
+    pub text: String,
+}
+
+impl Text {
+    /// Parse a `tEXt` chunk payload (RFC 2083 §4.2.7): keyword bytes,
+    /// `NUL` separator, then text bytes (no trailing null — chunk
+    /// length is the only end marker).
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        let nul = data
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| Error::invalid("PNG tEXt: missing NUL separator after keyword"))?;
+        let keyword_bytes = &data[..nul];
+        let keyword_str: String = keyword_bytes.iter().map(|&b| b as char).collect();
+        // Reuse the shared keyword validator (length / printable /
+        // spacing rules; same rules cited by sPLT).
+        validate_keyword(&keyword_str, "tEXt")?;
+
+        // Everything after the NUL is the text payload. Latin-1 bytes
+        // (each byte maps 1:1 to a `char` in `U+0001..=U+00FF`); no
+        // further `NUL` permitted in the text per the §4.2.7
+        // requirement that "neither the keyword nor the text string can
+        // contain a null character."
+        let text_bytes = &data[nul + 1..];
+        if text_bytes.contains(&0) {
+            return Err(Error::invalid(
+                "PNG tEXt: text string contains a NUL byte (only the keyword separator may)",
+            ));
+        }
+        let text_str: String = text_bytes.iter().map(|&b| b as char).collect();
+        Ok(Self {
+            keyword: keyword_str,
+            text: text_str,
+        })
+    }
+
+    /// Emit the on-wire payload (keyword bytes, `NUL`, text bytes).
+    /// Re-validates the keyword and checks that every text codepoint
+    /// fits in Latin-1 and isn't a `NUL` — so a malformed `Text` value
+    /// can't silently corrupt the output PNG.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let keyword_bytes = validate_keyword(&self.keyword, "tEXt")?;
+        let mut text_bytes = Vec::with_capacity(self.text.len());
+        for ch in self.text.chars() {
+            let cp = ch as u32;
+            if cp > 0xFF {
+                return Err(Error::invalid(format!(
+                    "PNG tEXt: text char U+{cp:04X} is not Latin-1 (single-byte)"
+                )));
+            }
+            if cp == 0 {
+                return Err(Error::invalid(
+                    "PNG tEXt: text string contains a NUL (reserved as keyword separator)",
+                ));
+            }
+            text_bytes.push(cp as u8);
+        }
+        let mut out = Vec::with_capacity(keyword_bytes.len() + 1 + text_bytes.len());
+        out.extend_from_slice(&keyword_bytes);
+        out.push(0);
+        out.extend_from_slice(&text_bytes);
+        Ok(out)
+    }
+}
+
 /// Bundle of metadata chunks that round-trip through the encoder.
 ///
 /// Populated by [`crate::parse_metadata`] on decode and consumed by
 /// [`crate::PngEncoderOptions::metadata`] on encode. Any `None` field is
-/// simply omitted from the output PNG; the `splt` `Vec` is omitted when
-/// empty.
+/// simply omitted from the output PNG; the `splt` and `texts` `Vec`s
+/// are omitted when empty.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PngMetadata {
     pub sbit: Option<Sbit>,
@@ -909,6 +1003,12 @@ pub struct PngMetadata {
     /// distinct palette name; the decoder enforces that and the encoder
     /// emits them in `Vec` order.
     pub splt: Vec<Splt>,
+    /// Zero or more textual annotations (`tEXt`, RFC 2083 §4.2.7). PNG
+    /// permits any number, and more than one with the same keyword is
+    /// allowed — this is the only metadata chunk where the decoder
+    /// does NOT enforce keyword uniqueness. File order is preserved on
+    /// decode and replayed on encode.
+    pub texts: Vec<Text>,
 }
 
 impl PngMetadata {
@@ -924,6 +1024,7 @@ impl PngMetadata {
             && self.srgb.is_none()
             && self.cicp.is_none()
             && self.splt.is_empty()
+            && self.texts.is_empty()
     }
 }
 
@@ -1638,5 +1739,198 @@ mod tests {
         assert_eq!(c.color_primaries, 0xFE);
         assert_eq!(c.transfer_function, 0xFE);
         assert_eq!(c.to_bytes(), raw);
+    }
+
+    #[test]
+    fn text_simple_roundtrip() {
+        let t = Text {
+            keyword: "Title".to_string(),
+            text: "Sunrise over the Pacific".to_string(),
+        };
+        let raw = t.to_bytes().unwrap();
+        // keyword bytes (5) + NUL + text bytes (24) = 30
+        assert_eq!(raw.len(), 5 + 1 + 24);
+        assert_eq!(&raw[0..5], b"Title");
+        assert_eq!(raw[5], 0);
+        assert_eq!(&raw[6..], b"Sunrise over the Pacific");
+        let back = Text::parse(&raw).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn text_empty_text_string_roundtrip() {
+        // RFC 2083 §4.2.7: "The text string can be of any length from
+        // zero bytes up to the maximum permissible chunk size..."
+        let t = Text {
+            keyword: "Comment".to_string(),
+            text: String::new(),
+        };
+        let raw = t.to_bytes().unwrap();
+        // keyword (7) + NUL + 0 text bytes = 8
+        assert_eq!(raw, [b'C', b'o', b'm', b'm', b'e', b'n', b't', 0]);
+        let back = Text::parse(&raw).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn text_high_latin1_byte_roundtrip() {
+        // RFC 2083 §4.2.7: "Both keyword and text are interpreted
+        // according to the ISO 8859-1 (Latin-1) character set". Text
+        // can carry any Latin-1 byte; cover one in the 0xA1..=0xFF
+        // band so the codepath that maps `u8 -> char` is exercised.
+        let t = Text {
+            keyword: "Author".to_string(),
+            // 'é' is U+00E9, single Latin-1 byte 0xE9.
+            text: "Renée".to_string(),
+        };
+        let raw = t.to_bytes().unwrap();
+        // The encoded text portion should contain the Latin-1 byte
+        // 0xE9 ('é') in position 3 of the text portion ("Ren'é'e").
+        assert!(raw.contains(&0xE9));
+        let back = Text::parse(&raw).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn text_embedded_newline_allowed() {
+        // §4.2.7: "Newlines in the text string should be represented by
+        // a single linefeed character (decimal 10)." The decoder must
+        // accept LF in the text payload — it's not a NUL, so it doesn't
+        // truncate the string.
+        let t = Text {
+            keyword: "Description".to_string(),
+            text: "line one\nline two".to_string(),
+        };
+        let raw = t.to_bytes().unwrap();
+        let back = Text::parse(&raw).unwrap();
+        assert_eq!(back, t);
+        assert!(back.text.contains('\n'));
+    }
+
+    #[test]
+    fn text_keyword_at_79_bytes_accepted() {
+        // §4.2.7: keyword is "1-79 bytes". 79 is the inclusive upper
+        // bound; 80 is rejected.
+        let kw_79 = "k".repeat(79);
+        let t = Text {
+            keyword: kw_79.clone(),
+            text: "x".to_string(),
+        };
+        let raw = t.to_bytes().unwrap();
+        let back = Text::parse(&raw).unwrap();
+        assert_eq!(back.keyword, kw_79);
+    }
+
+    #[test]
+    fn text_keyword_at_80_bytes_rejected() {
+        let kw_80 = "k".repeat(80);
+        let t = Text {
+            keyword: kw_80,
+            text: "x".to_string(),
+        };
+        assert!(t.to_bytes().is_err());
+    }
+
+    #[test]
+    fn text_empty_keyword_rejected() {
+        // §4.2.7: keyword "must be at least one character".
+        let t = Text {
+            keyword: String::new(),
+            text: "anything".to_string(),
+        };
+        assert!(t.to_bytes().is_err());
+        // And the same on parse — an empty keyword byte sequence shows
+        // up as the NUL being at offset 0.
+        let raw = b"\0anything";
+        assert!(Text::parse(raw).is_err());
+    }
+
+    #[test]
+    fn text_keyword_with_leading_space_rejected() {
+        let t = Text {
+            keyword: " Leading".to_string(),
+            text: "x".to_string(),
+        };
+        assert!(t.to_bytes().is_err());
+    }
+
+    #[test]
+    fn text_keyword_with_consecutive_spaces_rejected() {
+        let t = Text {
+            keyword: "Two  Spaces".to_string(),
+            text: "x".to_string(),
+        };
+        assert!(t.to_bytes().is_err());
+    }
+
+    #[test]
+    fn text_keyword_with_non_breaking_space_rejected() {
+        // §4.2.7 paragraph 4: "the non-breaking space (code 160) is
+        // not permitted in keywords, since it is visually
+        // indistinguishable from an ordinary space."
+        let t = Text {
+            keyword: "Bad\u{00A0}NBSP".to_string(),
+            text: "x".to_string(),
+        };
+        assert!(t.to_bytes().is_err());
+    }
+
+    #[test]
+    fn text_keyword_with_control_char_rejected() {
+        // Outside the printable bands (0x20..=0x7E or 0xA1..=0xFF).
+        // 0x7F (DEL) is in neither.
+        let t = Text {
+            keyword: "Bad\u{007F}".to_string(),
+            text: "x".to_string(),
+        };
+        assert!(t.to_bytes().is_err());
+    }
+
+    #[test]
+    fn text_text_containing_nul_rejected_on_parse() {
+        // §4.2.7: "Neither the keyword nor the text string can contain
+        // a null character." Two NULs in the chunk payload means the
+        // text string itself contains a NUL — reject the parse.
+        let raw = b"kw\0first\0second";
+        assert!(Text::parse(raw).is_err());
+    }
+
+    #[test]
+    fn text_text_containing_nul_rejected_on_encode() {
+        let t = Text {
+            keyword: "k".to_string(),
+            text: "bad\u{0000}null".to_string(),
+        };
+        assert!(t.to_bytes().is_err());
+    }
+
+    #[test]
+    fn text_text_with_non_latin1_codepoint_rejected_on_encode() {
+        // §4.2.7 fixes the text to Latin-1; a codepoint above 0xFF
+        // can't be written without lossy conversion, which the encoder
+        // refuses.
+        let t = Text {
+            keyword: "k".to_string(),
+            // U+0100 — first codepoint outside Latin-1.
+            text: "\u{0100}".to_string(),
+        };
+        assert!(t.to_bytes().is_err());
+    }
+
+    #[test]
+    fn text_parse_missing_nul_rejected() {
+        let raw = b"NoSeparator";
+        assert!(Text::parse(raw).is_err());
+    }
+
+    #[test]
+    fn metadata_is_empty_accounts_for_texts() {
+        let mut m = PngMetadata::default();
+        assert!(m.is_empty());
+        m.texts.push(Text {
+            keyword: "k".to_string(),
+            text: String::new(),
+        });
+        assert!(!m.is_empty());
     }
 }

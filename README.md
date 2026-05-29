@@ -79,20 +79,34 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   `0x20..=0x7E` / `0xA1..=0xFF`, no leading / trailing / consecutive
   spaces), an 8- or 16-bit sample depth, and a list of `RGBA` +
   `frequency` entries (6-byte stride at depth 8, 10-byte at depth 16).
-  `sPLT` is the one metadata chunk PNG permits to repeat; the decoder
-  accepts multiple instances but rejects duplicate palette names.
-  Emitted before `IDAT` (§5.6 Table 7); held as a `Vec<Splt>` so order
-  is preserved.
+  `sPLT` is one of two metadata chunks PNG permits to repeat; the
+  decoder accepts multiple instances but rejects duplicate palette
+  names. Emitted before `IDAT` (§5.6 Table 7); held as a `Vec<Splt>`
+  so order is preserved.
+- `tEXt` (textual data, RFC 2083 §4.2.7 / W3C PNG3 §11.3.3.3) — a
+  Latin-1 keyword (1-79 printable bytes, no leading / trailing /
+  consecutive spaces, no null, case-sensitive) followed by a NUL
+  separator and zero-or-more Latin-1 bytes of free-form text (no
+  null permitted — chunk length is the only end marker). `tEXt`
+  is the most permissive metadata chunk PNG defines: any number of
+  instances may appear, and more than one with the same keyword
+  is allowed (§4.2.7 paragraph 3). The decoder preserves file order
+  and the encoder replays it via `Vec<Text>`. Emitted before `IDAT`
+  alongside `sPLT` (Table 1's "Multiple OK? Yes / Ordering
+  constraints: None" bucket). Keyword validation is shared verbatim
+  with `sPLT`'s palette-name predicate. Compressed (`zTXt`) and
+  international (`iTXt`) text remain on the "not preserved" list.
 
 Decode: [`parse_metadata`] returns a [`PngMetadata`] with each
 supported field populated for any chunks present. Encode:
 [`PngEncoderOptions`]`::metadata` holds the same struct; populated
 fields are emitted at spec-compliant chunk positions (`cICP` / `sBIT` /
 `sRGB` before `PLTE`/`IDAT`; `bKGD` / `hIST` after `PLTE`, before
-`IDAT`; `pHYs`, `tIME`, `eXIf`, and `sPLT` before `IDAT`). Single-
-instance chunks are rejected on decode if repeated (the "Multiple OK?
-No" rule in RFC 2083 §4.3 / W3C PNG3 §5.6); `sPLT` (the lone "Multiple
-OK? Yes" chunk) instead requires distinct palette names.
+`IDAT`; `pHYs`, `tIME`, `eXIf`, `sPLT`, and `tEXt` before `IDAT`).
+Single-instance chunks are rejected on decode if repeated (the
+"Multiple OK? No" rule in RFC 2083 §4.3 / W3C PNG3 §5.6); `sPLT`
+requires distinct palette names; `tEXt` is the lone chunk where
+identical keywords on multiple instances are explicitly permitted.
 
 ## Not preserved
 
@@ -102,7 +116,7 @@ OK? Yes" chunk) instead requires distinct palette names.
   parsed + CRC-validated but not blended into the output plane; for `Pal8`
   the per-entry alpha is still carried through `extradata`)
 - Colour-management + remaining metadata chunks: `gAMA`, `cHRM`,
-  `iCCP`, `tEXt`, `zTXt`, `iTXt`. Each is CRC-checked on read and then
+  `iCCP`, `zTXt`, `iTXt`. Each is CRC-checked on read and then
   dropped
 
 ## Robustness

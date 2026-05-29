@@ -44,7 +44,7 @@ use miniz_oxide::inflate::decompress_to_vec_zlib;
 use crate::apng::{parse_fdat, Actl, Blend, Disposal, Fctl};
 use crate::chunk::{read_chunk, ChunkRef, PNG_MAGIC};
 use crate::filter::{unfilter_row, FilterType};
-use crate::metadata::{Bkgd, Cicp, Exif, Hist, Phys, PngMetadata, Sbit, Splt, Srgb, Time};
+use crate::metadata::{Bkgd, Cicp, Exif, Hist, Phys, PngMetadata, Sbit, Splt, Srgb, Text, Time};
 
 pub const CODEC_ID_STR: &str = "png";
 
@@ -358,6 +358,14 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                     )));
                 }
                 out.splt.push(splt);
+            }
+            b"tEXt" => {
+                // RFC 2083 §4.2.7: "Any number of tEXt chunks can
+                // appear, and more than one with the same keyword is
+                // permissible." No uniqueness check — only the per-chunk
+                // structural validation in Text::parse. Preserve file
+                // order so the encoder can replay it verbatim.
+                out.texts.push(Text::parse(c.data)?);
             }
             _ => {}
         }
@@ -970,9 +978,11 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
         });
     }
 
-    // Per APNG spec acTL.num_frames should equal the number of fcTLs. We
-    // tolerate mismatches to stay compatible with generators in the wild —
-    // libpng accepts them and so do browsers.
+    // Per APNG spec acTL.num_frames is an advisory frame count. The
+    // spec does not require a hard reject when the value disagrees with
+    // the actual fcTL count — the authoritative frame chain is the
+    // fcTL/fdAT sequence we just walked. Generators in the wild emit
+    // mismatched counts; we accept them rather than failing the parse.
 
     Ok(ApngInfo {
         ihdr,

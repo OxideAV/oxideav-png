@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `tEXt` round-trip (RFC 2083 §4.2.7 / W3C PNG3 §11.3.3.3): a Latin-1
+  keyword (1-79 printable bytes, no leading / trailing / consecutive
+  spaces, no null, case-sensitive) plus NUL separator plus zero-or-more
+  Latin-1 text bytes (no null permitted in the text; chunk length is
+  the only end marker). Surfaced as `metadata::Text` (`pub keyword`,
+  `pub text`) and held by `PngMetadata::texts: Vec<Text>`. `tEXt` is
+  the most permissive metadata chunk PNG defines: any number of
+  instances may appear, and more than one with the same keyword is
+  explicitly allowed (§4.2.7 paragraph 3) — the decoder preserves
+  file order and the encoder replays it. Keyword validation is
+  shared verbatim with the existing `sPLT` palette-name predicate
+  (`validate_keyword`). Emitted before `IDAT` in the same "Multiple
+  OK? Yes / Ordering: None" bucket as `sPLT` (RFC 2083 §4.3
+  Table 1). The encoder re-validates on `to_bytes` — refuses any
+  keyword that fails the rules, any text codepoint above Latin-1
+  (U+0100+), and any NUL inside the text — so a malformed `Text`
+  value can't silently corrupt the output PNG. Unit tests cover
+  every reject path (empty keyword, 80-byte keyword, leading
+  space, consecutive spaces, non-breaking space at U+00A0, DEL at
+  U+007F, NUL in text on both parse and encode, non-Latin-1
+  codepoint in text); integration tests in
+  `tests/metadata_roundtrip.rs` cover end-to-end encode → decode
+  with single-instance, multi-instance-same-keyword,
+  empty-text-string, and Latin-1 high-byte payloads, plus a
+  chunk-position check that the `tEXt` chunk precedes `IDAT` in
+  the output PNG.
 - Criterion bench harnesses (`benches/decode.rs`, `benches/encode.rs`,
   `benches/roundtrip.rs`) covering the PNG + APNG decoder and encoder
   hot paths across every pixel layout the codec supports: 1920×1080

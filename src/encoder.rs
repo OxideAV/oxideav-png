@@ -163,6 +163,14 @@ fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
     for splt in &meta.splt {
         write_chunk(out, b"sPLT", &splt.to_bytes()?);
     }
+    // `tEXt` (RFC 2083 §4.2.7) sits in the same "Before IDAT, no
+    // ordering constraint" bucket as `sPLT` per Table 1's "Multiple OK?
+    // Yes" / "Ordering constraints: None" row. Emitted after `sPLT` so
+    // the more structured chunks (palette, transparency, timing,
+    // suggested-palette) precede free-form textual annotations.
+    for text in &meta.texts {
+        write_chunk(out, b"tEXt", &text.to_bytes()?);
+    }
     Ok(())
 }
 
