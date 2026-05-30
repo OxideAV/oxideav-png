@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/OxideAV/oxideav-png/compare/v0.1.6...v0.1.7) - 2026-05-29
+
+### Other
+
+- round-trip gAMA + cHRM colour-management chunks
+- apply tRNS keyed transparency to Gray*/Rgb* in decode_png_to_rgba (RFC 2083 §4.2.9)
+- tEXt round-trip (RFC 2083 §4.2.7 / W3C PNG3 §11.3.3.3)
+- add criterion decode/encode/roundtrip harnesses (r154)
+- add apng_frame_walk + encode_decode_roundtrip targets
+- add decode target; fix APNG out-of-canvas fcTL offset panic
+- round-trip the sPLT suggested-palette chunk
+- round-trip the cICP (coding-independent code points) chunk
+- round-trip the sRGB chunk (W3C PNG3 §11.3.2.5)
+- round-trip the eXIf (Exif profile) ancillary chunk
+- round-trip bKGD + hIST ancillary chunks
+- round-trip sBIT / pHYs / tIME ancillary chunks
+
 ### Added
 
 - `gAMA` (image gamma, RFC 2083 §4.2.3 / W3C PNG3 §11.3.2.2) and `cHRM`
