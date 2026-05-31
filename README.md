@@ -190,7 +190,10 @@ rounds can A/B-test changes against the r154 baseline:
   RGBA, 640×480 RGB, 512×512 Gray8 / Gray16Le / Rgb48Le, 320×240 Rgba64Le
   + Pal8 + `decode_png_to_rgba`), plus a `parse_metadata` scenario that
   isolates chunk-walk + CRC cost from the IDAT inflate, plus a 4-frame
-  APNG decode covering the disposal / blend state machine.
+  APNG decode covering the disposal / blend state machine, plus
+  `decode_apng_frame_scan` (added r196) which sweeps 2 / 8 / 32 frames
+  at 128×128 RGBA so the timing curve isolates per-frame decode-loop
+  overhead from per-pixel inflate work.
 - `encode` — symmetric encode harness with an extra Adam7 seven-pass
   scenario at 320×240 RGBA and a 4-frame APNG encode.
 - `roundtrip` — paired encode → decode at the same sizes, so a perf

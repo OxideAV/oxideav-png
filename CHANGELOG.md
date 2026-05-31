@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- benches: parametric `decode_apng_frame_scan` group sweeping 2 / 8 / 32
+  frames at 128×128 RGBA — measures per-frame decode-loop cost
+  (fcTL+fdAT sequence-number walk, disposal/blend state machine,
+  per-frame inflate setup) so future optimisation rounds can A/B-test
+  loop overhead in isolation from per-pixel inflate work (r196).
+
 ## [0.1.7](https://github.com/OxideAV/oxideav-png/compare/v0.1.6...v0.1.7) - 2026-05-29
 
 ### Other

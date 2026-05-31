@@ -49,6 +49,19 @@
 //!     dispose, Source blend) — exercises the disposal / blend state
 //!     machine and per-frame inflate.
 //!
+//! Round 196 (depth-mode benches): adds **decode_apng_frame_scan**,
+//! a parametric group sweeping multiple frame counts on small
+//! (128×128) RGBA frames so the measured time tracks the per-frame
+//! decode-loop cost (fcTL + fdAT sequence-number walk, the
+//! disposal/blend state machine, and per-frame inflate setup) rather
+//! than the per-pixel inflate work. Three parameters (2 / 8 / 32
+//! frames) bracket the trivial / typical / long-loop range; throughput
+//! is reported in decoded RGBA bytes so a frame-count scaling that's
+//! sub-linear in the loop overhead surfaces as a throughput delta.
+//!   - **decode_apng_frame_scan**: 128×128 RGBA APNG decoded for N
+//!     ∈ {2, 8, 32} frames (None dispose, Source blend; default
+//!     IDAT-as-first-frame layout).
+//!
 //! Run with:
 //!     cargo bench -p oxideav-png --bench decode
 
@@ -411,6 +424,38 @@ fn bench_decode_apng_4_frames_320x240(c: &mut Criterion) {
     g.finish();
 }
 
+/// Parametric APNG decode-loop throughput across multiple frame
+/// counts. Small 128×128 RGBA frames are used deliberately so the
+/// per-pixel inflate cost is small relative to the per-frame loop
+/// overhead (fcTL+fdAT sequence-number walk, disposal/blend state
+/// reset, per-frame inflate setup). Sweeps 2 / 8 / 32 frames so a
+/// future change that, say, makes the per-frame setup amortise
+/// differently is visible as a scaling shift between the three
+/// points rather than just a single 4-frame magnitude.
+fn bench_decode_apng_frame_scan(c: &mut Criterion) {
+    const W: u32 = 128;
+    const H: u32 = 128;
+    // RGBA decoded-byte footprint per frame; throughput reported in
+    // total output bytes so a flatter time/frame curve shows as
+    // higher throughput at the larger frame counts.
+    const FRAME_RGBA_BYTES: u64 = (W as u64) * (H as u64) * 4;
+
+    let mut g = c.benchmark_group("decode_apng_frame_scan");
+    g.sample_size(10);
+    for &n in &[2usize, 8, 32] {
+        let frames = (0..n).map(|_| build_rgba(W, H)).collect::<Vec<_>>();
+        let bytes = encode_apng(&frames, /* delay_cs */ 4, /* num_plays */ 0).expect("encode_apng");
+        g.throughput(Throughput::Bytes(FRAME_RGBA_BYTES * (n as u64)));
+        g.bench_function(
+            BenchmarkId::from_parameter(format!("apng/{n}x{W}x{H}")),
+            |b| {
+                b.iter(|| decode_apng(criterion::black_box(&bytes)).expect("decode_apng"));
+            },
+        );
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_decode_rgba_1920x1080,
@@ -424,5 +469,6 @@ criterion_group!(
     bench_decode_to_rgba_pal8_320x240,
     bench_parse_metadata_rgba_320x240,
     bench_decode_apng_4_frames_320x240,
+    bench_decode_apng_frame_scan,
 );
 criterion_main!(benches);
