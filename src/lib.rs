@@ -33,22 +33,24 @@
 //! Not implemented:
 //! * Sub-byte encode (decode only — encoder always writes 8/16-bit)
 //! * Round-tripped metadata: `sBIT`, `pHYs`, `tIME`, `bKGD`, `hIST`,
-//!   `eXIf`, `sRGB`, `cICP`, `sPLT`, `tEXt` — surfaced via
-//!   [`parse_metadata`] on decode and re-emitted by the encoder when
-//!   [`PngEncoderOptions::metadata`] is populated. `eXIf` is carried as
-//!   an opaque (TIFF-header-validated) blob; `sRGB` carries the ICC
-//!   rendering intent; `cICP` carries the H.273 colour-primaries /
-//!   transfer-function / video-range code points with
-//!   `matrix_coefficients` pinned at 0 (PNG is RGB-only per §11.3.2.6);
-//!   `sPLT` carries one or more named suggested palettes (8- or 16-bit
-//!   RGBA + frequency entries), the one metadata chunk PNG allows to
-//!   repeat (distinct names required). `tEXt` carries free-form
-//!   Latin-1 keyword + text pairs (RFC 2083 §4.2.7); `zTXt` carries the
-//!   same with the body zlib-compressed (RFC 2083 §4.2.10). Both
-//!   text-chunk types may repeat with identical keywords.
-//! * Remaining metadata chunks (`iCCP`, `iTXt`). CRC is verified on
-//!   read and then they are dropped — they are not round-tripped
-//!   through the container and not surfaced on decode.
+//!   `eXIf`, `sRGB`, `cICP`, `iCCP`, `sPLT`, `tEXt`, `zTXt`, `iTXt` —
+//!   surfaced via [`parse_metadata`] on decode and re-emitted by the
+//!   encoder when [`PngEncoderOptions::metadata`] is populated. `eXIf`
+//!   is carried as an opaque (TIFF-header-validated) blob; `sRGB`
+//!   carries the ICC rendering intent; `cICP` carries the H.273
+//!   colour-primaries / transfer-function / video-range code points
+//!   with `matrix_coefficients` pinned at 0 (PNG is RGB-only per
+//!   §11.3.2.6); `iCCP` carries an opaque ICC.1 profile blob alongside
+//!   its 1-79-byte Latin-1 name (deflate-framed on the wire, decoded
+//!   to a byte vector in memory); `sPLT` carries one or more named
+//!   suggested palettes (8- or 16-bit RGBA + frequency entries), the
+//!   one metadata chunk PNG allows to repeat with distinct names.
+//!   `tEXt` carries free-form Latin-1 keyword + text pairs (RFC 2083
+//!   §4.2.7); `zTXt` carries the same with the body zlib-compressed
+//!   (RFC 2083 §4.2.10); `iTXt` is the UTF-8 successor with a BCP47
+//!   language tag and an optional zlib-compressed UTF-8 text body
+//!   (W3C PNG3 §11.3.3.4). All three text-chunk types may repeat with
+//!   identical keywords.
 //! * `tRNS` chunk emission for colour type 0 (grayscale) / colour type 2
 //!   (truecolor). Decode applies the chunk during [`decode_png_to_rgba`]
 //!   per RFC 2083 §4.2.9 (single transparent gray sample or RGB triple,
@@ -97,8 +99,8 @@ pub use encoder::{
 pub use error::{PngError, Result};
 pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
 pub use metadata::{
-    Bkgd, Chrm, Cicp, Exif, Gama, Hist, Phys, PhysUnit, PngMetadata, RenderingIntent, Sbit, Splt,
-    SpltEntry, Srgb, Text, Time, Ztxt,
+    Bkgd, Chrm, Cicp, Exif, Gama, Hist, Iccp, Itxt, Phys, PhysUnit, PngMetadata, RenderingIntent,
+    Sbit, Splt, SpltEntry, Srgb, Text, Time, Ztxt,
 };
 
 // Public registry-gated API — keeps the framework integration surface

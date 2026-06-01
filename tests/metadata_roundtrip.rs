@@ -4,8 +4,8 @@
 
 use oxideav_png::{
     decode_png, encode_png_image, encode_png_image_with_options, parse_metadata, Bkgd, Chrm, Cicp,
-    Exif, Gama, Hist, Phys, PhysUnit, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat,
-    RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time, Ztxt,
+    Exif, Gama, Hist, Iccp, Itxt, Phys, PhysUnit, PngEncoderOptions, PngImage, PngMetadata,
+    PngPixelFormat, RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time, Ztxt,
 };
 
 fn rgba_2x2() -> PngImage {
@@ -207,6 +207,7 @@ fn all_three_chunks_roundtrip() {
             matrix_coefficients: 0,
             video_full_range_flag: 1,
         }),
+        iccp: None,
         gama: Some(Gama {
             // RFC 2083 §4.2.3: γ 1/2.2 ≈ 0.45455 ⇒ 45455.
             gamma_times_100000: 45_455,
@@ -225,6 +226,7 @@ fn all_three_chunks_roundtrip() {
         splt: Vec::new(),
         texts: Vec::new(),
         ztxts: Vec::new(),
+        itxts: Vec::new(),
     };
     let opts = PngEncoderOptions {
         metadata: Some(meta_in.clone()),
@@ -1751,4 +1753,397 @@ fn ztxt_coexists_with_text_in_one_file() {
     assert_eq!(parsed.ztxts.len(), 2);
     assert_eq!(parsed.ztxts[0].keyword, "Description");
     assert_eq!(parsed.ztxts[1].keyword, "Comment");
+}
+
+// ---- iCCP (W3C PNG3 §11.3.2.3) ----------------------------------------
+
+#[test]
+fn iccp_roundtrip_through_encoder() {
+    // §11.3.2.3: iCCP is an embedded ICC profile blob, zlib-compressed
+    // on the wire. Drive a populated iccp through the codec and confirm
+    // both name and inflated profile bytes survive.
+    let img = rgba_2x2();
+    // 256-byte synthesised profile blob — opaque to the codec.
+    let profile: Vec<u8> = (0..=255u8).collect();
+    let meta = PngMetadata {
+        iccp: Some(Iccp {
+            name: "Synthetic Profile".to_string(),
+            profile: profile.clone(),
+        }),
+        ..Default::default()
+    };
+    let opts = PngEncoderOptions {
+        metadata: Some(meta),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let parsed = parse_metadata(&bytes).expect("parse_metadata");
+    let back = parsed.iccp.expect("iCCP must round-trip");
+    assert_eq!(back.name, "Synthetic Profile");
+    assert_eq!(back.profile, profile);
+    // Pixel data still decodes (iCCP is ancillary).
+    decode_png(&bytes).expect("decode");
+}
+
+#[test]
+fn iccp_duplicate_rejected() {
+    // §5.6 Table 1: iCCP is "Multiple OK? No". Inject two iCCP chunks
+    // and confirm parse_metadata rejects.
+    let img = rgba_2x2();
+    let meta = PngMetadata {
+        iccp: Some(Iccp {
+            name: "First".to_string(),
+            profile: vec![1, 2, 3],
+        }),
+        ..Default::default()
+    };
+    let opts = PngEncoderOptions {
+        metadata: Some(meta),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    // Inject a second iCCP after the first (8 PNG sig + 25 IHDR + we
+    // know the first iCCP follows immediately).
+    let inject_pos = 8 + 25;
+    let dup = Iccp {
+        name: "Second".to_string(),
+        profile: vec![4, 5, 6],
+    };
+    let mut chunk = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut chunk, b"iCCP", &dup.to_bytes().unwrap());
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&chunk);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    assert!(parse_metadata(&tampered).is_err());
+}
+
+#[test]
+fn iccp_chunk_precedes_plte_and_idat_in_output() {
+    // §5.6 Table 1: iCCP must appear before PLTE and IDAT. Walk the
+    // emitted chunk stream and verify the iCCP position.
+    let img = rgba_2x2();
+    let meta = PngMetadata {
+        iccp: Some(Iccp {
+            name: "P".to_string(),
+            profile: vec![0xAA; 32],
+        }),
+        ..Default::default()
+    };
+    let opts = PngEncoderOptions {
+        metadata: Some(meta),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let mut pos = 8usize;
+    let mut iccp_pos = None;
+    let mut idat_pos = None;
+    while pos + 8 <= bytes.len() {
+        let len = u32::from_be_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+        let ty = &bytes[pos + 4..pos + 8];
+        if ty == b"iCCP" && iccp_pos.is_none() {
+            iccp_pos = Some(pos);
+        }
+        if ty == b"IDAT" && idat_pos.is_none() {
+            idat_pos = Some(pos);
+        }
+        if ty == b"IEND" {
+            break;
+        }
+        pos += 8 + len + 4;
+    }
+    let ip = iccp_pos.expect("iCCP chunk must be present");
+    let dp = idat_pos.expect("IDAT chunk must be present");
+    assert!(ip < dp, "iCCP at {ip} must precede IDAT at {dp}");
+}
+
+#[test]
+fn parse_metadata_rejects_iccp_with_unknown_compression_method() {
+    // §11.3.2.3: only method 0 (deflate) is defined; non-zero must be
+    // rejected.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"BadProfile");
+    payload.push(0); // NUL after name
+    payload.push(1); // bogus method
+    payload.extend_from_slice(&[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    let mut chunk = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut chunk, b"iCCP", &payload);
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&chunk);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    assert!(parse_metadata(&tampered).is_err());
+}
+
+#[test]
+fn parse_metadata_rejects_iccp_with_corrupted_zlib_body() {
+    // Method = 0 but body is garbage; inflate must fail without panic.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"BadProfile");
+    payload.push(0);
+    payload.push(0);
+    payload.extend_from_slice(&[0xFF; 6]);
+    let mut chunk = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut chunk, b"iCCP", &payload);
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&chunk);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    assert!(parse_metadata(&tampered).is_err());
+}
+
+#[test]
+fn parse_metadata_rejects_iccp_with_invalid_name() {
+    // Leading space → name predicate rejects.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b" Leading");
+    payload.push(0);
+    payload.push(0);
+    payload.extend_from_slice(&[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    let mut chunk = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut chunk, b"iCCP", &payload);
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&chunk);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    assert!(parse_metadata(&tampered).is_err());
+}
+
+// ---- iTXt (W3C PNG3 §11.3.3.4) ----------------------------------------
+
+#[test]
+fn itxt_uncompressed_roundtrip_through_encoder() {
+    let img = rgba_2x2();
+    let mut meta = PngMetadata::default();
+    meta.itxts.push(Itxt {
+        keyword: "Title".to_string(),
+        compressed: false,
+        language_tag: "en-US".to_string(),
+        translated_keyword: String::new(),
+        text: "An internationalised plain title.".to_string(),
+    });
+    let opts = PngEncoderOptions {
+        metadata: Some(meta),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let parsed = parse_metadata(&bytes).expect("parse_metadata");
+    assert_eq!(parsed.itxts.len(), 1);
+    let back = &parsed.itxts[0];
+    assert_eq!(back.keyword, "Title");
+    assert!(!back.compressed);
+    assert_eq!(back.language_tag, "en-US");
+    assert_eq!(back.translated_keyword, "");
+    assert_eq!(back.text, "An internationalised plain title.");
+    decode_png(&bytes).expect("decode");
+}
+
+#[test]
+fn itxt_compressed_roundtrip_through_encoder() {
+    let img = rgba_2x2();
+    let mut meta = PngMetadata::default();
+    meta.itxts.push(Itxt {
+        keyword: "Description".to_string(),
+        compressed: true,
+        language_tag: "ja".to_string(),
+        translated_keyword: "説明".to_string(),
+        text: "圧縮された日本語の説明テキスト".to_string(),
+    });
+    let opts = PngEncoderOptions {
+        metadata: Some(meta),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let parsed = parse_metadata(&bytes).expect("parse_metadata");
+    assert_eq!(parsed.itxts.len(), 1);
+    let back = &parsed.itxts[0];
+    assert!(back.compressed);
+    assert_eq!(back.language_tag, "ja");
+    assert_eq!(back.translated_keyword, "説明");
+    assert_eq!(back.text, "圧縮された日本語の説明テキスト");
+}
+
+#[test]
+fn itxt_multiple_with_same_keyword_roundtrip() {
+    // §11.3.3.4 inherits §4.2.7 ¶3 — keyword uniqueness is not required.
+    let img = rgba_2x2();
+    let mut meta = PngMetadata::default();
+    meta.itxts.push(Itxt {
+        keyword: "Description".to_string(),
+        compressed: false,
+        language_tag: "en".to_string(),
+        translated_keyword: String::new(),
+        text: "First description".to_string(),
+    });
+    meta.itxts.push(Itxt {
+        keyword: "Description".to_string(),
+        compressed: false,
+        language_tag: "fr".to_string(),
+        translated_keyword: String::new(),
+        text: "Première description".to_string(),
+    });
+    let opts = PngEncoderOptions {
+        metadata: Some(meta),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let parsed = parse_metadata(&bytes).expect("parse_metadata");
+    assert_eq!(parsed.itxts.len(), 2);
+    assert_eq!(parsed.itxts[0].keyword, "Description");
+    assert_eq!(parsed.itxts[0].language_tag, "en");
+    assert_eq!(parsed.itxts[1].keyword, "Description");
+    assert_eq!(parsed.itxts[1].language_tag, "fr");
+    assert_eq!(parsed.itxts[1].text, "Première description");
+}
+
+#[test]
+fn itxt_chunk_precedes_idat_in_output() {
+    // §5.6 Table 1: iTXt shares the "Before IDAT, no ordering
+    // constraint" bucket with tEXt / zTXt.
+    let img = rgba_2x2();
+    let mut meta = PngMetadata::default();
+    meta.itxts.push(Itxt {
+        keyword: "Title".to_string(),
+        compressed: false,
+        language_tag: String::new(),
+        translated_keyword: String::new(),
+        text: "T".to_string(),
+    });
+    let opts = PngEncoderOptions {
+        metadata: Some(meta),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let mut pos = 8usize;
+    let mut itxt_pos = None;
+    let mut idat_pos = None;
+    while pos + 8 <= bytes.len() {
+        let len = u32::from_be_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+        let ty = &bytes[pos + 4..pos + 8];
+        if ty == b"iTXt" && itxt_pos.is_none() {
+            itxt_pos = Some(pos);
+        }
+        if ty == b"IDAT" && idat_pos.is_none() {
+            idat_pos = Some(pos);
+        }
+        if ty == b"IEND" {
+            break;
+        }
+        pos += 8 + len + 4;
+    }
+    let ip = itxt_pos.expect("iTXt chunk must be present");
+    let dp = idat_pos.expect("IDAT chunk must be present");
+    assert!(ip < dp, "iTXt at {ip} must precede IDAT at {dp}");
+}
+
+#[test]
+fn itxt_coexists_with_text_and_ztxt() {
+    // The three text-chunk types must independently round-trip when
+    // mixed in one file.
+    let img = rgba_2x2();
+    let mut meta = PngMetadata::default();
+    meta.texts.push(Text {
+        keyword: "Title".to_string(),
+        text: "plain".to_string(),
+    });
+    meta.ztxts.push(Ztxt {
+        keyword: "Description".to_string(),
+        text: "zlib compressed".to_string(),
+    });
+    meta.itxts.push(Itxt {
+        keyword: "Comment".to_string(),
+        compressed: true,
+        language_tag: "en".to_string(),
+        translated_keyword: "Comment".to_string(),
+        text: "international UTF-8 comment".to_string(),
+    });
+    let opts = PngEncoderOptions {
+        metadata: Some(meta),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let parsed = parse_metadata(&bytes).expect("parse_metadata");
+    assert_eq!(parsed.texts.len(), 1);
+    assert_eq!(parsed.ztxts.len(), 1);
+    assert_eq!(parsed.itxts.len(), 1);
+    assert_eq!(parsed.texts[0].text, "plain");
+    assert_eq!(parsed.ztxts[0].text, "zlib compressed");
+    assert_eq!(parsed.itxts[0].text, "international UTF-8 comment");
+    assert_eq!(parsed.itxts[0].translated_keyword, "Comment");
+}
+
+#[test]
+fn parse_metadata_rejects_itxt_with_unknown_compression_flag() {
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"Title");
+    payload.push(0); // NUL after keyword
+    payload.push(2); // bogus flag
+    payload.push(0); // method
+    payload.push(0); // NUL after lang
+    payload.push(0); // NUL after translated kw
+    payload.extend_from_slice(b"text");
+    let mut chunk = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut chunk, b"iTXt", &payload);
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&chunk);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    assert!(parse_metadata(&tampered).is_err());
+}
+
+#[test]
+fn parse_metadata_rejects_itxt_with_invalid_utf8_text() {
+    // Inject a raw iTXt whose text is byte 0xFF — invalid UTF-8 start.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"Title");
+    payload.push(0);
+    payload.push(0); // flag = 0 (uncompressed)
+    payload.push(0);
+    payload.push(0); // NUL after lang
+    payload.push(0); // NUL after translated kw
+    payload.push(0xFF); // invalid UTF-8 lead byte
+    let mut chunk = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut chunk, b"iTXt", &payload);
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&chunk);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    assert!(parse_metadata(&tampered).is_err());
+}
+
+#[test]
+fn parse_metadata_rejects_itxt_with_invalid_keyword() {
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b" Leading"); // leading space → invalid keyword
+    payload.push(0);
+    payload.push(0);
+    payload.push(0);
+    payload.push(0);
+    payload.push(0);
+    // empty text
+    let mut chunk = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut chunk, b"iTXt", &payload);
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&chunk);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    assert!(parse_metadata(&tampered).is_err());
 }

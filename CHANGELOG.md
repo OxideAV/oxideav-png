@@ -9,6 +9,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `iCCP` (embedded ICC profile, W3C PNG3 §11.3.2.3) round-trip.
+  Surfaced as `metadata::Iccp` (`pub name`, `pub profile: Vec<u8>`)
+  and held by `PngMetadata::iccp: Option<Iccp>`. The on-wire payload
+  is a 1-79-byte Latin-1 profile name + `NUL` separator + 1-byte
+  compression method (only `0` = deflate defined per §11.3.2.3 "The
+  only compression method defined in this specification is method 0";
+  the codec rejects any other value) + zlib-compressed profile bytes.
+  The decoder reuses the shared keyword validator for the profile
+  name, inflates the body via `miniz_oxide`, and surfaces the
+  decompressed profile as an opaque `Vec<u8>` (PNG cites ICC.1 /
+  ISO 15076-1 for the internal structure and the codec does not
+  interpret it). The encoder re-validates the name and deflates the
+  profile at the project's default level (6). Single-instance only —
+  duplicate `iCCP` is rejected on parse per §5.6 Table 1 "Multiple
+  OK? No". Emitted before `PLTE` and `IDAT` in §4.3 Color-Chunk-
+  Priority order, between `cICP` (rank 1) and `sRGB` (rank 3). 8 new
+  unit + 5 integration tests cover round-trip, empty-profile,
+  unknown-method rejection, corrupted-zlib rejection, missing-NUL
+  rejection, missing-method-byte rejection, invalid-name rejection,
+  large-payload compression (4 KB run-of-one → <200 wire bytes),
+  duplicate rejection on parse, and chunk-precedes-PLTE/IDAT
+  ordering. Closes the README "Not preserved" entry for `iCCP`.
+
+- `iTXt` (international textual data, W3C PNG3 §11.3.3.4) round-trip.
+  Surfaced as `metadata::Itxt` (`pub keyword`, `pub compressed`,
+  `pub language_tag`, `pub translated_keyword`, `pub text`) and held
+  by `PngMetadata::itxts: Vec<Itxt>`. The UTF-8 successor to `tEXt`
+  pairs a Latin-1 keyword with a language-tagged UTF-8 text body,
+  optionally zlib-compressed. The on-wire payload is `keyword || NUL
+  || compression_flag (0/1) || compression_method (1 B, only 0 =
+  deflate defined when flag=1, ignored when flag=0) || language_tag
+  || NUL || translated_keyword || NUL || text` per §11.3.3.4. The
+  decoder reuses the shared keyword validator, accepts any method
+  byte when the flag is `0` (per "decoders shall ignore it"),
+  validates UTF-8 round-tripping of the translated keyword + text,
+  enforces the no-`NUL`-in-text rule on the decompressed body, and
+  validates the language tag against the ASCII subset of BCP47 (the
+  IANA subtag-registry constraint is encoder-side per the spec and
+  offline-only at the project level). The encoder validates the
+  keyword, the language tag's ASCII bytes, and the no-`NUL` rule on
+  the translated keyword + text, then deflates the text body when
+  `compressed = true`. `iTXt` is the third metadata chunk PNG
+  explicitly permits to repeat with identical keywords (§11.3.3.4
+  inherits §4.2.7 ¶3); file order is preserved on decode and
+  replayed on encode. Emitted before `IDAT` alongside `tEXt` /
+  `zTXt`; the encoder writes them after `zTXt` so the Latin-1
+  chunks lead the internationalised UTF-8 chunks in the stream. 16
+  new unit + 9 integration tests cover uncompressed / compressed
+  round-trip, UTF-8 translated keyword + text (Japanese, French),
+  empty-language-and-translated-keyword, multi-instance + identical-
+  keyword, large-payload compression, unknown-flag rejection,
+  unknown-method rejection when compressed, method-byte ignored when
+  uncompressed, missing-keyword-NUL / missing-language-NUL /
+  missing-translated-keyword-NUL rejection, corrupted-zlib rejection
+  when compressed, invalid UTF-8 text rejection, non-ASCII language
+  tag rejection on both encode and decode, `NUL`-in-translated-
+  keyword / `NUL`-in-text rejection on encode,
+  `NUL`-in-decompressed-text rejection on parse, chunk-ordering vs
+  `IDAT`, and coexistence with `tEXt` / `zTXt` in one file. Closes
+  the README "Not preserved" entry for `iTXt`; the only remaining
+  ancillary-chunk gaps are the PNG 3rd edition HDR-side `mDCV`
+  (§11.3.2.7) and `cLLI` (§11.3.2.8).
+
 - `zTXt` (compressed textual data, RFC 2083 §4.2.10 / W3C PNG3
   §11.3.3.3) round-trip. Surfaced as `metadata::Ztxt` (`pub keyword`,
   `pub text`) and held by `PngMetadata::ztxts: Vec<Ztxt>`. Semantically

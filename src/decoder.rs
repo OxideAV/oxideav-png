@@ -45,7 +45,8 @@ use crate::apng::{parse_fdat, Actl, Blend, Disposal, Fctl};
 use crate::chunk::{read_chunk, ChunkRef, PNG_MAGIC};
 use crate::filter::{unfilter_row, FilterType};
 use crate::metadata::{
-    Bkgd, Chrm, Cicp, Exif, Gama, Hist, Phys, PngMetadata, Sbit, Splt, Srgb, Text, Time, Ztxt,
+    Bkgd, Chrm, Cicp, Exif, Gama, Hist, Iccp, Itxt, Phys, PngMetadata, Sbit, Splt, Srgb, Text,
+    Time, Ztxt,
 };
 
 pub const CODEC_ID_STR: &str = "png";
@@ -221,7 +222,7 @@ pub(crate) fn parse_all_chunks(buf: &[u8]) -> Result<Vec<ChunkRef<'_>>> {
 
 /// Extract round-trippable PNG ancillary metadata (`sBIT`, `pHYs`,
 /// `tIME`, `bKGD`, `hIST`, `eXIf`, `sRGB`, `cICP`, `gAMA`, `cHRM`,
-/// `sPLT`, `tEXt`, `zTXt`) from a PNG / APNG file.
+/// `sPLT`, `tEXt`, `zTXt`, `iCCP`, `iTXt`) from a PNG / APNG file.
 ///
 /// Standalone (no `oxideav-core`) entry point: works whether or not
 /// the `registry` feature is enabled. Returns
@@ -387,6 +388,26 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                 // no-uniqueness-check rule as `tEXt`; preserve file
                 // order so the encoder can replay it verbatim.
                 out.ztxts.push(Ztxt::parse(c.data)?);
+            }
+            b"iCCP" => {
+                // W3C PNG3 §5.6 Table 1: "Multiple OK? No" for iCCP.
+                // The chunk also has higher-precedence members of the
+                // §4.3 colour-chunk table (cICP `1` > iCCP `2`); the
+                // codec keeps them as independent fields and leaves
+                // policy to the caller.
+                if out.iccp.is_some() {
+                    return Err(Error::invalid("PNG: duplicate iCCP chunk"));
+                }
+                out.iccp = Some(Iccp::parse(c.data)?);
+            }
+            b"iTXt" => {
+                // W3C PNG3 §11.3.3.4: iTXt obeys the same multi-instance
+                // rule as `tEXt` / `zTXt` — "Any number of [textual]
+                // chunks can appear in the same file" (implicit in the
+                // Table 1 `Multiple OK? Yes / Ordering: None` row).
+                // Preserve file order so the encoder can replay it
+                // verbatim.
+                out.itxts.push(Itxt::parse(c.data)?);
             }
             _ => {}
         }

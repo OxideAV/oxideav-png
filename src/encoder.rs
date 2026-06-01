@@ -41,14 +41,16 @@ pub struct PngEncoderOptions {
     /// progressively renderable.
     pub interlace: bool,
     /// Optional `sBIT` / `pHYs` / `tIME` / `bKGD` / `hIST` / `eXIf` /
-    /// `sRGB` / `cICP` / `gAMA` / `cHRM` / `sPLT` / `tEXt` / `zTXt`
-    /// ancillary metadata to embed. Each `Some(_)` field (and each
-    /// `sPLT` / `tEXt` / `zTXt` in its `Vec`) is written; chunk ordering
-    /// follows RFC 2083 §4.3 / W3C PNG3 §5.6 Table 7:
+    /// `sRGB` / `cICP` / `iCCP` / `gAMA` / `cHRM` / `sPLT` / `tEXt` /
+    /// `zTXt` / `iTXt` ancillary metadata to embed. Each `Some(_)`
+    /// field (and each `sPLT` / `tEXt` / `zTXt` / `itxt` in its `Vec`)
+    /// is written; chunk ordering follows RFC 2083 §4.3 / W3C PNG3
+    /// §5.6 Table 7:
     ///
-    /// * `cICP` / `sBIT` / `sRGB` / `gAMA` / `cHRM` — before `PLTE` and
-    ///   `IDAT`. The colour chunks follow §4.3 Table 1's "Color Chunk
-    ///   Priority" order (`cICP` `1` > `sRGB` `3` > `cHRM`/`gAMA` `4`).
+    /// * `cICP` / `iCCP` / `sBIT` / `sRGB` / `gAMA` / `cHRM` — before
+    ///   `PLTE` and `IDAT`. The colour chunks follow §4.3 Table 1's
+    ///   "Color Chunk Priority" order (`cICP` `1` > `iCCP` `2` >
+    ///   `sRGB` `3` > `cHRM`/`gAMA` `4`).
     /// * `bKGD` / `hIST` — after `PLTE`, before `IDAT`.
     /// * `pHYs` — before `IDAT`.
     /// * `tIME` — unconstrained; we emit it before `IDAT` for
@@ -64,9 +66,14 @@ pub struct PngEncoderOptions {
     ///   precedes compressed text in the chunk stream. Multiple
     ///   instances with identical keywords are permitted (§4.2.10 ¶6).
     ///   Body is zlib-compressed at the encoder default (level 6).
+    /// * `iTXt` — before `IDAT`; emitted after `zTXt` so the
+    ///   non-international text chunks lead the textual stream.
+    ///   Multiple instances with identical keywords are permitted
+    ///   (§11.3.3.4). Each entry's text is zlib-compressed when its
+    ///   `compressed` flag is set, otherwise written verbatim.
     ///
-    /// `None` (or an empty `splt` / `texts` / `ztxts` `Vec`) skips the
-    /// chunk entirely.
+    /// `None` (or an empty `splt` / `texts` / `ztxts` / `itxts` `Vec`)
+    /// skips the chunk entirely.
     pub metadata: Option<PngMetadata>,
 }
 
@@ -105,7 +112,7 @@ pub fn encode_png_image_with_options(
     out.extend_from_slice(&PNG_MAGIC);
     write_chunk(&mut out, b"IHDR", &ihdr.to_bytes());
     // sBIT must precede PLTE + IDAT (RFC 2083 §4.3 / §4.2.6).
-    write_metadata_before_plte(&mut out, opts.metadata.as_ref());
+    write_metadata_before_plte(&mut out, opts.metadata.as_ref())?;
     if let Some(p) = plte_bytes.as_deref() {
         write_chunk(&mut out, b"PLTE", p);
     }
@@ -122,19 +129,22 @@ pub fn encode_png_image_with_options(
 }
 
 /// Emit the metadata chunks the PNG spec places "before PLTE and IDAT":
-/// `cICP` (W3C PNG3 §11.3.2.6), `sBIT` (RFC 2083 §4.3), `sRGB` (W3C
-/// PNG3 §5.6 Table 1), and the `gAMA` / `cHRM` colour-management pair
-/// (RFC 2083 §4.2.2 / §4.2.3). The colour chunks are emitted in §4.3
-/// "Color Chunk Priority" order (cICP `1` > sRGB `3` > cHRM/gAMA `4`;
-/// `iCCP` is not yet supported), with `sBIT` slotted after `cICP` for
-/// deterministic output. `gAMA` precedes `cHRM` so the simpler scalar
-/// gamma leads the chromaticity block.
-fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
+/// `cICP` (W3C PNG3 §11.3.2.6), `iCCP` (§11.3.2.3), `sBIT` (RFC 2083
+/// §4.3), `sRGB` (W3C PNG3 §5.6 Table 1), and the `gAMA` / `cHRM`
+/// colour-management pair (RFC 2083 §4.2.2 / §4.2.3). The colour chunks
+/// are emitted in §4.3 "Color Chunk Priority" order (cICP `1` > iCCP
+/// `2` > sRGB `3` > cHRM/gAMA `4`), with `sBIT` slotted after the
+/// highest-precedence pair for deterministic output. `gAMA` precedes
+/// `cHRM` so the simpler scalar gamma leads the chromaticity block.
+fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> Result<()> {
     let Some(meta) = meta else {
-        return;
+        return Ok(());
     };
     if let Some(cicp) = &meta.cicp {
         write_chunk(out, b"cICP", &cicp.to_bytes());
+    }
+    if let Some(iccp) = &meta.iccp {
+        write_chunk(out, b"iCCP", &iccp.to_bytes()?);
     }
     if let Some(sbit) = &meta.sbit {
         write_chunk(out, b"sBIT", &sbit.to_bytes());
@@ -148,6 +158,7 @@ fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
     if let Some(chrm) = &meta.chrm {
         write_chunk(out, b"cHRM", &chrm.to_bytes());
     }
+    Ok(())
 }
 
 /// Emit `bKGD`, `hIST`, `pHYs`, `tIME`, `eXIf`, `sPLT` — all go between
@@ -196,6 +207,14 @@ fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
     // the human-readable annotations first.
     for ztxt in &meta.ztxts {
         write_chunk(out, b"zTXt", &ztxt.to_bytes()?);
+    }
+    // `iTXt` (W3C PNG3 §11.3.3.4) shares the same "Before IDAT, no
+    // ordering constraint" bucket as `tEXt` and `zTXt`. Emitted after
+    // `zTXt` so the Latin-1 chunks (cheap to decode for callers that
+    // only need byte-exact metadata) lead the internationalised UTF-8
+    // chunks in the stream.
+    for itxt in &meta.itxts {
+        write_chunk(out, b"iTXt", &itxt.to_bytes()?);
     }
     Ok(())
 }
@@ -465,7 +484,7 @@ pub fn encode_apng_with_options(
     write_chunk(&mut out, b"IHDR", &ihdr.to_bytes());
     write_chunk(&mut out, b"acTL", &actl.to_bytes());
     // sBIT precedes PLTE + IDAT per RFC 2083 §4.3.
-    write_metadata_before_plte(&mut out, opts.metadata.as_ref());
+    write_metadata_before_plte(&mut out, opts.metadata.as_ref())?;
     if let Some(p) = plte.as_deref() {
         write_chunk(&mut out, b"PLTE", p);
     }

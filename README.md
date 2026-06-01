@@ -142,19 +142,55 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   streaming reader sees the cheap-to-display plain annotations first.
   A 4 KB run of one character round-trips through the codec at well
   under 200 wire bytes.
+- `iCCP` (embedded ICC profile, W3C PNG3 §11.3.2.3) — a named
+  ICC.1 / ISO 15076-1 colour-management profile carried as an opaque
+  zlib-compressed blob. On-wire payload: 1-79-byte Latin-1 profile
+  name (`tEXt`-keyword rules) + `NUL` separator + 1-byte compression
+  method (only `0` = deflate defined; any other value rejected per
+  §11.3.2.3 "The only compression method defined in this
+  specification is method 0") + zlib-compressed profile. The codec
+  stores the *decompressed* profile bytes; callers do not need to know
+  the chunk was compressed on the wire. The profile internals belong
+  to the ICC and are not interpreted here — only the chunk framing
+  (keyword rules, deflate compression method, zlib round-trip) is
+  validated. Emitted before `PLTE` and `IDAT` in §4.3 Color-Chunk-
+  Priority order (cICP `1` > iCCP `2` > sRGB `3` > cHRM/gAMA `4`).
+  Single-instance only — duplicate `iCCP` is rejected on parse. A
+  4 KB run of one byte round-trips at well under 200 wire bytes.
+- `iTXt` (international textual data, W3C PNG3 §11.3.3.4) — the
+  UTF-8 successor to `tEXt`. On-wire payload: 1-79-byte Latin-1
+  keyword + `NUL` + compression flag (0 = uncompressed, 1 =
+  zlib-compressed) + compression method (only `0` = deflate defined
+  when the flag is `1`; ignored when the flag is `0` per "decoders
+  shall ignore it") + language tag (BCP47, 0+ ASCII bytes, may be
+  empty for "language unspecified") + `NUL` + translated keyword
+  (0+ UTF-8 bytes, no `NUL`) + `NUL` + text (0+ UTF-8 bytes, no
+  `NUL`). The translated keyword and text are UTF-8 [rfc3629] and
+  "neither shall contain a zero byte" (§11.3.3.4); embedded `NUL` is
+  rejected on parse. The language tag is checked for ASCII bytes (a
+  prerequisite for a well-formed BCP47 tag) but the codec does not
+  validate against the IANA language-subtag registry — that requires
+  online lookup, and the spec frames the subtag-registry constraint
+  as encoder-side. Multiple `iTXt` chunks are permitted, including
+  with identical keywords (same rule as `tEXt` / `zTXt`). Emitted
+  before `IDAT` alongside `tEXt` / `zTXt`; the encoder writes them
+  after `zTXt` so the Latin-1 chunks (cheap to decode for callers
+  that only need byte-exact metadata) lead the internationalised
+  UTF-8 chunks in the stream.
 
 Decode: [`parse_metadata`] returns a [`PngMetadata`] with each
 supported field populated for any chunks present. Encode:
 [`PngEncoderOptions`]`::metadata` holds the same struct; populated
-fields are emitted at spec-compliant chunk positions (`cICP` / `sBIT` /
-`sRGB` / `gAMA` / `cHRM` before `PLTE`/`IDAT`, in §4.3 Color-Chunk-
-Priority order; `bKGD` / `hIST` after `PLTE`, before `IDAT`; `pHYs`,
-`tIME`, `eXIf`, `sPLT`, `tEXt`, and `zTXt` before `IDAT`).
-Single-instance chunks are rejected on decode if repeated (the
-"Multiple OK? No" rule in RFC 2083 §4.3 / W3C PNG3 §5.6); `sPLT`
-requires distinct palette names; `tEXt` and `zTXt` are the two chunks
-where identical keywords on multiple instances are explicitly
-permitted (§4.2.7 ¶3 / §4.2.10 ¶6).
+fields are emitted at spec-compliant chunk positions (`cICP` / `iCCP` /
+`sBIT` / `sRGB` / `gAMA` / `cHRM` before `PLTE`/`IDAT`, in §4.3
+Color-Chunk-Priority order; `bKGD` / `hIST` after `PLTE`, before
+`IDAT`; `pHYs`, `tIME`, `eXIf`, `sPLT`, `tEXt`, `zTXt`, and `iTXt`
+before `IDAT`). Single-instance chunks are rejected on decode if
+repeated (the "Multiple OK? No" rule in RFC 2083 §4.3 / W3C PNG3
+§5.6); `sPLT` requires distinct palette names; `tEXt`, `zTXt`, and
+`iTXt` are the three chunks where identical keywords on multiple
+instances are explicitly permitted (§4.2.7 ¶3 / §4.2.10 ¶6 /
+§11.3.3.4).
 
 ## Not preserved
 
@@ -163,9 +199,10 @@ permitted (§4.2.7 ¶3 / §4.2.10 ¶6).
 - `tRNS` chunk emission for ct=0 / ct=2 (decode applies it during
   `decode_png_to_rgba`; the standalone encoder still only carries
   per-entry alpha for `Pal8` via the palette tail)
-- Remaining metadata chunks: `iCCP`, `iTXt` (the two that carry an
-  ICC-profile or UTF-8 international-text payload). Each is CRC-checked
-  on read and then dropped
+- `mDCV` (Mastering Display Color Volume, §11.3.2.7) and `cLLI`
+  (Content Light Level Information, §11.3.2.8) — HDR-side ancillary
+  chunks introduced in PNG 3rd edition; CRC-checked on read and then
+  dropped
 
 ## Robustness
 

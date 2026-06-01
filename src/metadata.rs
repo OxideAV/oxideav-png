@@ -1,6 +1,6 @@
 //! PNG ancillary metadata chunks — `sBIT`, `pHYs`, `tIME`, `bKGD`,
-//! `hIST`, `eXIf`, `sRGB`, `cICP`, `gAMA`, `cHRM`, `sPLT`, `tEXt`,
-//! `zTXt`.
+//! `hIST`, `eXIf`, `sRGB`, `cICP`, `iCCP`, `gAMA`, `cHRM`, `sPLT`,
+//! `tEXt`, `zTXt`, `iTXt`.
 //!
 //! All but `eXIf` and `sPLT` are short, fixed-layout chunks with no
 //! embedded compression and no cross-chunk dependencies (with the single
@@ -136,6 +136,36 @@
 //!   relationship; multiple `sPLT` chunks are permitted but each shall
 //!   have a different palette name (we reject duplicate names on parse).
 //!
+//! - `iCCP` — W3C PNG3 §11.3.2.3 "Embedded ICC profile". A named ICC
+//!   colour-management profile carried as an opaque zlib-compressed
+//!   blob. Payload layout (§11.3.2.3 "The iCCP chunk contains"):
+//!
+//!   | Field                | Width     |
+//!   |----------------------|-----------|
+//!   | Profile name         | 1-79 B    |
+//!   | NUL separator        | 1 B       |
+//!   | Compression method   | 1 B       |
+//!   | Compressed profile   | n B       |
+//!
+//!   "The only compression method defined in this specification is
+//!   method 0 (zlib datastream with deflate compression)" — any other
+//!   method byte is rejected. The profile name obeys the same rules as
+//!   the `tEXt` keyword / `sPLT` palette name (§11.3.3.1: printable
+//!   Latin-1 `0x20..=0x7E` / `0xA1..=0xFF`, 1-79 bytes, no leading /
+//!   trailing / consecutive spaces). The decompressed profile is
+//!   opaque to PNG — the ICC profile internals belong to [ICC.1] /
+//!   [ISO_15076-1] and are not interpreted here; the codec validates
+//!   only the zlib framing and round-trips the inflated bytes
+//!   verbatim. The in-memory representation holds the *decompressed*
+//!   profile so callers do not need to know that compression happened.
+//!   `iCCP` must precede `PLTE` and `IDAT` (§5.6 Table 1); only one is
+//!   permitted. In the §4.3 "Color Chunk Priority" table iCCP is rank
+//!   `2`, between `cICP` (`1`) and `sRGB` (`3`); a datastream "should
+//!   not" carry both `iCCP` and `sRGB` (§11.3.2.3 last paragraph) but
+//!   the codec does not reject the combination — the spec is a
+//!   `should`, not a `shall`. Empty profiles (`n = 0` plaintext) are
+//!   permitted.
+//!
 //! - `zTXt` — RFC 2083 §4.2.10 "Compressed textual data" / W3C PNG3
 //!   §11.3.3.3. Same semantics as `tEXt` (Latin-1 keyword + `NUL`
 //!   separator + Latin-1 text body), but the body is zlib-compressed.
@@ -159,12 +189,54 @@
 //!   the encoder replays it via `Vec<Ztxt>`. Emitted before `IDAT`
 //!   alongside `tEXt` (Table 1: "Multiple OK? Yes / Ordering: None").
 //!
-//! Every chunk here except `sPLT`, `tEXt`, and `zTXt` is marked
+//! - `iTXt` — W3C PNG3 §11.3.3.4 "International textual data". The
+//!   UTF-8 successor to `tEXt`: a Latin-1 keyword paired with a UTF-8
+//!   language-tagged text body. Payload layout (§11.3.3.4 Table — "An
+//!   iTXt chunk contains"):
+//!
+//!   | Field              | Width     |
+//!   |--------------------|-----------|
+//!   | Keyword            | 1-79 B    |
+//!   | NUL separator      | 1 B       |
+//!   | Compression flag   | 1 B       |
+//!   | Compression method | 1 B       |
+//!   | Language tag       | 0+ B      |
+//!   | NUL separator      | 1 B       |
+//!   | Translated keyword | 0+ B      |
+//!   | NUL separator      | 1 B       |
+//!   | Text               | 0+ B      |
+//!
+//!   The keyword obeys the same rules as `tEXt` (printable Latin-1,
+//!   1-79 bytes, no leading / trailing / consecutive spaces). The
+//!   compression flag is `0` for an uncompressed text body, `1` for a
+//!   zlib-compressed body — "only the text field may be compressed"
+//!   (§11.3.3.4); the compression method byte is `0` (deflate) when
+//!   the flag is `1`. "For uncompressed text, encoders shall set the
+//!   compression method to 0, and decoders shall ignore it"
+//!   (§11.3.3.4) — so a non-zero method when the flag is `0` is
+//!   accepted on parse and zeroed on re-emit. The language tag is a
+//!   well-formed BCP47 tag (`en`, `en-GB`, `zh-Hans-CN`, …) or empty
+//!   for "language unspecified"; the codec stores it as a `String` and
+//!   does not validate against the IANA language-subtag registry
+//!   (offline-only, and the spec frames it as `should`). The
+//!   translated keyword and text are UTF-8 [rfc3629] and "neither
+//!   shall contain a zero byte" (§11.3.3.4 ¶3) — the codec validates
+//!   UTF-8 round-tripping (a `String` already enforces it) and rejects
+//!   embedded `NUL` on parse. The text is not `NUL`-terminated; its
+//!   length is derived from the chunk length. `iTXt` is the third
+//!   metadata chunk PNG explicitly permits to repeat with identical
+//!   keywords (alongside `tEXt` and `zTXt`); the decoder preserves
+//!   file order and the encoder replays it via `Vec<Itxt>`. Emitted
+//!   before `IDAT` (§5.6 Table 7) after `tEXt` / `zTXt` in the encoder
+//!   so the lower-overhead chunks lead the textual stream.
+//!
+//! Every chunk here except `sPLT`, `tEXt`, `zTXt`, and `iTXt` is marked
 //! "Multiple OK? No" in the PNG spec; we enforce that on parse —
 //! duplicates are an `InvalidData` error. `sPLT` ("Multiple OK? Yes")
 //! instead requires distinct palette names; a repeated name is the
-//! `InvalidData` error. `tEXt` and `zTXt` may repeat freely, with or
-//! without identical keywords (§4.2.7 ¶3 / §4.2.10 ¶6).
+//! `InvalidData` error. `tEXt`, `zTXt`, and `iTXt` may repeat freely,
+//! with or without identical keywords (§4.2.7 ¶3 / §4.2.10 ¶6 /
+//! §11.3.3.4).
 
 use crate::error::{PngError as Error, Result};
 use miniz_oxide::deflate::compress_to_vec_zlib;
@@ -1319,12 +1391,339 @@ impl Ztxt {
     }
 }
 
+/// `iCCP` payload (W3C PNG3 §11.3.2.3).
+///
+/// An embedded ICC colour-management profile. The on-wire layout is a
+/// Latin-1 profile name (`tEXt`-keyword rules) + `NUL` separator +
+/// 1-byte compression method + zlib-compressed profile bytes. PNG defines
+/// only method `0` (zlib / deflate); the codec rejects any other value
+/// per §11.3.2.3 "The only compression method defined in this
+/// specification is method 0".
+///
+/// PNG treats the inflated profile as an opaque blob: §11.3.2.3 cites
+/// [ICC.1] and [ISO_15076-1] for its internal structure and the codec
+/// does not interpret it. The in-memory representation stores the
+/// *decompressed* profile so callers do not need to know that the
+/// chunk is compressed on the wire; [`Self::parse`] inflates and
+/// [`Self::to_bytes`] re-compresses.
+///
+/// Only one `iCCP` chunk is permitted per datastream (§5.6 Table 1:
+/// "Multiple OK? No") and it must precede `PLTE` and the first `IDAT`.
+/// In the §4.3 "Color Chunk Priority" table `iCCP` is rank `2`, between
+/// `cICP` (`1`) and `sRGB` (`3`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Iccp {
+    /// Profile name (1-79 printable Latin-1 bytes; no leading /
+    /// trailing / consecutive spaces, no `NUL`). Stored as a `String`
+    /// whose codepoints all fit in `U+0020..=U+00FF`.
+    pub name: String,
+    /// Decompressed ICC profile bytes. Opaque to the codec — round-
+    /// tripped verbatim. May be empty (the spec permits `n = 0`
+    /// compressed bytes, which inflate to an empty profile).
+    pub profile: Vec<u8>,
+}
+
+impl Iccp {
+    /// `zlib`/deflate is the only compression method PNG defines for
+    /// `iCCP` per W3C PNG3 §11.3.2.3 ("The only compression method
+    /// defined in this specification is method 0").
+    pub const COMPRESSION_METHOD_DEFLATE: u8 = 0;
+
+    /// Parse an `iCCP` chunk payload: profile-name bytes, `NUL`
+    /// separator, compression-method byte, then zlib-compressed
+    /// profile. Validates the name against the shared keyword
+    /// predicate, rejects any compression method other than `0`, and
+    /// inflates the body via `miniz_oxide`.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        let nul = data
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| Error::invalid("PNG iCCP: missing NUL separator after profile name"))?;
+        let name_bytes = &data[..nul];
+        let name_str: String = name_bytes.iter().map(|&b| b as char).collect();
+        validate_keyword(&name_str, "iCCP")?;
+
+        let rest = &data[nul + 1..];
+        let method = *rest
+            .first()
+            .ok_or_else(|| Error::invalid("PNG iCCP: missing compression-method byte"))?;
+        if method != Self::COMPRESSION_METHOD_DEFLATE {
+            return Err(Error::invalid(format!(
+                "PNG iCCP: unknown compression method {method} (only 0 = deflate is defined)"
+            )));
+        }
+        let compressed = &rest[1..];
+        let profile = decompress_to_vec_zlib(compressed)
+            .map_err(|e| Error::invalid(format!("PNG iCCP: zlib decompression failed: {e:?}")))?;
+        Ok(Self {
+            name: name_str,
+            profile,
+        })
+    }
+
+    /// Emit the on-wire payload (profile-name bytes, `NUL`,
+    /// compression method, zlib-compressed profile). Re-validates the
+    /// profile name — so a malformed `Iccp` value cannot silently
+    /// corrupt the output PNG.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let name_bytes = validate_keyword(&self.name, "iCCP")?;
+        // miniz_oxide's default level (6) matches the encoder's IDAT
+        // compression level — we don't yet expose a per-chunk knob, and
+        // the spec leaves the choice entirely to the encoder.
+        let compressed = compress_to_vec_zlib(&self.profile, 6);
+        let mut out = Vec::with_capacity(name_bytes.len() + 2 + compressed.len());
+        out.extend_from_slice(&name_bytes);
+        out.push(0); // NUL separator.
+        out.push(Self::COMPRESSION_METHOD_DEFLATE);
+        out.extend_from_slice(&compressed);
+        Ok(out)
+    }
+}
+
+/// `iTXt` payload (W3C PNG3 §11.3.3.4).
+///
+/// The UTF-8 internationalised successor to `tEXt`. Carries a Latin-1
+/// keyword paired with a UTF-8 language-tagged text body, optionally
+/// zlib-compressed. The on-wire payload is:
+///
+/// ```text
+///     Keyword:            1-79 bytes (Latin-1, tEXt rules)
+///     NUL separator:      1 byte
+///     Compression flag:   1 byte (0 = uncompressed, 1 = compressed)
+///     Compression method: 1 byte (only 0 = deflate defined)
+///     Language tag:       0+ bytes (BCP47, NUL-terminated)
+///     NUL separator:      1 byte
+///     Translated keyword: 0+ bytes (UTF-8, NUL-terminated)
+///     NUL separator:      1 byte
+///     Text:               0+ bytes (UTF-8, length from chunk length)
+/// ```
+///
+/// The keyword obeys the shared `tEXt` predicate. "For uncompressed
+/// text, encoders shall set the compression method to 0, and decoders
+/// shall ignore it" (§11.3.3.4) — the codec accepts any method byte
+/// when the flag is `0` and zeroes it on re-emit. When the flag is `1`
+/// the method must be `0` (deflate). The translated keyword and text
+/// are UTF-8 and "neither shall contain a zero byte" (§11.3.3.4) —
+/// `String` already enforces UTF-8 round-tripping, and the codec
+/// rejects embedded `NUL` on parse.
+///
+/// `iTXt` is the third metadata chunk PNG explicitly permits to repeat
+/// with identical keywords (alongside `tEXt` and `zTXt`). The decoder
+/// preserves file order and the encoder replays it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Itxt {
+    /// 1-79 printable Latin-1 bytes; no leading / trailing /
+    /// consecutive spaces, no `NUL`. Same predicate as `tEXt`.
+    pub keyword: String,
+    /// `true` when the on-wire text body was zlib-compressed (encoder
+    /// re-compresses on emit). Translated keyword and language tag are
+    /// always emitted uncompressed regardless of this flag — only the
+    /// text field may be compressed (§11.3.3.4).
+    pub compressed: bool,
+    /// Language tag (BCP47). May be empty for "language unspecified".
+    /// ASCII / printable bytes; no `NUL` (the wire format would not
+    /// parse otherwise). Not validated against the IANA language-subtag
+    /// registry — that requires online lookup, and the spec frames the
+    /// subtag-registry constraint as `must` for encoders but as a
+    /// decoder discretion call.
+    pub language_tag: String,
+    /// Translated keyword (UTF-8). May be empty. No `NUL`.
+    pub translated_keyword: String,
+    /// Text body (UTF-8). May be empty. No `NUL`. Length is derived
+    /// from the chunk length on the wire; the text is not
+    /// `NUL`-terminated.
+    pub text: String,
+}
+
+impl Itxt {
+    /// `zlib`/deflate is the only compression method PNG defines for
+    /// `iTXt` per W3C PNG3 §11.3.3.4 ("The only compression method
+    /// defined in this specification is 0").
+    pub const COMPRESSION_METHOD_DEFLATE: u8 = 0;
+
+    /// Parse an `iTXt` chunk payload (§11.3.3.4): keyword bytes, `NUL`,
+    /// compression flag, compression method, language tag, `NUL`,
+    /// translated keyword, `NUL`, text. Validates the keyword, the
+    /// compression flag / method combination, the UTF-8 encoding of
+    /// the translated keyword and text, and the no-`NUL` rule on the
+    /// translated keyword and text bodies.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        // Keyword: bytes up to first NUL.
+        let k_nul = data
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| Error::invalid("PNG iTXt: missing NUL separator after keyword"))?;
+        let keyword_bytes = &data[..k_nul];
+        let keyword_str: String = keyword_bytes.iter().map(|&b| b as char).collect();
+        validate_keyword(&keyword_str, "iTXt")?;
+
+        // After keyword NUL: 1 flag + 1 method + language tag + NUL +
+        // translated keyword + NUL + text (rest).
+        let rest = &data[k_nul + 1..];
+        if rest.len() < 2 {
+            return Err(Error::invalid(
+                "PNG iTXt: truncated payload (missing compression flag/method)",
+            ));
+        }
+        let flag = rest[0];
+        let method = rest[1];
+        let compressed = match flag {
+            0 => false,
+            1 => true,
+            other => {
+                return Err(Error::invalid(format!(
+                    "PNG iTXt: unknown compression flag {other} (must be 0 or 1)"
+                )))
+            }
+        };
+        // §11.3.3.4: "For uncompressed text, encoders shall set the
+        // compression method to 0, and decoders shall ignore it." So we
+        // only police the method byte when the flag is 1.
+        if compressed && method != Self::COMPRESSION_METHOD_DEFLATE {
+            return Err(Error::invalid(format!(
+                "PNG iTXt: unknown compression method {method} (only 0 = deflate is defined)"
+            )));
+        }
+        let after_method = &rest[2..];
+
+        // Language tag: up to next NUL.
+        let lang_nul = after_method
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| Error::invalid("PNG iTXt: missing NUL separator after language tag"))?;
+        let lang_bytes = &after_method[..lang_nul];
+        // BCP47 tags are ASCII letters / digits / hyphens; the spec
+        // frames the subtag-registry constraint as encoder-side, and
+        // the decoder is told the tag is case-insensitive. We don't
+        // validate against the IANA registry (offline only) but we do
+        // require ASCII bytes — a non-ASCII language tag is malformed
+        // BCP47 and any future strict validator would reject it.
+        for &b in lang_bytes {
+            if !b.is_ascii() {
+                return Err(Error::invalid(format!(
+                    "PNG iTXt: language tag byte 0x{b:02X} not ASCII (BCP47 tags are ASCII)"
+                )));
+            }
+        }
+        let language_tag: String = lang_bytes.iter().map(|&b| b as char).collect();
+        let after_lang = &after_method[lang_nul + 1..];
+
+        // Translated keyword: UTF-8, up to next NUL.
+        let tk_nul = after_lang.iter().position(|&b| b == 0).ok_or_else(|| {
+            Error::invalid("PNG iTXt: missing NUL separator after translated keyword")
+        })?;
+        let tk_bytes = &after_lang[..tk_nul];
+        let translated_keyword = std::str::from_utf8(tk_bytes)
+            .map_err(|e| {
+                Error::invalid(format!(
+                    "PNG iTXt: translated keyword is not valid UTF-8: {e}"
+                ))
+            })?
+            .to_string();
+        let text_region = &after_lang[tk_nul + 1..];
+
+        // Text: rest of payload, possibly zlib-compressed.
+        let text_bytes_owned: Vec<u8>;
+        let text_bytes: &[u8] = if compressed {
+            text_bytes_owned = decompress_to_vec_zlib(text_region).map_err(|e| {
+                Error::invalid(format!("PNG iTXt: zlib decompression failed: {e:?}"))
+            })?;
+            &text_bytes_owned
+        } else {
+            text_region
+        };
+        // §11.3.3.4: "neither shall contain a zero byte" — applied to
+        // the decompressed text and to the translated keyword (already
+        // checked above by virtue of the NUL terminator).
+        if text_bytes.contains(&0) {
+            return Err(Error::invalid(
+                "PNG iTXt: text contains a NUL byte (forbidden per §11.3.3.4)",
+            ));
+        }
+        let text = std::str::from_utf8(text_bytes)
+            .map_err(|e| Error::invalid(format!("PNG iTXt: text is not valid UTF-8: {e}")))?
+            .to_string();
+
+        Ok(Self {
+            keyword: keyword_str,
+            compressed,
+            language_tag,
+            translated_keyword,
+            text,
+        })
+    }
+
+    /// Emit the on-wire payload. Re-validates the keyword, the
+    /// language tag (ASCII), and the no-`NUL`-in-translated-keyword /
+    /// no-`NUL`-in-text rules; deflates the text body when
+    /// [`Self::compressed`] is `true`. The compression method byte is
+    /// always emitted as `0` ("the only value presently defined for
+    /// it", §11.3.3.4); when [`Self::compressed`] is `false` the byte
+    /// is ignored by decoders per the spec but we still emit `0` for
+    /// determinism.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let keyword_bytes = validate_keyword(&self.keyword, "iTXt")?;
+        // Language tag: ASCII only (BCP47 is ASCII by construction).
+        // Empty is permitted (= "language unspecified", §11.3.3.4).
+        for ch in self.language_tag.chars() {
+            let cp = ch as u32;
+            if cp > 0x7F {
+                return Err(Error::invalid(format!(
+                    "PNG iTXt: language tag char U+{cp:04X} not ASCII"
+                )));
+            }
+            if cp == 0 {
+                return Err(Error::invalid(
+                    "PNG iTXt: language tag contains a NUL (reserved as field separator)",
+                ));
+            }
+        }
+        // Translated keyword: UTF-8 (already enforced by String), no NUL.
+        if self.translated_keyword.contains('\0') {
+            return Err(Error::invalid(
+                "PNG iTXt: translated keyword contains a NUL byte (forbidden per §11.3.3.4)",
+            ));
+        }
+        // Text: UTF-8, no NUL.
+        if self.text.contains('\0') {
+            return Err(Error::invalid(
+                "PNG iTXt: text contains a NUL byte (forbidden per §11.3.3.4)",
+            ));
+        }
+
+        let text_bytes = self.text.as_bytes();
+        let text_payload: Vec<u8> = if self.compressed {
+            compress_to_vec_zlib(text_bytes, 6)
+        } else {
+            text_bytes.to_vec()
+        };
+
+        let mut out = Vec::with_capacity(
+            keyword_bytes.len()
+                + 4
+                + self.language_tag.len()
+                + self.translated_keyword.len()
+                + text_payload.len(),
+        );
+        out.extend_from_slice(&keyword_bytes);
+        out.push(0); // NUL after keyword.
+        out.push(if self.compressed { 1 } else { 0 });
+        out.push(Self::COMPRESSION_METHOD_DEFLATE);
+        out.extend_from_slice(self.language_tag.as_bytes());
+        out.push(0); // NUL after language tag.
+        out.extend_from_slice(self.translated_keyword.as_bytes());
+        out.push(0); // NUL after translated keyword.
+        out.extend_from_slice(&text_payload);
+        Ok(out)
+    }
+}
+
 /// Bundle of metadata chunks that round-trip through the encoder.
 ///
 /// Populated by [`crate::parse_metadata`] on decode and consumed by
 /// [`crate::PngEncoderOptions::metadata`] on encode. Any `None` field is
-/// simply omitted from the output PNG; the `splt`, `texts`, and `ztxts`
-/// `Vec`s are omitted when empty.
+/// simply omitted from the output PNG; the `splt`, `texts`, `ztxts`, and
+/// `itxts` `Vec`s are omitted when empty.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PngMetadata {
     pub sbit: Option<Sbit>,
@@ -1335,6 +1734,12 @@ pub struct PngMetadata {
     pub exif: Option<Exif>,
     pub srgb: Option<Srgb>,
     pub cicp: Option<Cicp>,
+    /// Embedded ICC profile (`iCCP`, W3C PNG3 §11.3.2.3). Carries an
+    /// opaque ICC.1 profile blob alongside its 1-79-byte Latin-1
+    /// profile name; the codec validates only the chunk framing
+    /// (keyword rules, deflate compression method, zlib round-trip)
+    /// and leaves the profile internals to the caller.
+    pub iccp: Option<Iccp>,
     /// Image gamma (`gAMA`, RFC 2083 §4.2.3 / W3C PNG3 §11.3.2.2).
     pub gama: Option<Gama>,
     /// Primary chromaticities + white point (`cHRM`, RFC 2083 §4.2.2 /
@@ -1347,9 +1752,10 @@ pub struct PngMetadata {
     pub splt: Vec<Splt>,
     /// Zero or more textual annotations (`tEXt`, RFC 2083 §4.2.7). PNG
     /// permits any number, and more than one with the same keyword is
-    /// allowed — this is one of two metadata chunks where the decoder
-    /// does NOT enforce keyword uniqueness (the other is `zTXt`).
-    /// File order is preserved on decode and replayed on encode.
+    /// allowed — this is one of three metadata chunks where the decoder
+    /// does NOT enforce keyword uniqueness (the others are `zTXt` and
+    /// `iTXt`). File order is preserved on decode and replayed on
+    /// encode.
     pub texts: Vec<Text>,
     /// Zero or more zlib-compressed textual annotations (`zTXt`,
     /// RFC 2083 §4.2.10). Carries the same Latin-1 keyword + text pair
@@ -1358,6 +1764,13 @@ pub struct PngMetadata {
     /// instance / repeated-keyword rules as `tEXt`. File order is
     /// preserved on decode and replayed on encode.
     pub ztxts: Vec<Ztxt>,
+    /// Zero or more internationalised textual annotations (`iTXt`, W3C
+    /// PNG3 §11.3.3.4). UTF-8 translated keyword + UTF-8 text body,
+    /// optionally zlib-compressed, paired with a BCP47 language tag
+    /// and the same Latin-1 keyword as `tEXt`. Same multi-instance /
+    /// repeated-keyword rules as `tEXt` and `zTXt`; file order is
+    /// preserved on decode and replayed on encode.
+    pub itxts: Vec<Itxt>,
 }
 
 impl PngMetadata {
@@ -1372,11 +1785,13 @@ impl PngMetadata {
             && self.exif.is_none()
             && self.srgb.is_none()
             && self.cicp.is_none()
+            && self.iccp.is_none()
             && self.gama.is_none()
             && self.chrm.is_none()
             && self.splt.is_empty()
             && self.texts.is_empty()
             && self.ztxts.is_empty()
+            && self.itxts.is_empty()
     }
 }
 
@@ -2592,6 +3007,379 @@ mod tests {
         assert!(m.is_empty());
         m.ztxts.push(Ztxt {
             keyword: "k".to_string(),
+            text: String::new(),
+        });
+        assert!(!m.is_empty());
+    }
+
+    // ---- iCCP -------------------------------------------------------------
+
+    #[test]
+    fn iccp_roundtrip_simple() {
+        // §11.3.2.3: name + NUL + method (0) + zlib body.
+        let p = Iccp {
+            name: "sRGB IEC61966-2.1".to_string(),
+            profile: b"\x00\x00\x02\x10ADBE".to_vec(),
+        };
+        let raw = p.to_bytes().unwrap();
+        let name_bytes = b"sRGB IEC61966-2.1";
+        assert_eq!(&raw[..name_bytes.len()], name_bytes);
+        assert_eq!(raw[name_bytes.len()], 0);
+        assert_eq!(raw[name_bytes.len() + 1], 0); // method = deflate
+                                                  // zlib magic byte (CMF = 0x78 for CM=8/CINFO=7).
+        assert_eq!(raw[name_bytes.len() + 2], 0x78);
+        let back = Iccp::parse(&raw).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn iccp_roundtrip_empty_profile() {
+        // n = 0 plaintext is permitted; the inflated body is empty.
+        let p = Iccp {
+            name: "Empty".to_string(),
+            profile: Vec::new(),
+        };
+        let raw = p.to_bytes().unwrap();
+        let back = Iccp::parse(&raw).unwrap();
+        assert_eq!(back, p);
+        assert!(back.profile.is_empty());
+    }
+
+    #[test]
+    fn iccp_rejects_unknown_compression_method() {
+        // §11.3.2.3: "The only compression method defined in this
+        // specification is method 0". Hand-build a payload with method=1
+        // and confirm parse rejects.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"P");
+        raw.push(0);
+        raw.push(1); // bogus method
+        raw.extend_from_slice(&[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        assert!(Iccp::parse(&raw).is_err());
+    }
+
+    #[test]
+    fn iccp_rejects_missing_method_byte() {
+        let raw = b"P\0";
+        assert!(Iccp::parse(raw).is_err());
+    }
+
+    #[test]
+    fn iccp_rejects_missing_nul() {
+        let raw = b"NoSeparator";
+        assert!(Iccp::parse(raw).is_err());
+    }
+
+    #[test]
+    fn iccp_rejects_corrupted_zlib_stream() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"P");
+        raw.push(0);
+        raw.push(0);
+        raw.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        assert!(Iccp::parse(&raw).is_err());
+    }
+
+    #[test]
+    fn iccp_rejects_invalid_name() {
+        // Leading space → invalid per the shared keyword predicate.
+        let p = Iccp {
+            name: " Leading".to_string(),
+            profile: vec![1, 2, 3],
+        };
+        assert!(p.to_bytes().is_err());
+    }
+
+    #[test]
+    fn iccp_large_profile_compresses() {
+        // ICC profiles in the wild are kilobytes-sized; a 4 KB run of
+        // one byte compresses very well via zlib deflate.
+        let p = Iccp {
+            name: "Bulk".to_string(),
+            profile: vec![0x42; 4096],
+        };
+        let raw = p.to_bytes().unwrap();
+        assert!(
+            raw.len() < 200,
+            "iCCP of 4096 identical bytes should compress to << 200 wire bytes (got {})",
+            raw.len()
+        );
+        let back = Iccp::parse(&raw).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn metadata_is_empty_accounts_for_iccp() {
+        let mut m = PngMetadata::default();
+        assert!(m.is_empty());
+        m.iccp = Some(Iccp {
+            name: "k".to_string(),
+            profile: Vec::new(),
+        });
+        assert!(!m.is_empty());
+    }
+
+    // ---- iTXt -------------------------------------------------------------
+
+    #[test]
+    fn itxt_roundtrip_uncompressed() {
+        // §11.3.3.4: keyword + NUL + flag + method + lang + NUL + tk +
+        // NUL + text. Uncompressed; method byte ignored on parse but
+        // emitted as 0.
+        let t = Itxt {
+            keyword: "Title".to_string(),
+            compressed: false,
+            language_tag: "en".to_string(),
+            translated_keyword: String::new(),
+            text: "A description of the image.".to_string(),
+        };
+        let raw = t.to_bytes().unwrap();
+        // Layout sanity.
+        let kw = b"Title";
+        assert_eq!(&raw[..kw.len()], kw);
+        assert_eq!(raw[kw.len()], 0);
+        assert_eq!(raw[kw.len() + 1], 0); // flag = 0 (uncompressed)
+        assert_eq!(raw[kw.len() + 2], 0); // method = 0
+        let back = Itxt::parse(&raw).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn itxt_roundtrip_compressed() {
+        let t = Itxt {
+            keyword: "Description".to_string(),
+            compressed: true,
+            language_tag: "en-US".to_string(),
+            translated_keyword: String::new(),
+            text: "A".repeat(1000),
+        };
+        let raw = t.to_bytes().unwrap();
+        // Compressed payload should be way smaller than the 1000-byte
+        // text plus headers.
+        assert!(
+            raw.len() < 200,
+            "iTXt(compressed) of 1000 identical chars should compress to << 200 wire bytes (got {})",
+            raw.len()
+        );
+        let back = Itxt::parse(&raw).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn itxt_roundtrip_with_translated_keyword_and_utf8() {
+        // Translated keyword + non-ASCII UTF-8 text body (Japanese
+        // characters above the BMP basic ASCII range).
+        let t = Itxt {
+            keyword: "Title".to_string(),
+            compressed: false,
+            language_tag: "ja".to_string(),
+            translated_keyword: "題".to_string(),
+            text: "日本語のテキスト".to_string(),
+        };
+        let raw = t.to_bytes().unwrap();
+        let back = Itxt::parse(&raw).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn itxt_roundtrip_empty_language_and_translated_keyword() {
+        // §11.3.3.4: "If the language tag is empty, the language is
+        // unspecified." The translated keyword is also permitted to be
+        // empty. Text may also be empty.
+        let t = Itxt {
+            keyword: "Title".to_string(),
+            compressed: false,
+            language_tag: String::new(),
+            translated_keyword: String::new(),
+            text: String::new(),
+        };
+        let raw = t.to_bytes().unwrap();
+        let back = Itxt::parse(&raw).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn itxt_rejects_unknown_compression_flag() {
+        // §11.3.3.4: compression flag is 0 or 1; any other value is
+        // malformed.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"k");
+        raw.push(0); // NUL after keyword
+        raw.push(2); // bogus flag
+        raw.push(0); // method
+        raw.push(0); // NUL after lang
+        raw.push(0); // NUL after translated kw
+                     // text: empty
+        assert!(Itxt::parse(&raw).is_err());
+    }
+
+    #[test]
+    fn itxt_rejects_unknown_compression_method_when_compressed() {
+        // When flag = 1 the method byte must be 0 (deflate).
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"k");
+        raw.push(0);
+        raw.push(1); // compressed
+        raw.push(7); // bogus method
+        raw.push(0); // NUL after lang
+        raw.push(0); // NUL after translated kw
+        raw.extend_from_slice(&[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        assert!(Itxt::parse(&raw).is_err());
+    }
+
+    #[test]
+    fn itxt_ignores_method_byte_when_uncompressed() {
+        // "For uncompressed text, encoders shall set the compression
+        // method to 0, and decoders shall ignore it" (§11.3.3.4). A
+        // bogus method byte alongside flag=0 must still parse.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"k");
+        raw.push(0);
+        raw.push(0); // flag = uncompressed
+        raw.push(99); // bogus method — decoder ignores
+        raw.push(0); // NUL after lang
+        raw.push(0); // NUL after translated kw
+        raw.extend_from_slice(b"hello");
+        let parsed = Itxt::parse(&raw).unwrap();
+        assert_eq!(parsed.text, "hello");
+        assert!(!parsed.compressed);
+    }
+
+    #[test]
+    fn itxt_rejects_missing_keyword_nul() {
+        let raw = b"NoSeparator";
+        assert!(Itxt::parse(raw).is_err());
+    }
+
+    #[test]
+    fn itxt_rejects_missing_language_nul() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"k");
+        raw.push(0);
+        raw.push(0);
+        raw.push(0);
+        // No NUL after language tag.
+        raw.extend_from_slice(b"en-US");
+        assert!(Itxt::parse(&raw).is_err());
+    }
+
+    #[test]
+    fn itxt_rejects_missing_translated_keyword_nul() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"k");
+        raw.push(0);
+        raw.push(0);
+        raw.push(0);
+        raw.push(0); // NUL after lang
+        raw.extend_from_slice(b"NoNul"); // translated keyword without NUL
+        assert!(Itxt::parse(&raw).is_err());
+    }
+
+    #[test]
+    fn itxt_rejects_corrupted_zlib_when_compressed() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"k");
+        raw.push(0);
+        raw.push(1); // compressed
+        raw.push(0);
+        raw.push(0); // NUL after lang
+        raw.push(0); // NUL after translated kw
+        raw.extend_from_slice(&[0xFF; 5]);
+        assert!(Itxt::parse(&raw).is_err());
+    }
+
+    #[test]
+    fn itxt_rejects_invalid_keyword() {
+        let t = Itxt {
+            keyword: " Leading".to_string(),
+            compressed: false,
+            language_tag: "en".to_string(),
+            translated_keyword: String::new(),
+            text: "x".to_string(),
+        };
+        assert!(t.to_bytes().is_err());
+    }
+
+    #[test]
+    fn itxt_rejects_non_ascii_language_tag_on_encode() {
+        // BCP47 tags are ASCII by construction; reject non-ASCII.
+        let t = Itxt {
+            keyword: "k".to_string(),
+            compressed: false,
+            language_tag: "é".to_string(),
+            translated_keyword: String::new(),
+            text: "x".to_string(),
+        };
+        assert!(t.to_bytes().is_err());
+    }
+
+    #[test]
+    fn itxt_rejects_non_ascii_language_tag_on_decode() {
+        // Same rule on the parse side.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"k");
+        raw.push(0);
+        raw.push(0);
+        raw.push(0);
+        raw.push(0xC3); // first byte of UTF-8 é
+        raw.push(0xA9);
+        raw.push(0); // NUL after lang
+        raw.push(0); // NUL after translated kw
+                     // empty text
+        assert!(Itxt::parse(&raw).is_err());
+    }
+
+    #[test]
+    fn itxt_rejects_nul_in_translated_keyword_on_encode() {
+        let t = Itxt {
+            keyword: "k".to_string(),
+            compressed: false,
+            language_tag: "en".to_string(),
+            translated_keyword: "bad\u{0000}null".to_string(),
+            text: "x".to_string(),
+        };
+        assert!(t.to_bytes().is_err());
+    }
+
+    #[test]
+    fn itxt_rejects_nul_in_text_on_encode() {
+        let t = Itxt {
+            keyword: "k".to_string(),
+            compressed: false,
+            language_tag: "en".to_string(),
+            translated_keyword: String::new(),
+            text: "bad\u{0000}null".to_string(),
+        };
+        assert!(t.to_bytes().is_err());
+    }
+
+    #[test]
+    fn itxt_rejects_nul_in_decompressed_text() {
+        // Build a compressed iTXt whose inflated body contains a NUL —
+        // the codec must reject it per §11.3.3.4 "neither shall
+        // contain a zero byte".
+        let payload = b"hello\0world";
+        let compressed = compress_to_vec_zlib(payload, 6);
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"k");
+        raw.push(0);
+        raw.push(1); // compressed
+        raw.push(0);
+        raw.push(0); // NUL after lang
+        raw.push(0); // NUL after translated kw
+        raw.extend_from_slice(&compressed);
+        assert!(Itxt::parse(&raw).is_err());
+    }
+
+    #[test]
+    fn metadata_is_empty_accounts_for_itxts() {
+        let mut m = PngMetadata::default();
+        assert!(m.is_empty());
+        m.itxts.push(Itxt {
+            keyword: "k".to_string(),
+            compressed: false,
+            language_tag: String::new(),
+            translated_keyword: String::new(),
             text: String::new(),
         });
         assert!(!m.is_empty());
