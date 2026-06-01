@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `zTXt` (compressed textual data, RFC 2083 §4.2.10 / W3C PNG3
+  §11.3.3.3) round-trip. Surfaced as `metadata::Ztxt` (`pub keyword`,
+  `pub text`) and held by `PngMetadata::ztxts: Vec<Ztxt>`. Semantically
+  equivalent to `tEXt` — Latin-1 keyword (1-79 printable bytes, no
+  leading / trailing / consecutive spaces, no NUL) + Latin-1 text body
+  — but the body is zlib-compressed on the wire. The on-wire payload
+  layout is `keyword || NUL || compression_method (1 B, only 0 =
+  deflate defined) || zlib-compressed text` per §4.2.10 ("A zTXt chunk
+  contains"). The decoder reuses the existing keyword validator,
+  rejects any compression method other than `0` ("The only value
+  presently defined for it is 0"), inflates the body via the same
+  `miniz_oxide` path used for IDAT, and enforces the no-NUL-in-text
+  rule from §4.2.7 ("Neither the keyword nor the text string can
+  contain a null character") on the decompressed payload. The encoder
+  re-validates the keyword and text codepoints (Latin-1 single-byte,
+  no NUL) and deflates the body at the project's default compression
+  level (6) — `miniz_oxide`'s `compress_to_vec_zlib`. `zTXt` is the
+  second metadata chunk PNG allows to repeat without uniqueness
+  constraints (§4.2.10 ¶6 "Any number of zTXt and tEXt chunks can
+  appear in the same file"); decode preserves file order and encode
+  replays it via `Vec<Ztxt>`. Emitted before `IDAT` alongside `tEXt`
+  in the §5.6 Table 1 "Multiple OK? Yes / Ordering: None" bucket; the
+  encoder writes `tEXt` ahead of `zTXt` so a streaming reader sees the
+  cheap-to-display plain annotations first. 14 new unit + integration
+  tests cover round-trip, multi-instance + same-keyword, large-payload
+  compression (4 KB run-of-one → <200 wire bytes), unknown-method
+  rejection, corrupted-zlib rejection, decompressed-NUL rejection,
+  invalid-keyword rejection, chunk-ordering vs `IDAT`, ordering vs
+  `tEXt`, and coexistence with `tEXt` in one file. Closes the README
+  "Not preserved" entry for `zTXt`; only `iCCP` and `iTXt` remain on
+  that list.
+
 - benches: parametric `decode_apng_frame_scan` group sweeping 2 / 8 / 32
   frames at 128×128 RGBA — measures per-frame decode-loop cost
   (fcTL+fdAT sequence-number walk, disposal/blend state machine,

@@ -5,7 +5,7 @@
 use oxideav_png::{
     decode_png, encode_png_image, encode_png_image_with_options, parse_metadata, Bkgd, Chrm, Cicp,
     Exif, Gama, Hist, Phys, PhysUnit, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat,
-    RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time,
+    RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time, Ztxt,
 };
 
 fn rgba_2x2() -> PngImage {
@@ -224,6 +224,7 @@ fn all_three_chunks_roundtrip() {
         }),
         splt: Vec::new(),
         texts: Vec::new(),
+        ztxts: Vec::new(),
     };
     let opts = PngEncoderOptions {
         metadata: Some(meta_in.clone()),
@@ -1475,4 +1476,279 @@ fn gama_chrm_combined_with_other_metadata_roundtrip() {
     assert!(meta.phys.is_some());
     let back = decode_png(&bytes).expect("decode pixels");
     assert_eq!(back.data, img.data);
+}
+
+// ---- zTXt (RFC 2083 §4.2.10 / W3C PNG3 §11.3.3.3) ---------------------
+
+#[test]
+fn ztxt_single_roundtrip_through_encoder() {
+    // RFC 2083 §4.2.10: zTXt is tEXt with a zlib-compressed body. Drive
+    // encode → parse_metadata and confirm the decompressed text matches.
+    let img = rgba_2x2();
+    let mut meta = PngMetadata::default();
+    meta.ztxts.push(Ztxt {
+        keyword: "Description".to_string(),
+        text: "A compressed annotation that survives the codec.".to_string(),
+    });
+    let opts = PngEncoderOptions {
+        metadata: Some(meta),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let parsed = parse_metadata(&bytes).expect("parse_metadata");
+    assert_eq!(parsed.ztxts.len(), 1);
+    assert_eq!(parsed.ztxts[0].keyword, "Description");
+    assert_eq!(
+        parsed.ztxts[0].text,
+        "A compressed annotation that survives the codec."
+    );
+    // Pixel data must still decode (zTXt is ancillary; no impact on
+    // IDAT).
+    let back = decode_png(&bytes).expect("decode pixels");
+    assert_eq!(back.data, img.data);
+}
+
+#[test]
+fn ztxt_multiple_with_same_keyword_roundtrip() {
+    // RFC 2083 §4.2.10 ¶6: "Any number of zTXt and tEXt chunks can
+    // appear in the same file" — and the no-uniqueness-check rule of
+    // tEXt extends to zTXt. Drive two `Description` entries through
+    // encode + decode and confirm both survive in order.
+    let img = rgba_2x2();
+    let mut meta = PngMetadata::default();
+    meta.ztxts.push(Ztxt {
+        keyword: "Description".to_string(),
+        text: "first description".to_string(),
+    });
+    meta.ztxts.push(Ztxt {
+        keyword: "Description".to_string(),
+        text: "second description".to_string(),
+    });
+    meta.ztxts.push(Ztxt {
+        keyword: "Copyright".to_string(),
+        text: "© anon 2026".to_string(),
+    });
+    let opts = PngEncoderOptions {
+        metadata: Some(meta),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let parsed = parse_metadata(&bytes).expect("parse_metadata");
+    assert_eq!(parsed.ztxts.len(), 3);
+    assert_eq!(parsed.ztxts[0].keyword, "Description");
+    assert_eq!(parsed.ztxts[0].text, "first description");
+    assert_eq!(parsed.ztxts[1].keyword, "Description");
+    assert_eq!(parsed.ztxts[1].text, "second description");
+    assert_eq!(parsed.ztxts[2].keyword, "Copyright");
+    assert_eq!(parsed.ztxts[2].text, "© anon 2026");
+}
+
+#[test]
+fn ztxt_chunk_precedes_idat_in_output() {
+    // §5.6 Table 1: `zTXt` shares the "Before IDAT, no ordering
+    // constraint" bucket with `tEXt`. Walk the chunk stream and
+    // confirm the emitted `zTXt` is found before the first `IDAT`.
+    let img = rgba_2x2();
+    let mut meta = PngMetadata::default();
+    meta.ztxts.push(Ztxt {
+        keyword: "Software".to_string(),
+        text: "oxideav-png".to_string(),
+    });
+    let opts = PngEncoderOptions {
+        metadata: Some(meta),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+
+    let mut cur = 8usize;
+    let mut ztxt_pos = None;
+    let mut idat_pos = None;
+    while cur + 8 <= bytes.len() {
+        let len = u32::from_be_bytes([bytes[cur], bytes[cur + 1], bytes[cur + 2], bytes[cur + 3]])
+            as usize;
+        let ty = &bytes[cur + 4..cur + 8];
+        if ty == b"zTXt" {
+            ztxt_pos = Some(cur);
+        }
+        if ty == b"IDAT" && idat_pos.is_none() {
+            idat_pos = Some(cur);
+        }
+        cur += 12 + len;
+    }
+    let zp = ztxt_pos.expect("zTXt chunk must be present in the output");
+    let ip = idat_pos.expect("IDAT chunk must be present in the output");
+    assert!(zp < ip, "zTXt at {zp} must precede IDAT at {ip}");
+}
+
+#[test]
+fn ztxt_emitted_after_text_in_chunk_stream() {
+    // Encoder convention: emit plain tEXt before compressed zTXt so a
+    // streaming reader sees the cheap-to-display annotations first.
+    // The spec leaves the ordering free (both share "Ordering: None"
+    // in §5.6 Table 1); this asserts the project's documented choice.
+    let img = rgba_2x2();
+    let mut meta = PngMetadata::default();
+    meta.texts.push(Text {
+        keyword: "Title".to_string(),
+        text: "Plain".to_string(),
+    });
+    meta.ztxts.push(Ztxt {
+        keyword: "Description".to_string(),
+        text: "Compressed".to_string(),
+    });
+    let opts = PngEncoderOptions {
+        metadata: Some(meta),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
+    let text_pos = pos(b"tEXt").expect("tEXt");
+    let ztxt_pos = pos(b"zTXt").expect("zTXt");
+    assert!(
+        text_pos < ztxt_pos,
+        "tEXt at {text_pos} should precede zTXt at {ztxt_pos}"
+    );
+}
+
+#[test]
+fn ztxt_compresses_large_repetitive_text() {
+    // The whole point of zTXt: a 4 KB run of one character must occupy
+    // far fewer bytes on the wire than the literal tEXt encoding would.
+    let img = rgba_2x2();
+    let payload = "A".repeat(4096);
+    let mut meta = PngMetadata::default();
+    meta.ztxts.push(Ztxt {
+        keyword: "Bulk".to_string(),
+        text: payload.clone(),
+    });
+    let opts = PngEncoderOptions {
+        metadata: Some(meta),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let zpos = bytes
+        .windows(4)
+        .position(|w| w == b"zTXt")
+        .expect("zTXt chunk present");
+    let chunk_len = u32::from_be_bytes([
+        bytes[zpos - 4],
+        bytes[zpos - 3],
+        bytes[zpos - 2],
+        bytes[zpos - 1],
+    ]) as usize;
+    // 4096-byte plaintext should compress to well under 200 bytes
+    // (miniz_oxide default level 6 produces ~50 B for runs).
+    assert!(
+        chunk_len < 200,
+        "zTXt body for 4096 identical chars should be <200 B (got {chunk_len})"
+    );
+    let parsed = parse_metadata(&bytes).expect("parse_metadata");
+    assert_eq!(parsed.ztxts.len(), 1);
+    assert_eq!(parsed.ztxts[0].text, payload);
+}
+
+#[test]
+fn parse_metadata_rejects_ztxt_with_unknown_compression_method() {
+    // §4.2.10: "The only value presently defined for [compression
+    // method] is 0". Inject a hand-built zTXt with method byte = 1 and
+    // confirm parse_metadata rejects it.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25; // after PNG signature + IHDR.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"Description");
+    payload.push(0); // NUL separator.
+    payload.push(1); // bogus compression method.
+    payload.extend_from_slice(&[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    let mut chunk = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut chunk, b"zTXt", &payload);
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&chunk);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    assert!(parse_metadata(&tampered).is_err());
+}
+
+#[test]
+fn parse_metadata_rejects_ztxt_with_corrupted_zlib_body() {
+    // Method byte = 0 (deflate) but the compressed body is garbage;
+    // inflate must fail and the parse must surface InvalidData rather
+    // than panicking.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"Description");
+    payload.push(0);
+    payload.push(0);
+    payload.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+    let mut chunk = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut chunk, b"zTXt", &payload);
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&chunk);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    assert!(parse_metadata(&tampered).is_err());
+}
+
+#[test]
+fn parse_metadata_rejects_ztxt_with_invalid_keyword() {
+    // Inject a raw `zTXt` whose keyword carries a leading space; the
+    // parser must reject the chunk per §4.2.7's keyword rules (shared
+    // with §4.2.10) even though the encoder would have rejected it
+    // first.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    // Build a payload: " Title\0<method><zlib>" (leading space → invalid)
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b" Title");
+    payload.push(0);
+    payload.push(0);
+    // Valid empty-payload zlib stream (deflate of zero bytes).
+    payload.extend_from_slice(&[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    let mut chunk = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut chunk, b"zTXt", &payload);
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&chunk);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    assert!(parse_metadata(&tampered).is_err());
+}
+
+#[test]
+fn ztxt_coexists_with_text_in_one_file() {
+    // Drive both tEXt and zTXt through the codec in the same PNG and
+    // confirm both vectors survive independently with file order
+    // preserved within each vector.
+    let img = rgba_2x2();
+    let mut meta = PngMetadata::default();
+    meta.texts.push(Text {
+        keyword: "Title".to_string(),
+        text: "Plain title".to_string(),
+    });
+    meta.texts.push(Text {
+        keyword: "Author".to_string(),
+        text: "anon".to_string(),
+    });
+    meta.ztxts.push(Ztxt {
+        keyword: "Description".to_string(),
+        text: "Long compressed description".to_string(),
+    });
+    meta.ztxts.push(Ztxt {
+        keyword: "Comment".to_string(),
+        text: "Another compressed annotation".to_string(),
+    });
+    let opts = PngEncoderOptions {
+        metadata: Some(meta),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let parsed = parse_metadata(&bytes).expect("parse_metadata");
+    assert_eq!(parsed.texts.len(), 2);
+    assert_eq!(parsed.texts[0].keyword, "Title");
+    assert_eq!(parsed.texts[1].keyword, "Author");
+    assert_eq!(parsed.ztxts.len(), 2);
+    assert_eq!(parsed.ztxts[0].keyword, "Description");
+    assert_eq!(parsed.ztxts[1].keyword, "Comment");
 }

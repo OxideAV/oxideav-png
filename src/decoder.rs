@@ -45,7 +45,7 @@ use crate::apng::{parse_fdat, Actl, Blend, Disposal, Fctl};
 use crate::chunk::{read_chunk, ChunkRef, PNG_MAGIC};
 use crate::filter::{unfilter_row, FilterType};
 use crate::metadata::{
-    Bkgd, Chrm, Cicp, Exif, Gama, Hist, Phys, PngMetadata, Sbit, Splt, Srgb, Text, Time,
+    Bkgd, Chrm, Cicp, Exif, Gama, Hist, Phys, PngMetadata, Sbit, Splt, Srgb, Text, Time, Ztxt,
 };
 
 pub const CODEC_ID_STR: &str = "png";
@@ -221,7 +221,7 @@ pub(crate) fn parse_all_chunks(buf: &[u8]) -> Result<Vec<ChunkRef<'_>>> {
 
 /// Extract round-trippable PNG ancillary metadata (`sBIT`, `pHYs`,
 /// `tIME`, `bKGD`, `hIST`, `eXIf`, `sRGB`, `cICP`, `gAMA`, `cHRM`,
-/// `sPLT`, `tEXt`) from a PNG / APNG file.
+/// `sPLT`, `tEXt`, `zTXt`) from a PNG / APNG file.
 ///
 /// Standalone (no `oxideav-core`) entry point: works whether or not
 /// the `registry` feature is enabled. Returns
@@ -380,6 +380,13 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                 // structural validation in Text::parse. Preserve file
                 // order so the encoder can replay it verbatim.
                 out.texts.push(Text::parse(c.data)?);
+            }
+            b"zTXt" => {
+                // RFC 2083 §4.2.10 ¶6: "Any number of zTXt and tEXt
+                // chunks can appear in the same file." Same
+                // no-uniqueness-check rule as `tEXt`; preserve file
+                // order so the encoder can replay it verbatim.
+                out.ztxts.push(Ztxt::parse(c.data)?);
             }
             _ => {}
         }

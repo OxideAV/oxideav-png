@@ -43,12 +43,12 @@
 //!   `sPLT` carries one or more named suggested palettes (8- or 16-bit
 //!   RGBA + frequency entries), the one metadata chunk PNG allows to
 //!   repeat (distinct names required). `tEXt` carries free-form
-//!   Latin-1 keyword + text pairs (RFC 2083 §4.2.7), the one chunk
-//!   PNG allows to repeat with the same keyword.
-//! * Colour management / remaining metadata chunks (`gAMA`, `cHRM`,
-//!   `iCCP`, `zTXt`, `iTXt`). CRC is verified on read and then they
-//!   are dropped — they are not round-tripped through the container and
-//!   not surfaced on decode.
+//!   Latin-1 keyword + text pairs (RFC 2083 §4.2.7); `zTXt` carries the
+//!   same with the body zlib-compressed (RFC 2083 §4.2.10). Both
+//!   text-chunk types may repeat with identical keywords.
+//! * Remaining metadata chunks (`iCCP`, `iTXt`). CRC is verified on
+//!   read and then they are dropped — they are not round-tripped
+//!   through the container and not surfaced on decode.
 //! * `tRNS` chunk emission for colour type 0 (grayscale) / colour type 2
 //!   (truecolor). Decode applies the chunk during [`decode_png_to_rgba`]
 //!   per RFC 2083 §4.2.9 (single transparent gray sample or RGB triple,
@@ -98,7 +98,7 @@ pub use error::{PngError, Result};
 pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
 pub use metadata::{
     Bkgd, Chrm, Cicp, Exif, Gama, Hist, Phys, PhysUnit, PngMetadata, RenderingIntent, Sbit, Splt,
-    SpltEntry, Srgb, Text, Time,
+    SpltEntry, Srgb, Text, Time, Ztxt,
 };
 
 // Public registry-gated API — keeps the framework integration surface

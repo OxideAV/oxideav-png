@@ -1,5 +1,6 @@
 //! PNG ancillary metadata chunks — `sBIT`, `pHYs`, `tIME`, `bKGD`,
-//! `hIST`, `eXIf`, `sRGB`, `cICP`, `gAMA`, `cHRM`, `sPLT`, `tEXt`.
+//! `hIST`, `eXIf`, `sRGB`, `cICP`, `gAMA`, `cHRM`, `sPLT`, `tEXt`,
+//! `zTXt`.
 //!
 //! All but `eXIf` and `sPLT` are short, fixed-layout chunks with no
 //! embedded compression and no cross-chunk dependencies (with the single
@@ -135,12 +136,39 @@
 //!   relationship; multiple `sPLT` chunks are permitted but each shall
 //!   have a different palette name (we reject duplicate names on parse).
 //!
-//! Every chunk here except `sPLT` is marked "Multiple OK? No" in the
-//! PNG spec; we enforce that on parse — duplicates are an `InvalidData`
-//! error. `sPLT` ("Multiple OK? Yes") instead requires distinct palette
-//! names; a repeated name is the `InvalidData` error.
+//! - `zTXt` — RFC 2083 §4.2.10 "Compressed textual data" / W3C PNG3
+//!   §11.3.3.3. Same semantics as `tEXt` (Latin-1 keyword + `NUL`
+//!   separator + Latin-1 text body), but the body is zlib-compressed.
+//!   The payload layout is:
+//!
+//!   | Field                   | Width     |
+//!   |-------------------------|-----------|
+//!   | Keyword                 | 1-79 B    |
+//!   | NUL separator           | 1 B       |
+//!   | Compression method      | 1 B       |
+//!   | Compressed text         | n B       |
+//!
+//!   "The only value presently defined for [the compression-method byte]
+//!   is 0 (deflate/inflate compression)" — any other value is rejected.
+//!   The decompressed text is plain Latin-1 with the same `NUL`-forbidden
+//!   rule as `tEXt` (the spec reserves `NUL` as the keyword separator).
+//!   Keyword validation reuses the shared `tEXt` predicate. `zTXt` is
+//!   one of two metadata chunks PNG allows to repeat without uniqueness
+//!   constraints — "Any number of zTXt and tEXt chunks can appear in
+//!   the same file" (§4.2.10) — so the decoder preserves file order and
+//!   the encoder replays it via `Vec<Ztxt>`. Emitted before `IDAT`
+//!   alongside `tEXt` (Table 1: "Multiple OK? Yes / Ordering: None").
+//!
+//! Every chunk here except `sPLT`, `tEXt`, and `zTXt` is marked
+//! "Multiple OK? No" in the PNG spec; we enforce that on parse —
+//! duplicates are an `InvalidData` error. `sPLT` ("Multiple OK? Yes")
+//! instead requires distinct palette names; a repeated name is the
+//! `InvalidData` error. `tEXt` and `zTXt` may repeat freely, with or
+//! without identical keywords (§4.2.7 ¶3 / §4.2.10 ¶6).
 
 use crate::error::{PngError as Error, Result};
+use miniz_oxide::deflate::compress_to_vec_zlib;
+use miniz_oxide::inflate::decompress_to_vec_zlib;
 
 /// `sBIT` payload (RFC 2083 §4.2.6).
 ///
@@ -1154,12 +1182,149 @@ impl Text {
     }
 }
 
+/// `zTXt` payload (RFC 2083 §4.2.10 / W3C PNG3 §11.3.3.3).
+///
+/// Semantically equivalent to [`Text`] (Latin-1 keyword + Latin-1 text
+/// body), but the text body is zlib-compressed on the wire. The
+/// in-memory representation holds the *decompressed* text so callers do
+/// not need to know that compression happened; [`Self::parse`] inflates
+/// the wire bytes and [`Self::to_bytes`] re-compresses them.
+///
+/// The on-wire payload layout (§4.2.10 "A zTXt chunk contains"):
+///
+/// ```text
+///     Keyword:            1-79 bytes (character string)
+///     Null separator:     1 byte
+///     Compression method: 1 byte
+///     Compressed text:    n bytes
+/// ```
+///
+/// The keyword and `NUL` separator obey the same rules as [`Text`]
+/// (RFC 2083 §4.2.7 — printable Latin-1, 1-79 bytes, no leading /
+/// trailing / consecutive spaces). The compression-method byte is
+/// validated against the spec-defined `0` (`zlib` / deflate); any
+/// other value is an `InvalidData` error per "The only value
+/// presently defined for it is 0". The decompressed Latin-1 text must
+/// not contain a `NUL` ("the spec reserves `NUL` as the keyword
+/// separator"); the decoder enforces this.
+///
+/// `zTXt` is one of two metadata chunks PNG explicitly permits to
+/// repeat: "Any number of zTXt and tEXt chunks can appear in the same
+/// file" (§4.2.10 ¶6). The decoder preserves file order and the
+/// encoder replays it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ztxt {
+    /// 1-79 printable Latin-1 bytes; no leading / trailing / consecutive
+    /// spaces, no `NUL`. Stored as a `String` whose codepoints all fit
+    /// in `U+0020..=U+00FF`.
+    pub keyword: String,
+    /// Decompressed Latin-1 text. Stored as a `String` whose codepoints
+    /// all fit in `U+0001..=U+00FF` (no `NUL` — the spec reserves it as
+    /// the keyword separator). Empty text is permitted (the chunk's
+    /// compressed-text field "n bytes" allows `n = 0` worth of plaintext
+    /// after inflate, which `compress_to_vec_zlib` represents as a
+    /// 2-byte zlib stored block).
+    pub text: String,
+}
+
+impl Ztxt {
+    /// `zlib`/deflate is the only compression method PNG defines for
+    /// `zTXt` per RFC 2083 §4.2.10 ("The only value presently defined
+    /// for it is 0 (deflate/inflate compression)"). PNG3 §11.3.3.3
+    /// repeats the same constraint.
+    pub const COMPRESSION_METHOD_DEFLATE: u8 = 0;
+
+    /// Parse a `zTXt` chunk payload (RFC 2083 §4.2.10): keyword bytes,
+    /// `NUL` separator, compression-method byte, then the
+    /// zlib-compressed text bytes. Validates the keyword, rejects any
+    /// compression method other than `0`, decompresses the body, and
+    /// rejects a `NUL` in the decompressed text.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        let nul = data
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| Error::invalid("PNG zTXt: missing NUL separator after keyword"))?;
+        let keyword_bytes = &data[..nul];
+        let keyword_str: String = keyword_bytes.iter().map(|&b| b as char).collect();
+        validate_keyword(&keyword_str, "zTXt")?;
+
+        // After the NUL: 1 byte of compression method, then the
+        // compressed text. §4.2.10 reserves any value other than 0.
+        let rest = &data[nul + 1..];
+        let method = *rest
+            .first()
+            .ok_or_else(|| Error::invalid("PNG zTXt: missing compression-method byte"))?;
+        if method != Self::COMPRESSION_METHOD_DEFLATE {
+            return Err(Error::invalid(format!(
+                "PNG zTXt: unknown compression method {method} (only 0 = deflate is defined)"
+            )));
+        }
+        let compressed = &rest[1..];
+
+        // §4.2.10: "For compression method 0, this datastream adheres to
+        // the zlib datastream format." Inflate it; surface a decode
+        // error rather than panicking on a tampered chunk.
+        let decompressed = decompress_to_vec_zlib(compressed)
+            .map_err(|e| Error::invalid(format!("PNG zTXt: zlib decompression failed: {e:?}")))?;
+
+        // Decompressed text obeys the same NUL-forbidden rule as tEXt
+        // (RFC 2083 §4.2.10: "Decompression of this datastream yields
+        // Latin-1 text that is identical to the text that would be
+        // stored in an equivalent tEXt chunk", and §4.2.7 forbids NUL
+        // in the text).
+        if decompressed.contains(&0) {
+            return Err(Error::invalid(
+                "PNG zTXt: decompressed text contains a NUL byte \
+                 (only the keyword separator may)",
+            ));
+        }
+        let text_str: String = decompressed.iter().map(|&b| b as char).collect();
+        Ok(Self {
+            keyword: keyword_str,
+            text: text_str,
+        })
+    }
+
+    /// Emit the on-wire payload (keyword bytes, `NUL`, compression
+    /// method, zlib-compressed text). Re-validates the keyword and
+    /// every text codepoint (Latin-1 single-byte, no `NUL`) — so a
+    /// malformed `Ztxt` value cannot silently corrupt the output PNG.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let keyword_bytes = validate_keyword(&self.keyword, "zTXt")?;
+        let mut text_bytes = Vec::with_capacity(self.text.len());
+        for ch in self.text.chars() {
+            let cp = ch as u32;
+            if cp > 0xFF {
+                return Err(Error::invalid(format!(
+                    "PNG zTXt: text char U+{cp:04X} is not Latin-1 (single-byte)"
+                )));
+            }
+            if cp == 0 {
+                return Err(Error::invalid(
+                    "PNG zTXt: text string contains a NUL (reserved as keyword separator)",
+                ));
+            }
+            text_bytes.push(cp as u8);
+        }
+        // miniz_oxide's default level (6) matches the encoder's IDAT
+        // compression level — we don't yet expose a per-chunk knob, and
+        // the spec leaves the choice entirely to the encoder.
+        let compressed = compress_to_vec_zlib(&text_bytes, 6);
+        let mut out = Vec::with_capacity(keyword_bytes.len() + 2 + compressed.len());
+        out.extend_from_slice(&keyword_bytes);
+        out.push(0); // NUL separator.
+        out.push(Self::COMPRESSION_METHOD_DEFLATE);
+        out.extend_from_slice(&compressed);
+        Ok(out)
+    }
+}
+
 /// Bundle of metadata chunks that round-trip through the encoder.
 ///
 /// Populated by [`crate::parse_metadata`] on decode and consumed by
 /// [`crate::PngEncoderOptions::metadata`] on encode. Any `None` field is
-/// simply omitted from the output PNG; the `splt` and `texts` `Vec`s
-/// are omitted when empty.
+/// simply omitted from the output PNG; the `splt`, `texts`, and `ztxts`
+/// `Vec`s are omitted when empty.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PngMetadata {
     pub sbit: Option<Sbit>,
@@ -1182,10 +1347,17 @@ pub struct PngMetadata {
     pub splt: Vec<Splt>,
     /// Zero or more textual annotations (`tEXt`, RFC 2083 §4.2.7). PNG
     /// permits any number, and more than one with the same keyword is
-    /// allowed — this is the only metadata chunk where the decoder
-    /// does NOT enforce keyword uniqueness. File order is preserved on
-    /// decode and replayed on encode.
+    /// allowed — this is one of two metadata chunks where the decoder
+    /// does NOT enforce keyword uniqueness (the other is `zTXt`).
+    /// File order is preserved on decode and replayed on encode.
     pub texts: Vec<Text>,
+    /// Zero or more zlib-compressed textual annotations (`zTXt`,
+    /// RFC 2083 §4.2.10). Carries the same Latin-1 keyword + text pair
+    /// as [`Self::texts`] but with the body compressed on the wire —
+    /// "recommended for storing large blocks of text". Same multi-
+    /// instance / repeated-keyword rules as `tEXt`. File order is
+    /// preserved on decode and replayed on encode.
+    pub ztxts: Vec<Ztxt>,
 }
 
 impl PngMetadata {
@@ -1204,6 +1376,7 @@ impl PngMetadata {
             && self.chrm.is_none()
             && self.splt.is_empty()
             && self.texts.is_empty()
+            && self.ztxts.is_empty()
     }
 }
 
@@ -2247,6 +2420,177 @@ mod tests {
         let mut m = PngMetadata::default();
         assert!(m.is_empty());
         m.texts.push(Text {
+            keyword: "k".to_string(),
+            text: String::new(),
+        });
+        assert!(!m.is_empty());
+    }
+
+    // ---- zTXt -------------------------------------------------------------
+
+    #[test]
+    fn ztxt_roundtrip_simple() {
+        // §4.2.10: keyword + NUL + compression method (0) + zlib body.
+        let z = Ztxt {
+            keyword: "Description".to_string(),
+            text: "A compressed description of the image.".to_string(),
+        };
+        let raw = z.to_bytes().unwrap();
+        // On-wire layout sanity: keyword bytes, NUL, method byte (0),
+        // then a zlib stream (starts with 0x78 for compression level
+        // 6 — CMF byte = 0x78, FLG follows). The exact zlib header
+        // depends on the dictionary / level, but the first byte of any
+        // zlib stream with CINFO=7 / CM=8 (the only combination
+        // miniz_oxide produces) is 0x78. We assert the layout is
+        // "keyword || NUL || 0 || zlib", not the level-specific bytes.
+        let keyword_bytes = b"Description";
+        assert_eq!(&raw[..keyword_bytes.len()], keyword_bytes);
+        assert_eq!(raw[keyword_bytes.len()], 0);
+        assert_eq!(raw[keyword_bytes.len() + 1], 0);
+        // zlib magic byte (CMF = 0x78 for CM=8/CINFO=7 — the only mode
+        // miniz_oxide emits).
+        assert_eq!(raw[keyword_bytes.len() + 2], 0x78);
+        let back = Ztxt::parse(&raw).unwrap();
+        assert_eq!(back, z);
+    }
+
+    #[test]
+    fn ztxt_roundtrip_empty_text() {
+        // §4.2.10 doesn't forbid n=0 compressed bytes (after inflate,
+        // empty plaintext). Make sure the round-trip survives.
+        let z = Ztxt {
+            keyword: "Empty".to_string(),
+            text: String::new(),
+        };
+        let raw = z.to_bytes().unwrap();
+        let back = Ztxt::parse(&raw).unwrap();
+        assert_eq!(back, z);
+        assert!(back.text.is_empty());
+    }
+
+    #[test]
+    fn ztxt_large_text_compresses() {
+        // The whole point of zTXt vs tEXt: large bodies compress.
+        // "recommended for storing large blocks of text" (§4.2.10).
+        // A 2000-byte run of one character must serialise to far fewer
+        // bytes than its tEXt-equivalent encoding (keyword + NUL +
+        // 2000 text bytes).
+        let z = Ztxt {
+            keyword: "Bulk".to_string(),
+            text: "A".repeat(2000),
+        };
+        let raw = z.to_bytes().unwrap();
+        // Keyword (4) + NUL (1) + method (1) + zlib stream. zlib of 2000
+        // identical bytes compresses to well under 100 bytes; allow
+        // 200 for headroom against future miniz_oxide tuning.
+        assert!(
+            raw.len() < 200,
+            "zTXt of 2000 identical chars should compress well (got {} bytes)",
+            raw.len()
+        );
+        let back = Ztxt::parse(&raw).unwrap();
+        assert_eq!(back, z);
+    }
+
+    #[test]
+    fn ztxt_rejects_unknown_compression_method() {
+        // §4.2.10: "The only value presently defined for it is 0".
+        // Hand-build a payload with method = 1 and confirm parse rejects.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"kw");
+        raw.push(0); // NUL
+        raw.push(1); // bogus compression method
+        raw.extend_from_slice(&[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        assert!(Ztxt::parse(&raw).is_err());
+    }
+
+    #[test]
+    fn ztxt_rejects_missing_method_byte() {
+        // Payload ends exactly at the NUL — no method byte at all.
+        let raw = b"kw\0";
+        assert!(Ztxt::parse(raw).is_err());
+    }
+
+    #[test]
+    fn ztxt_rejects_missing_nul() {
+        // No NUL separator means no keyword terminator → parse error.
+        let raw = b"NoSeparator";
+        assert!(Ztxt::parse(raw).is_err());
+    }
+
+    #[test]
+    fn ztxt_rejects_corrupted_zlib_stream() {
+        // Method byte is 0 but the compressed body is garbage; inflate
+        // must fail and the parse must surface an InvalidData error
+        // (no panic, no infinite loop).
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"kw");
+        raw.push(0);
+        raw.push(0); // method = deflate
+        raw.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        assert!(Ztxt::parse(&raw).is_err());
+    }
+
+    #[test]
+    fn ztxt_rejects_decompressed_nul() {
+        // §4.2.10 + §4.2.7: the decompressed text must obey the same
+        // "no NUL" rule as tEXt. Build a valid zTXt by deflating a NUL
+        // ourselves and confirm parse rejects.
+        let payload = b"valid\0invalid";
+        let compressed = compress_to_vec_zlib(payload, 6);
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"kw");
+        raw.push(0);
+        raw.push(0);
+        raw.extend_from_slice(&compressed);
+        assert!(Ztxt::parse(&raw).is_err());
+    }
+
+    #[test]
+    fn ztxt_encode_rejects_non_latin1_text() {
+        // Same Latin-1-only rule as tEXt: U+0100 is the first codepoint
+        // outside Latin-1 and must be rejected on encode.
+        let z = Ztxt {
+            keyword: "k".to_string(),
+            text: "\u{0100}".to_string(),
+        };
+        assert!(z.to_bytes().is_err());
+    }
+
+    #[test]
+    fn ztxt_encode_rejects_nul_in_text() {
+        let z = Ztxt {
+            keyword: "k".to_string(),
+            text: "bad\u{0000}null".to_string(),
+        };
+        assert!(z.to_bytes().is_err());
+    }
+
+    #[test]
+    fn ztxt_keyword_validation_shares_text_rules() {
+        // Reuses validate_keyword — leading space / consecutive spaces
+        // / non-breaking space / length / printable rules must all
+        // apply identically to zTXt.
+        for bad in [" Leading", "Two  Spaces", "Bad\u{00A0}NBSP", ""] {
+            let z = Ztxt {
+                keyword: bad.to_string(),
+                text: "x".to_string(),
+            };
+            assert!(z.to_bytes().is_err(), "expected to reject keyword {bad:?}");
+        }
+        let too_long = "k".repeat(80);
+        let z = Ztxt {
+            keyword: too_long,
+            text: "x".to_string(),
+        };
+        assert!(z.to_bytes().is_err());
+    }
+
+    #[test]
+    fn metadata_is_empty_accounts_for_ztxts() {
+        let mut m = PngMetadata::default();
+        assert!(m.is_empty());
+        m.ztxts.push(Ztxt {
             keyword: "k".to_string(),
             text: String::new(),
         });

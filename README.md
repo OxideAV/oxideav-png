@@ -124,8 +124,24 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   and the encoder replays it via `Vec<Text>`. Emitted before `IDAT`
   alongside `sPLT` (Table 1's "Multiple OK? Yes / Ordering
   constraints: None" bucket). Keyword validation is shared verbatim
-  with `sPLT`'s palette-name predicate. Compressed (`zTXt`) and
-  international (`iTXt`) text remain on the "not preserved" list.
+  with `sPLT`'s palette-name predicate. International (`iTXt`) text
+  remains on the "not preserved" list.
+- `zTXt` (compressed textual data, RFC 2083 §4.2.10 / W3C PNG3
+  §11.3.3.3) — `tEXt` semantics with the body zlib-compressed on the
+  wire. The on-wire payload is a 1-79-byte Latin-1 keyword + `NUL`
+  separator + 1-byte compression method (only `0` = deflate/inflate
+  defined; any other value rejected per §4.2.10 "The only value
+  presently defined for it is 0") + zlib-compressed Latin-1 text. The
+  decoder inflates the body and applies the same no-`NUL`-in-text
+  rule as `tEXt`; the encoder validates the keyword, the per-codepoint
+  Latin-1 / no-`NUL` text rules, and deflates the body at the
+  project's default level (6). Multiple `zTXt` chunks are permitted,
+  including with identical keywords (§4.2.10 ¶6 "Any number of zTXt
+  and tEXt chunks can appear in the same file"). Emitted before `IDAT`
+  alongside `tEXt`; the encoder writes `tEXt` ahead of `zTXt` so a
+  streaming reader sees the cheap-to-display plain annotations first.
+  A 4 KB run of one character round-trips through the codec at well
+  under 200 wire bytes.
 
 Decode: [`parse_metadata`] returns a [`PngMetadata`] with each
 supported field populated for any chunks present. Encode:
@@ -133,11 +149,12 @@ supported field populated for any chunks present. Encode:
 fields are emitted at spec-compliant chunk positions (`cICP` / `sBIT` /
 `sRGB` / `gAMA` / `cHRM` before `PLTE`/`IDAT`, in §4.3 Color-Chunk-
 Priority order; `bKGD` / `hIST` after `PLTE`, before `IDAT`; `pHYs`,
-`tIME`, `eXIf`, `sPLT`, and `tEXt` before `IDAT`).
+`tIME`, `eXIf`, `sPLT`, `tEXt`, and `zTXt` before `IDAT`).
 Single-instance chunks are rejected on decode if repeated (the
 "Multiple OK? No" rule in RFC 2083 §4.3 / W3C PNG3 §5.6); `sPLT`
-requires distinct palette names; `tEXt` is the lone chunk where
-identical keywords on multiple instances are explicitly permitted.
+requires distinct palette names; `tEXt` and `zTXt` are the two chunks
+where identical keywords on multiple instances are explicitly
+permitted (§4.2.7 ¶3 / §4.2.10 ¶6).
 
 ## Not preserved
 
@@ -146,8 +163,8 @@ identical keywords on multiple instances are explicitly permitted.
 - `tRNS` chunk emission for ct=0 / ct=2 (decode applies it during
   `decode_png_to_rgba`; the standalone encoder still only carries
   per-entry alpha for `Pal8` via the palette tail)
-- Remaining metadata chunks: `iCCP`, `zTXt`, `iTXt` (the three that
-  carry a zlib-compressed or ICC-profile payload). Each is CRC-checked
+- Remaining metadata chunks: `iCCP`, `iTXt` (the two that carry an
+  ICC-profile or UTF-8 international-text payload). Each is CRC-checked
   on read and then dropped
 
 ## Robustness

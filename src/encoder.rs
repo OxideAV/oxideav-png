@@ -41,10 +41,10 @@ pub struct PngEncoderOptions {
     /// progressively renderable.
     pub interlace: bool,
     /// Optional `sBIT` / `pHYs` / `tIME` / `bKGD` / `hIST` / `eXIf` /
-    /// `sRGB` / `cICP` / `gAMA` / `cHRM` / `sPLT` / `tEXt` ancillary
-    /// metadata to embed. Each `Some(_)` field (and each `sPLT` / `tEXt`
-    /// in its `Vec`) is written; chunk ordering follows RFC 2083 §4.3 /
-    /// W3C PNG3 §5.6 Table 7:
+    /// `sRGB` / `cICP` / `gAMA` / `cHRM` / `sPLT` / `tEXt` / `zTXt`
+    /// ancillary metadata to embed. Each `Some(_)` field (and each
+    /// `sPLT` / `tEXt` / `zTXt` in its `Vec`) is written; chunk ordering
+    /// follows RFC 2083 §4.3 / W3C PNG3 §5.6 Table 7:
     ///
     /// * `cICP` / `sBIT` / `sRGB` / `gAMA` / `cHRM` — before `PLTE` and
     ///   `IDAT`. The colour chunks follow §4.3 Table 1's "Color Chunk
@@ -57,8 +57,16 @@ pub struct PngEncoderOptions {
     /// * `sPLT` — before `IDAT` (§5.6 Table 7). Multiple instances are
     ///   permitted; emitted in `Vec` order. An invalid palette name /
     ///   sample depth (or an 8-bit sample > 255) is an encode error.
+    /// * `tEXt` — before `IDAT`; emitted after `sPLT` in `Vec` order.
+    ///   Multiple instances with identical keywords are permitted
+    ///   (§4.2.7 ¶3).
+    /// * `zTXt` — before `IDAT`; emitted after `tEXt` so plain text
+    ///   precedes compressed text in the chunk stream. Multiple
+    ///   instances with identical keywords are permitted (§4.2.10 ¶6).
+    ///   Body is zlib-compressed at the encoder default (level 6).
     ///
-    /// `None` (or an empty `splt` `Vec`) skips the chunk entirely.
+    /// `None` (or an empty `splt` / `texts` / `ztxts` `Vec`) skips the
+    /// chunk entirely.
     pub metadata: Option<PngMetadata>,
 }
 
@@ -179,6 +187,15 @@ fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
     // suggested-palette) precede free-form textual annotations.
     for text in &meta.texts {
         write_chunk(out, b"tEXt", &text.to_bytes()?);
+    }
+    // `zTXt` (RFC 2083 §4.2.10) shares the "Before IDAT, no ordering
+    // constraint" bucket with `tEXt`; "Any number of zTXt and tEXt
+    // chunks can appear in the same file" (§4.2.10 ¶6). Emitted after
+    // `tEXt` so the cheap-to-display plain-text chunks precede the
+    // compressed bulk-text payloads — a reader streaming the file gets
+    // the human-readable annotations first.
+    for ztxt in &meta.ztxts {
+        write_chunk(out, b"zTXt", &ztxt.to_bytes()?);
     }
     Ok(())
 }
