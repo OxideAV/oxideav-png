@@ -2729,9 +2729,9 @@ fn trns_decoder_rejects_chunk_on_ct6_input() {
 }
 
 /// Self-contained PNG-spec CRC-32 (§5.5) for the splice tests above.
-/// Polynomial 0xEDB88320, init 0xFFFFFFFF, post-invert. Reproduced from
-/// the algorithm pseudocode in RFC 2083 Annex D (which is the
-/// canonical reference for the chunk-CRC computation).
+/// Polynomial 0xEDB88320, init 0xFFFFFFFF, post-invert. Per the
+/// RFC 2083 Annex D pseudocode, which is the canonical reference
+/// for the chunk-CRC computation.
 fn simple_crc32(buf: &[u8]) -> u32 {
     let mut table = [0u32; 256];
     for (n, item) in table.iter_mut().enumerate() {
