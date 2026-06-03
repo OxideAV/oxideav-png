@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `mDCV` (Mastering Display Color Volume, W3C PNG3 §11.3.2.7) and
+  `cLLI` (Content Light Level Information, W3C PNG3 §11.3.2.8)
+  HDR static-metadata round-trip. Surfaced as `metadata::Mdcv`
+  (three primary chromaticities, the white-point chromaticity, plus
+  `max_luminance` / `min_luminance`) and `metadata::Clli`
+  (`max_content_light_level` / `max_frame_average_light_level`), held
+  by `PngMetadata::mdcv: Option<Mdcv>` and `PngMetadata::clli:
+  Option<Clli>`. Both chunks are short fixed-layout payloads (24 bytes
+  for `mDCV` per §11.3.2.7 Table 19; 8 bytes for `cLLI` per §11.3.2.8
+  Table 20); the codec stores the "stored integer" big-endian samples
+  verbatim so a round-trip is byte-exact (chromaticities × 50000,
+  luminances × 10000), and convenience accessors re-divide for
+  callers that want floats. Single-instance only — duplicate `mDCV` /
+  `cLLI` is rejected on parse per §5.6 Table 1 "Multiple OK? No".
+  Both chunks must precede `PLTE` and `IDAT` per the same table; the
+  encoder emits them after the §4.3-ranked colour chunks (cICP →
+  iCCP → sBIT → sRGB → gAMA → cHRM → mDCV → cLLI) so the basic
+  colour-space signal leads the file and the HDR supplemental
+  colour-volume metadata trails — pairing naturally with `cICP` for
+  HDR10 streams (BT.2100 primaries + PQ transfer + full-range mDCV +
+  cLLI). A zero in either `cLLI` field is the spec's "unknown / not
+  currently calculable" sentinel (§11.3.2.8): preserved verbatim so a
+  live APNG encoder can emit a placeholder and rewrite the value when
+  the stream ends. 8 new unit tests + 11 new integration tests cover
+  round-trip on the §11.3.2.7 BT.2100 + Display P3 worked examples
+  (Examples 5-9 hex bytes), the §11.3.2.8 1000/250 cd/m² HDR10 case
+  (Examples 13-14), all-zero placeholder preservation,
+  wrong-length rejection, duplicate-chunk rejection, ordering-rule
+  enforcement (mDCV/cLLI precede PLTE + IDAT and trail the §4.3
+  colour chunks), and a combined HDR10 cICP + mDCV + cLLI
+  round-trip. Closes the "Not preserved" README entry for both
+  chunks.
+
 - `iCCP` (embedded ICC profile, W3C PNG3 §11.3.2.3) round-trip.
   Surfaced as `metadata::Iccp` (`pub name`, `pub profile: Vec<u8>`)
   and held by `PngMetadata::iccp: Option<Iccp>`. The on-wire payload

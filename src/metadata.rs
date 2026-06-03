@@ -1,6 +1,6 @@
 //! PNG ancillary metadata chunks — `sBIT`, `pHYs`, `tIME`, `bKGD`,
-//! `hIST`, `eXIf`, `sRGB`, `cICP`, `iCCP`, `gAMA`, `cHRM`, `sPLT`,
-//! `tEXt`, `zTXt`, `iTXt`.
+//! `hIST`, `eXIf`, `sRGB`, `cICP`, `iCCP`, `gAMA`, `cHRM`, `mDCV`,
+//! `cLLI`, `sPLT`, `tEXt`, `zTXt`, `iTXt`.
 //!
 //! All but `eXIf` and `sPLT` are short, fixed-layout chunks with no
 //! embedded compression and no cross-chunk dependencies (with the single
@@ -188,6 +188,52 @@
 //!   the same file" (§4.2.10) — so the decoder preserves file order and
 //!   the encoder replays it via `Vec<Ztxt>`. Emitted before `IDAT`
 //!   alongside `tEXt` (Table 1: "Multiple OK? Yes / Ordering: None").
+//!
+//! - `mDCV` — W3C PNG3 §11.3.2.7 "Mastering Display Color Volume". A
+//!   24-byte fixed-layout HDR static-metadata chunk describing the
+//!   reference (mastering) display the content was graded on. Per
+//!   Table 19:
+//!
+//!   | Field                                                | Width   | Divisor   |
+//!   |------------------------------------------------------|---------|-----------|
+//!   | Display primary chromaticities (three `(x, y)` pairs) | 12 B    | 0.00002   |
+//!   | Display white-point chromaticity (`(x, y)`)           | 4 B     | 0.00002   |
+//!   | Maximum luminance (cd/m²)                             | 4 B     | 0.0001    |
+//!   | Minimum luminance (cd/m²)                             | 4 B     | 0.0001    |
+//!
+//!   Each `x` / `y` is a `u16` big-endian sample; the maximum and
+//!   minimum luminance are `u32` big-endian samples. The primaries are
+//!   "ordered starting with the primary with the largest x
+//!   chromaticity, followed by the primary with the largest y
+//!   chromaticity, followed by the remaining primary. For RGB colour
+//!   spaces, this corresponds to the order R, G, B" (§11.3.2.7). The
+//!   values are stored verbatim as the on-wire integers so a round-trip
+//!   is byte-exact; convenience helpers convert each pair back to
+//!   floats using the divisor table. `mDCV` "MUST come before the
+//!   `PLTE` and `IDAT` chunks" (§11.3.2.7) and is single-instance per
+//!   §5.6 Table 1. The spec notes "a `cICP` chunk must accompany the
+//!   use of `mDCV` in order to establish the basic characteristics of
+//!   the image content" — that is a *content-level* expectation (a
+//!   viewer needs `cICP` to interpret the primaries' colour-space
+//!   meaning), not a parse-time `shall`, so the codec accepts `mDCV`
+//!   without `cICP` and leaves the policy choice to the caller.
+//!
+//! - `cLLI` — W3C PNG3 §11.3.2.8 "Content Light Level Information".
+//!   An 8-byte fixed-layout HDR static-metadata chunk pairing `mDCV`.
+//!   Per Table 20:
+//!
+//!   | Field                                       | Width | Divisor |
+//!   |---------------------------------------------|-------|---------|
+//!   | Maximum Content Light Level (MaxCLL)        | 4 B   | 0.0001  |
+//!   | Maximum Frame-Average Light Level (MaxFALL) | 4 B   | 0.0001  |
+//!
+//!   Both samples are `u32` big-endian cd/m² values (also called
+//!   "nits"). "A value of zero for either MaxCLL or MaxFALL means that
+//!   the value is unknown or not currently calculable" (§11.3.2.8) —
+//!   the codec preserves a zero verbatim (the spec frames the
+//!   "unknown" reading as a consumer-side interpretation) and surfaces
+//!   it via the [`Clli`] struct without rejecting it. `cLLI` must
+//!   precede `PLTE` and `IDAT` (§5.6 Table 1) and is single-instance.
 //!
 //! - `iTXt` — W3C PNG3 §11.3.3.4 "International textual data". The
 //!   UTF-8 successor to `tEXt`: a Latin-1 keyword paired with a UTF-8
@@ -959,6 +1005,243 @@ impl Chrm {
             self.blue_x as f64 / 100_000.0,
             self.blue_y as f64 / 100_000.0,
         )
+    }
+}
+
+/// `mDCV` payload (W3C PNG3 §11.3.2.7 / Table 19).
+///
+/// Mastering-Display Color Volume static metadata: the colour primaries
+/// (three `(x, y)` chromaticity pairs, ordered "starting with the
+/// primary with the largest x chromaticity, followed by the primary
+/// with the largest y chromaticity, followed by the remaining
+/// primary" — for an RGB-ordered grading display that resolves to
+/// R, G, B), the display white point `(x, y)`, and the
+/// maximum / minimum luminance the mastering display can produce,
+/// expressed in cd/m².
+///
+/// On the wire every field is preserved verbatim as the "stored
+/// integer" of Table 19 (the actual value divided by the per-row
+/// divisor: 0.00002 for the chromaticity pairs, 0.0001 for the
+/// luminance pair); a round-trip through [`Self::parse`] /
+/// [`Self::to_bytes`] is byte-exact. Convenience accessors
+/// ([`Self::primary_r`] / [`Self::primary_g`] / [`Self::primary_b`] /
+/// [`Self::white_point`] / [`Self::max_luminance_cd_m2`] /
+/// [`Self::min_luminance_cd_m2`]) re-divide so callers do not have to
+/// know the per-field scaling.
+///
+/// `mDCV` is 24 bytes; other payload lengths are rejected. Single-
+/// instance only (§5.6 Table 1, "Multiple OK? No") — duplicate `mDCV`
+/// is rejected on parse. Must precede `PLTE` and `IDAT` (§11.3.2.7
+/// "The mDCV chunk MUST come before the PLTE and IDAT chunks").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mdcv {
+    /// Display primary "R" — the primary with the largest stored x
+    /// chromaticity (§11.3.2.7 ordering rule). Stored integer × 0.00002
+    /// is the CIE 1931 x value.
+    pub primary_r_x: u16,
+    /// Display primary "R" CIE 1931 y stored integer.
+    pub primary_r_y: u16,
+    /// Display primary "G" — the primary with the largest stored y
+    /// chromaticity.
+    pub primary_g_x: u16,
+    /// Display primary "G" CIE 1931 y stored integer.
+    pub primary_g_y: u16,
+    /// Display primary "B" — the remaining primary.
+    pub primary_b_x: u16,
+    /// Display primary "B" CIE 1931 y stored integer.
+    pub primary_b_y: u16,
+    /// Display white-point CIE 1931 x stored integer.
+    pub white_point_x: u16,
+    /// Display white-point CIE 1931 y stored integer.
+    pub white_point_y: u16,
+    /// Mastering-display maximum luminance, stored as (cd/m²) /
+    /// 0.0001 — so 4000 cd/m² is stored as `40_000_000`
+    /// (`0x0262_5A00`, §11.3.2.7 Example 7).
+    pub max_luminance: u32,
+    /// Mastering-display minimum luminance, stored as (cd/m²) /
+    /// 0.0001 — so 0.0005 cd/m² is stored as `5` (§11.3.2.7 Example 8).
+    pub min_luminance: u32,
+}
+
+impl Mdcv {
+    /// On-wire size in bytes: 12 (primaries) + 4 (white point) + 4
+    /// (max luminance) + 4 (min luminance) per §11.3.2.7 Table 19.
+    pub const SIZE: usize = 24;
+
+    /// Per-chromaticity divisor for the primaries and white-point rows
+    /// (PNG3 §11.3.2.7 Table 19): `stored_integer * CHROMATICITY_DIVISOR`
+    /// yields the CIE 1931 x or y value.
+    pub const CHROMATICITY_DIVISOR: f64 = 0.00002;
+
+    /// Per-luminance divisor for the max / min luminance rows (PNG3
+    /// §11.3.2.7 Table 19): `stored_integer * LUMINANCE_DIVISOR` yields
+    /// the value in cd/m².
+    pub const LUMINANCE_DIVISOR: f64 = 0.0001;
+
+    /// Parse an `mDCV` chunk payload (exactly 24 bytes). Other lengths
+    /// are rejected. The eight chromaticity samples are u16 big-endian;
+    /// the two luminance samples are u32 big-endian.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        if data.len() != Self::SIZE {
+            return Err(Error::invalid(format!(
+                "PNG mDCV: expected {} bytes, got {}",
+                Self::SIZE,
+                data.len()
+            )));
+        }
+        let be16 = |i: usize| u16::from_be_bytes([data[i], data[i + 1]]);
+        let be32 = |i: usize| u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+        Ok(Self {
+            primary_r_x: be16(0),
+            primary_r_y: be16(2),
+            primary_g_x: be16(4),
+            primary_g_y: be16(6),
+            primary_b_x: be16(8),
+            primary_b_y: be16(10),
+            white_point_x: be16(12),
+            white_point_y: be16(14),
+            max_luminance: be32(16),
+            min_luminance: be32(20),
+        })
+    }
+
+    /// Emit the 24-byte on-wire payload in spec order.
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut out = [0u8; Self::SIZE];
+        let u16_pairs = [
+            self.primary_r_x,
+            self.primary_r_y,
+            self.primary_g_x,
+            self.primary_g_y,
+            self.primary_b_x,
+            self.primary_b_y,
+            self.white_point_x,
+            self.white_point_y,
+        ];
+        for (i, v) in u16_pairs.iter().enumerate() {
+            out[i * 2..i * 2 + 2].copy_from_slice(&v.to_be_bytes());
+        }
+        out[16..20].copy_from_slice(&self.max_luminance.to_be_bytes());
+        out[20..24].copy_from_slice(&self.min_luminance.to_be_bytes());
+        out
+    }
+
+    /// The "R" display primary `(x, y)` CIE 1931 chromaticity pair as
+    /// floats (each stored integer × 0.00002).
+    pub fn primary_r(&self) -> (f64, f64) {
+        (
+            self.primary_r_x as f64 * Self::CHROMATICITY_DIVISOR,
+            self.primary_r_y as f64 * Self::CHROMATICITY_DIVISOR,
+        )
+    }
+
+    /// The "G" display primary `(x, y)` CIE 1931 chromaticity pair.
+    pub fn primary_g(&self) -> (f64, f64) {
+        (
+            self.primary_g_x as f64 * Self::CHROMATICITY_DIVISOR,
+            self.primary_g_y as f64 * Self::CHROMATICITY_DIVISOR,
+        )
+    }
+
+    /// The "B" display primary `(x, y)` CIE 1931 chromaticity pair.
+    pub fn primary_b(&self) -> (f64, f64) {
+        (
+            self.primary_b_x as f64 * Self::CHROMATICITY_DIVISOR,
+            self.primary_b_y as f64 * Self::CHROMATICITY_DIVISOR,
+        )
+    }
+
+    /// The display white-point `(x, y)` CIE 1931 chromaticity pair.
+    pub fn white_point(&self) -> (f64, f64) {
+        (
+            self.white_point_x as f64 * Self::CHROMATICITY_DIVISOR,
+            self.white_point_y as f64 * Self::CHROMATICITY_DIVISOR,
+        )
+    }
+
+    /// Mastering display maximum luminance in cd/m² (stored × 0.0001).
+    pub fn max_luminance_cd_m2(&self) -> f64 {
+        self.max_luminance as f64 * Self::LUMINANCE_DIVISOR
+    }
+
+    /// Mastering display minimum luminance in cd/m² (stored × 0.0001).
+    pub fn min_luminance_cd_m2(&self) -> f64 {
+        self.min_luminance as f64 * Self::LUMINANCE_DIVISOR
+    }
+}
+
+/// `cLLI` payload (W3C PNG3 §11.3.2.8 / Table 20).
+///
+/// Content Light Level Information static metadata: the peak
+/// per-pixel luminance and the peak frame-average luminance of the
+/// entire playback sequence, both expressed in cd/m² (also known as
+/// "nits"). Both samples are stored as `u32` big-endian integers
+/// equal to the actual value divided by 0.0001 — so 1000 cd/m² is
+/// stored as `10_000_000` (§11.3.2.8 Example 13) and 250 cd/m² is
+/// stored as `2_500_000` (Example 14).
+///
+/// "A value of zero for either MaxCLL or MaxFALL means that the value
+/// is unknown or not currently calculable" (§11.3.2.8) — the codec
+/// stores the raw integers and leaves the "unknown" interpretation to
+/// the caller; a zero round-trips byte-exactly.
+///
+/// `cLLI` is 8 bytes; other payload lengths are rejected. Single-
+/// instance only (§5.6 Table 1, "Multiple OK? No"). Must precede
+/// `PLTE` and `IDAT`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Clli {
+    /// Maximum Content Light Level — the peak single-pixel cd/m² of
+    /// the playback sequence, stored × 10000.
+    pub max_content_light_level: u32,
+    /// Maximum Frame-Average Light Level — the peak frame-average
+    /// cd/m² of the playback sequence, stored × 10000.
+    pub max_frame_average_light_level: u32,
+}
+
+impl Clli {
+    /// On-wire size in bytes (§11.3.2.8 Table 20: 4 + 4).
+    pub const SIZE: usize = 8;
+
+    /// Per-luminance divisor (§11.3.2.8 Table 20): stored_integer ×
+    /// `LUMINANCE_DIVISOR` = cd/m². Identical to [`Mdcv::LUMINANCE_DIVISOR`].
+    pub const LUMINANCE_DIVISOR: f64 = 0.0001;
+
+    /// Parse a `cLLI` chunk payload (exactly 8 bytes). Other lengths
+    /// are rejected. Both fields are u32 big-endian.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        if data.len() != Self::SIZE {
+            return Err(Error::invalid(format!(
+                "PNG cLLI: expected {} bytes, got {}",
+                Self::SIZE,
+                data.len()
+            )));
+        }
+        let be32 = |i: usize| u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+        Ok(Self {
+            max_content_light_level: be32(0),
+            max_frame_average_light_level: be32(4),
+        })
+    }
+
+    /// Emit the 8-byte on-wire payload in spec order.
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut out = [0u8; Self::SIZE];
+        out[0..4].copy_from_slice(&self.max_content_light_level.to_be_bytes());
+        out[4..8].copy_from_slice(&self.max_frame_average_light_level.to_be_bytes());
+        out
+    }
+
+    /// MaxCLL in cd/m² (stored × 0.0001). A return of `0.0` retains
+    /// the spec's "unknown / not currently calculable" reading; the
+    /// codec preserves the raw integer either way.
+    pub fn max_content_light_level_cd_m2(&self) -> f64 {
+        self.max_content_light_level as f64 * Self::LUMINANCE_DIVISOR
+    }
+
+    /// MaxFALL in cd/m² (stored × 0.0001). A return of `0.0` retains
+    /// the spec's "unknown / not currently calculable" reading.
+    pub fn max_frame_average_light_level_cd_m2(&self) -> f64 {
+        self.max_frame_average_light_level as f64 * Self::LUMINANCE_DIVISOR
     }
 }
 
@@ -1745,6 +2028,16 @@ pub struct PngMetadata {
     /// Primary chromaticities + white point (`cHRM`, RFC 2083 §4.2.2 /
     /// W3C PNG3 §11.3.2.1).
     pub chrm: Option<Chrm>,
+    /// Mastering-Display Color Volume (`mDCV`, W3C PNG3 §11.3.2.7).
+    /// HDR static metadata describing the reference display used to
+    /// grade the content (primaries, white point, max/min luminance).
+    /// 24-byte fixed-layout chunk; single-instance.
+    pub mdcv: Option<Mdcv>,
+    /// Content Light Level Information (`cLLI`, W3C PNG3 §11.3.2.8).
+    /// HDR static metadata pairing `mDCV`: the peak per-pixel cd/m²
+    /// and peak frame-average cd/m² of the playback sequence. 8-byte
+    /// fixed-layout chunk; single-instance.
+    pub clli: Option<Clli>,
     /// Zero or more suggested palettes (`sPLT`, W3C PNG3 §11.3.4.4). The
     /// PNG spec permits multiple instances as long as each has a
     /// distinct palette name; the decoder enforces that and the encoder
@@ -1788,6 +2081,8 @@ impl PngMetadata {
             && self.iccp.is_none()
             && self.gama.is_none()
             && self.chrm.is_none()
+            && self.mdcv.is_none()
+            && self.clli.is_none()
             && self.splt.is_empty()
             && self.texts.is_empty()
             && self.ztxts.is_empty()
@@ -3382,6 +3677,173 @@ mod tests {
             translated_keyword: String::new(),
             text: String::new(),
         });
+        assert!(!m.is_empty());
+    }
+
+    // ---- mDCV (W3C PNG3 §11.3.2.7) ----------------------------------
+
+    #[test]
+    fn mdcv_roundtrip_bt2100() {
+        // §11.3.2.7 Examples 5-8 — BT.2100 HDR: primaries from Example 5,
+        // D65 white-point from Example 6, max 4000 cd/m² from Example 7,
+        // min 0.0005 cd/m² from Example 8.
+        let m = Mdcv {
+            primary_r_x: 35400,
+            primary_r_y: 14600,
+            primary_g_x: 8500,
+            primary_g_y: 39850,
+            primary_b_x: 6550,
+            primary_b_y: 2300,
+            white_point_x: 15635,
+            white_point_y: 16450,
+            max_luminance: 40_000_000,
+            min_luminance: 5,
+        };
+        let b = m.to_bytes();
+        assert_eq!(b.len(), Mdcv::SIZE);
+        // Example 5 row 1 stored hex: { 8A 48, 39 08 }.
+        assert_eq!(&b[..4], &[0x8A, 0x48, 0x39, 0x08]);
+        // Example 7 stored hex: 02 62 5A 00.
+        assert_eq!(&b[16..20], &[0x02, 0x62, 0x5A, 0x00]);
+        // Example 8 stored hex: 00 00 00 05.
+        assert_eq!(&b[20..24], &[0x00, 0x00, 0x00, 0x05]);
+        let back = Mdcv::parse(&b).unwrap();
+        assert_eq!(back, m);
+        // Helpers convert through the divisor unchanged.
+        let (rx, ry) = back.primary_r();
+        assert!((rx - 0.708).abs() < 1e-6);
+        assert!((ry - 0.292).abs() < 1e-6);
+        let (wx, wy) = back.white_point();
+        assert!((wx - 0.3127).abs() < 1e-6);
+        assert!((wy - 0.3290).abs() < 1e-6);
+        assert!((back.max_luminance_cd_m2() - 4000.0).abs() < 1e-6);
+        assert!((back.min_luminance_cd_m2() - 0.0005).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mdcv_roundtrip_display_p3() {
+        // §11.3.2.7 Example 9 — Display P3 SDR primaries: (0.68, 0.32) →
+        // stored decimal { 34000, 16000 } → hex { 84 D0, 3E 80 }.
+        let m = Mdcv {
+            primary_r_x: 34000,
+            primary_r_y: 16000,
+            primary_g_x: 13520,
+            primary_g_y: 34500,
+            primary_b_x: 7500,
+            primary_b_y: 3000,
+            white_point_x: 15635,
+            white_point_y: 16450,
+            max_luminance: 1_000_000,
+            min_luminance: 0,
+        };
+        let b = m.to_bytes();
+        assert_eq!(&b[..4], &[0x84, 0xD0, 0x3E, 0x80]);
+        let back = Mdcv::parse(&b).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn mdcv_rejects_wrong_length() {
+        // 23 + 25 bytes both fail; only 24 is valid.
+        let err = Mdcv::parse(&[0u8; 23]).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+        let err = Mdcv::parse(&[0u8; 25]).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn mdcv_zero_payload_roundtrips() {
+        // The spec attaches no "valid range" to the stored integers — a
+        // grading-station might emit a placeholder mDCV; we preserve it
+        // byte-exactly rather than rejecting.
+        let m = Mdcv {
+            primary_r_x: 0,
+            primary_r_y: 0,
+            primary_g_x: 0,
+            primary_g_y: 0,
+            primary_b_x: 0,
+            primary_b_y: 0,
+            white_point_x: 0,
+            white_point_y: 0,
+            max_luminance: 0,
+            min_luminance: 0,
+        };
+        let b = m.to_bytes();
+        assert_eq!(b, [0u8; Mdcv::SIZE]);
+        let back = Mdcv::parse(&b).unwrap();
+        assert_eq!(back, m);
+    }
+
+    // ---- cLLI (W3C PNG3 §11.3.2.8) ----------------------------------
+
+    #[test]
+    fn clli_roundtrip_examples() {
+        // §11.3.2.8 Example 13: 1000 cd/m² → stored 10_000_000 →
+        // hex 00 98 96 80. Example 14: 250 cd/m² → 2_500_000 →
+        // hex 00 26 25 A0.
+        let c = Clli {
+            max_content_light_level: 10_000_000,
+            max_frame_average_light_level: 2_500_000,
+        };
+        let b = c.to_bytes();
+        assert_eq!(b.len(), Clli::SIZE);
+        assert_eq!(&b[..4], &[0x00, 0x98, 0x96, 0x80]);
+        assert_eq!(&b[4..], &[0x00, 0x26, 0x25, 0xA0]);
+        let back = Clli::parse(&b).unwrap();
+        assert_eq!(back, c);
+        assert!((back.max_content_light_level_cd_m2() - 1000.0).abs() < 1e-6);
+        assert!((back.max_frame_average_light_level_cd_m2() - 250.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn clli_preserves_unknown_zero_sentinel() {
+        // §11.3.2.8: "A value of zero for either MaxCLL or MaxFALL means
+        // that the value is unknown or not currently calculable." We
+        // preserve the raw integer rather than rejecting it.
+        let c = Clli {
+            max_content_light_level: 0,
+            max_frame_average_light_level: 0,
+        };
+        let b = c.to_bytes();
+        assert_eq!(b, [0u8; Clli::SIZE]);
+        let back = Clli::parse(&b).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn clli_rejects_wrong_length() {
+        let err = Clli::parse(&[0u8; 7]).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+        let err = Clli::parse(&[0u8; 9]).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn metadata_is_empty_accounts_for_mdcv_and_clli() {
+        assert!(PngMetadata::default().is_empty());
+        let m = PngMetadata {
+            mdcv: Some(Mdcv {
+                primary_r_x: 1,
+                primary_r_y: 1,
+                primary_g_x: 1,
+                primary_g_y: 1,
+                primary_b_x: 1,
+                primary_b_y: 1,
+                white_point_x: 1,
+                white_point_y: 1,
+                max_luminance: 1,
+                min_luminance: 1,
+            }),
+            ..Default::default()
+        };
+        assert!(!m.is_empty());
+        let m = PngMetadata {
+            clli: Some(Clli {
+                max_content_light_level: 1,
+                max_frame_average_light_level: 1,
+            }),
+            ..Default::default()
+        };
         assert!(!m.is_empty());
     }
 }

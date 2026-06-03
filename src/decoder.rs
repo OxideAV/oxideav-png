@@ -45,8 +45,8 @@ use crate::apng::{parse_fdat, Actl, Blend, Disposal, Fctl};
 use crate::chunk::{read_chunk, ChunkRef, PNG_MAGIC};
 use crate::filter::{unfilter_row, FilterType};
 use crate::metadata::{
-    Bkgd, Chrm, Cicp, Exif, Gama, Hist, Iccp, Itxt, Phys, PngMetadata, Sbit, Splt, Srgb, Text,
-    Time, Ztxt,
+    Bkgd, Chrm, Cicp, Clli, Exif, Gama, Hist, Iccp, Itxt, Mdcv, Phys, PngMetadata, Sbit, Splt,
+    Srgb, Text, Time, Ztxt,
 };
 
 pub const CODEC_ID_STR: &str = "png";
@@ -222,7 +222,8 @@ pub(crate) fn parse_all_chunks(buf: &[u8]) -> Result<Vec<ChunkRef<'_>>> {
 
 /// Extract round-trippable PNG ancillary metadata (`sBIT`, `pHYs`,
 /// `tIME`, `bKGD`, `hIST`, `eXIf`, `sRGB`, `cICP`, `gAMA`, `cHRM`,
-/// `sPLT`, `tEXt`, `zTXt`, `iCCP`, `iTXt`) from a PNG / APNG file.
+/// `mDCV`, `cLLI`, `sPLT`, `tEXt`, `zTXt`, `iCCP`, `iTXt`) from a
+/// PNG / APNG file.
 ///
 /// Standalone (no `oxideav-core`) entry point: works whether or not
 /// the `registry` feature is enabled. Returns
@@ -360,6 +361,30 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                     return Err(Error::invalid("PNG: duplicate cHRM chunk"));
                 }
                 out.chrm = Some(Chrm::parse(c.data)?);
+            }
+            b"mDCV" => {
+                // W3C PNG3 §5.6 Table 1: mDCV is "Multiple OK? No". The
+                // §4.3 colour-chunk-priority table does not list mDCV
+                // explicitly (it is supplemental HDR static metadata that
+                // a §11.3.2.7 reader interprets *together with* cICP);
+                // we round-trip the bytes verbatim and leave that
+                // policy choice to the caller.
+                if out.mdcv.is_some() {
+                    return Err(Error::invalid("PNG: duplicate mDCV chunk"));
+                }
+                out.mdcv = Some(Mdcv::parse(c.data)?);
+            }
+            b"cLLI" => {
+                // W3C PNG3 §5.6 Table 1: cLLI is "Multiple OK? No". Like
+                // mDCV, it is HDR static metadata that pairs with cICP
+                // for tone-mapping decisions and is round-tripped
+                // verbatim. A zero value is the spec's "unknown / not
+                // currently calculable" sentinel (§11.3.2.8); the codec
+                // preserves it rather than rejecting.
+                if out.clli.is_some() {
+                    return Err(Error::invalid("PNG: duplicate cLLI chunk"));
+                }
+                out.clli = Some(Clli::parse(c.data)?);
             }
             b"sPLT" => {
                 // Multiple sPLT chunks are permitted, but each shall have

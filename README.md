@@ -157,6 +157,29 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   Priority order (cICP `1` > iCCP `2` > sRGB `3` > cHRM/gAMA `4`).
   Single-instance only — duplicate `iCCP` is rejected on parse. A
   4 KB run of one byte round-trips at well under 200 wire bytes.
+- `mDCV` (Mastering Display Color Volume, W3C PNG3 §11.3.2.7) — 24-byte
+  HDR static metadata pairing the `cICP` colour-volume signal. Carries
+  three RGB display-primary `(x, y)` CIE 1931 chromaticity pairs, the
+  display white-point `(x, y)`, and the mastering display's
+  maximum/minimum luminance in cd/m². Stored as the "stored integer"
+  per §11.3.2.7 Table 19 (chromaticities × 50000, luminances × 10000),
+  so a round-trip is byte-exact; convenience accessors
+  (`primary_r/g/b()`, `white_point()`, `max_luminance_cd_m2()`,
+  `min_luminance_cd_m2()`) re-divide for callers that want floats.
+  Single-instance only — duplicate `mDCV` is rejected on parse per §5.6
+  Table 1. Emitted before `PLTE` and `IDAT` (§11.3.2.7 "MUST come
+  before the PLTE and IDAT chunks") after the §4.3-ranked colour
+  chunks; pairs naturally with `cICP` for HDR10 streams (BT.2100
+  primaries + PQ transfer + full-range + ST 2086 mDCV + cLLI).
+- `cLLI` (Content Light Level Information, W3C PNG3 §11.3.2.8) — 8-byte
+  HDR static metadata: MaxCLL (peak per-pixel cd/m²) and MaxFALL
+  (peak frame-average cd/m²) of the playback sequence, both `u32` BE
+  with the same `0.0001 cd/m²` divisor as `mDCV`. A zero value is the
+  spec's "unknown or not currently calculable" sentinel (§11.3.2.8) —
+  preserved verbatim rather than rejected, so a live APNG encoder that
+  cannot yet compute the peak values can emit a placeholder `cLLI` and
+  rewrite the bytes when the stream ends. Single-instance; same
+  ordering bucket as `mDCV`, emitted right after it.
 - `iTXt` (international textual data, W3C PNG3 §11.3.3.4) — the
   UTF-8 successor to `tEXt`. On-wire payload: 1-79-byte Latin-1
   keyword + `NUL` + compression flag (0 = uncompressed, 1 =
@@ -182,8 +205,9 @@ Decode: [`parse_metadata`] returns a [`PngMetadata`] with each
 supported field populated for any chunks present. Encode:
 [`PngEncoderOptions`]`::metadata` holds the same struct; populated
 fields are emitted at spec-compliant chunk positions (`cICP` / `iCCP` /
-`sBIT` / `sRGB` / `gAMA` / `cHRM` before `PLTE`/`IDAT`, in §4.3
-Color-Chunk-Priority order; `bKGD` / `hIST` after `PLTE`, before
+`sBIT` / `sRGB` / `gAMA` / `cHRM` / `mDCV` / `cLLI` before
+`PLTE`/`IDAT`, the four §4.3 colour-priority chunks first then the
+HDR-side colour-volume pair; `bKGD` / `hIST` after `PLTE`, before
 `IDAT`; `pHYs`, `tIME`, `eXIf`, `sPLT`, `tEXt`, `zTXt`, and `iTXt`
 before `IDAT`). Single-instance chunks are rejected on decode if
 repeated (the "Multiple OK? No" rule in RFC 2083 §4.3 / W3C PNG3
@@ -199,10 +223,6 @@ instances are explicitly permitted (§4.2.7 ¶3 / §4.2.10 ¶6 /
 - `tRNS` chunk emission for ct=0 / ct=2 (decode applies it during
   `decode_png_to_rgba`; the standalone encoder still only carries
   per-entry alpha for `Pal8` via the palette tail)
-- `mDCV` (Mastering Display Color Volume, §11.3.2.7) and `cLLI`
-  (Content Light Level Information, §11.3.2.8) — HDR-side ancillary
-  chunks introduced in PNG 3rd edition; CRC-checked on read and then
-  dropped
 
 ## Robustness
 

@@ -41,16 +41,20 @@ pub struct PngEncoderOptions {
     /// progressively renderable.
     pub interlace: bool,
     /// Optional `sBIT` / `pHYs` / `tIME` / `bKGD` / `hIST` / `eXIf` /
-    /// `sRGB` / `cICP` / `iCCP` / `gAMA` / `cHRM` / `sPLT` / `tEXt` /
-    /// `zTXt` / `iTXt` ancillary metadata to embed. Each `Some(_)`
-    /// field (and each `sPLT` / `tEXt` / `zTXt` / `itxt` in its `Vec`)
-    /// is written; chunk ordering follows RFC 2083 §4.3 / W3C PNG3
-    /// §5.6 Table 7:
+    /// `sRGB` / `cICP` / `iCCP` / `gAMA` / `cHRM` / `mDCV` / `cLLI` /
+    /// `sPLT` / `tEXt` / `zTXt` / `iTXt` ancillary metadata to embed.
+    /// Each `Some(_)` field (and each `sPLT` / `tEXt` / `zTXt` /
+    /// `itxt` in its `Vec`) is written; chunk ordering follows
+    /// RFC 2083 §4.3 / W3C PNG3 §5.6 Table 7:
     ///
-    /// * `cICP` / `iCCP` / `sBIT` / `sRGB` / `gAMA` / `cHRM` — before
-    ///   `PLTE` and `IDAT`. The colour chunks follow §4.3 Table 1's
-    ///   "Color Chunk Priority" order (`cICP` `1` > `iCCP` `2` >
-    ///   `sRGB` `3` > `cHRM`/`gAMA` `4`).
+    /// * `cICP` / `iCCP` / `sBIT` / `sRGB` / `gAMA` / `cHRM` / `mDCV` /
+    ///   `cLLI` — before `PLTE` and `IDAT`. The colour chunks follow
+    ///   §4.3 Table 1's "Color Chunk Priority" order (`cICP` `1` >
+    ///   `iCCP` `2` > `sRGB` `3` > `cHRM`/`gAMA` `4`); `mDCV` and
+    ///   `cLLI` are HDR-side supplemental colour-volume metadata that
+    ///   the §4.3 table does not enumerate, emitted after the ranked
+    ///   chunks so the basic colour-space signal leads the file
+    ///   (§11.3.2.7 / §11.3.2.8).
     /// * `bKGD` / `hIST` — after `PLTE`, before `IDAT`.
     /// * `pHYs` — before `IDAT`.
     /// * `tIME` — unconstrained; we emit it before `IDAT` for
@@ -130,12 +134,18 @@ pub fn encode_png_image_with_options(
 
 /// Emit the metadata chunks the PNG spec places "before PLTE and IDAT":
 /// `cICP` (W3C PNG3 §11.3.2.6), `iCCP` (§11.3.2.3), `sBIT` (RFC 2083
-/// §4.3), `sRGB` (W3C PNG3 §5.6 Table 1), and the `gAMA` / `cHRM`
-/// colour-management pair (RFC 2083 §4.2.2 / §4.2.3). The colour chunks
-/// are emitted in §4.3 "Color Chunk Priority" order (cICP `1` > iCCP
-/// `2` > sRGB `3` > cHRM/gAMA `4`), with `sBIT` slotted after the
-/// highest-precedence pair for deterministic output. `gAMA` precedes
-/// `cHRM` so the simpler scalar gamma leads the chromaticity block.
+/// §4.3), `sRGB` (W3C PNG3 §5.6 Table 1), the `gAMA` / `cHRM`
+/// colour-management pair (RFC 2083 §4.2.2 / §4.2.3), and the HDR
+/// supplemental colour-volume pair `mDCV` (§11.3.2.7) / `cLLI`
+/// (§11.3.2.8). The colour chunks are emitted in §4.3 "Color Chunk
+/// Priority" order (cICP `1` > iCCP `2` > sRGB `3` > cHRM/gAMA `4`),
+/// with `sBIT` slotted after the highest-precedence pair for
+/// deterministic output. `gAMA` precedes `cHRM` so the simpler scalar
+/// gamma leads the chromaticity block. `mDCV` and `cLLI` trail the
+/// §4.3-ranked chunks because they describe the *mastering display*
+/// rather than the colour space itself — a viewer that walks the file
+/// in order picks up the basic colour signal before the supplemental
+/// HDR tone-mapping hints.
 fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> Result<()> {
     let Some(meta) = meta else {
         return Ok(());
@@ -157,6 +167,19 @@ fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
     }
     if let Some(chrm) = &meta.chrm {
         write_chunk(out, b"cHRM", &chrm.to_bytes());
+    }
+    // mDCV + cLLI (W3C PNG3 §11.3.2.7 / §11.3.2.8) are HDR-side
+    // supplemental colour-volume metadata. The §4.3 colour-priority
+    // table does not enumerate them (they pair with cICP for
+    // tone-mapping reads rather than picking a colour-space). §5.6
+    // Table 1 only constrains them to "Before PLTE and IDAT"; we emit
+    // them after the §4.3-ranked chunks so the basic colour-space
+    // signal leads the file and HDR-display-volume metadata trails.
+    if let Some(mdcv) = &meta.mdcv {
+        write_chunk(out, b"mDCV", &mdcv.to_bytes());
+    }
+    if let Some(clli) = &meta.clli {
+        write_chunk(out, b"cLLI", &clli.to_bytes());
     }
     Ok(())
 }

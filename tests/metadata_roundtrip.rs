@@ -4,8 +4,8 @@
 
 use oxideav_png::{
     decode_png, encode_png_image, encode_png_image_with_options, parse_metadata, Bkgd, Chrm, Cicp,
-    Exif, Gama, Hist, Iccp, Itxt, Phys, PhysUnit, PngEncoderOptions, PngImage, PngMetadata,
-    PngPixelFormat, RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time, Ztxt,
+    Clli, Exif, Gama, Hist, Iccp, Itxt, Mdcv, Phys, PhysUnit, PngEncoderOptions, PngImage,
+    PngMetadata, PngPixelFormat, RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time, Ztxt,
 };
 
 fn rgba_2x2() -> PngImage {
@@ -223,6 +223,8 @@ fn all_three_chunks_roundtrip() {
             blue_x: 15_000,
             blue_y: 6_000,
         }),
+        mdcv: None,
+        clli: None,
         splt: Vec::new(),
         texts: Vec::new(),
         ztxts: Vec::new(),
@@ -2146,4 +2148,306 @@ fn parse_metadata_rejects_itxt_with_invalid_keyword() {
     tampered.extend_from_slice(&chunk);
     tampered.extend_from_slice(&bytes[inject_pos..]);
     assert!(parse_metadata(&tampered).is_err());
+}
+
+// ---- mDCV + cLLI (W3C PNG3 §11.3.2.7 / §11.3.2.8) HDR static metadata --
+
+fn bt2100_mdcv() -> Mdcv {
+    // PNG3 §11.3.2.7 Examples 5-8 — BT.2100 HDR mastering display.
+    Mdcv {
+        primary_r_x: 35400,
+        primary_r_y: 14600,
+        primary_g_x: 8500,
+        primary_g_y: 39850,
+        primary_b_x: 6550,
+        primary_b_y: 2300,
+        white_point_x: 15635,
+        white_point_y: 16450,
+        max_luminance: 40_000_000, // 4000 cd/m²
+        min_luminance: 5,          // 0.0005 cd/m²
+    }
+}
+
+fn hdr10_clli() -> Clli {
+    // PNG3 §11.3.2.8 Examples 13-14 — MaxCLL 1000, MaxFALL 250 cd/m².
+    Clli {
+        max_content_light_level: 10_000_000,
+        max_frame_average_light_level: 2_500_000,
+    }
+}
+
+#[test]
+fn mdcv_roundtrip() {
+    let img = rgba_2x2();
+    let mdcv = bt2100_mdcv();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            mdcv: Some(mdcv),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.mdcv, Some(mdcv));
+    // The pixel plane must still decode bit-exactly.
+    let back = decode_png(&bytes).expect("decode pixels");
+    assert_eq!(back.data, img.data);
+}
+
+#[test]
+fn clli_roundtrip() {
+    let img = rgba_2x2();
+    let clli = hdr10_clli();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            clli: Some(clli),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.clli, Some(clli));
+}
+
+#[test]
+fn mdcv_and_clli_together_with_cicp_hdr10() {
+    // The §11.3.2.7 note "a cICP chunk must accompany the use of mDCV in
+    // order to establish the basic characteristics of the image content"
+    // is content-level guidance, not a parse-time `shall`; but in
+    // practice the HDR10 profile pairs cICP (BT.2100 + PQ + full-range)
+    // with mDCV + cLLI. Verify the three round-trip together.
+    let img = rgba_2x2();
+    let cicp = Cicp {
+        color_primaries: 9,       // BT.2020 / BT.2100
+        transfer_function: 16,    // SMPTE 2084 / PQ
+        matrix_coefficients: 0,   // RGB (pinned by PNG3 §11.3.2.6)
+        video_full_range_flag: 1, // full range
+    };
+    let mdcv = bt2100_mdcv();
+    let clli = hdr10_clli();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            cicp: Some(cicp),
+            mdcv: Some(mdcv),
+            clli: Some(clli),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.cicp, Some(cicp));
+    assert_eq!(meta.mdcv, Some(mdcv));
+    assert_eq!(meta.clli, Some(clli));
+}
+
+#[test]
+fn mdcv_payload_matches_spec_examples() {
+    // PNG3 §11.3.2.7 Examples 5/7/8 — verify the encoded mDCV payload
+    // matches the spec's tabulated hex bytes exactly.
+    let img = rgba_2x2();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            mdcv: Some(bt2100_mdcv()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let chunk_pos = bytes
+        .windows(4)
+        .position(|w| w == b"mDCV")
+        .expect("mDCV present");
+    // 24-byte payload follows the 4-byte type tag.
+    let payload_start = chunk_pos + 4;
+    let payload = &bytes[payload_start..payload_start + 24];
+    // Example 5 row 1 stored hex: { 8A 48, 39 08 } for primary R.
+    assert_eq!(&payload[..4], &[0x8A, 0x48, 0x39, 0x08]);
+    // Example 7 stored hex: 02 62 5A 00 for max luminance.
+    assert_eq!(&payload[16..20], &[0x02, 0x62, 0x5A, 0x00]);
+    // Example 8 stored hex: 00 00 00 05 for min luminance.
+    assert_eq!(&payload[20..24], &[0x00, 0x00, 0x00, 0x05]);
+}
+
+#[test]
+fn clli_payload_matches_spec_examples() {
+    // PNG3 §11.3.2.8 Examples 13/14 — MaxCLL 1000 cd/m² (00 98 96 80),
+    // MaxFALL 250 cd/m² (00 26 25 A0).
+    let img = rgba_2x2();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            clli: Some(hdr10_clli()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let chunk_pos = bytes
+        .windows(4)
+        .position(|w| w == b"cLLI")
+        .expect("cLLI present");
+    let payload_start = chunk_pos + 4;
+    let payload = &bytes[payload_start..payload_start + 8];
+    assert_eq!(payload, &[0x00, 0x98, 0x96, 0x80, 0x00, 0x26, 0x25, 0xA0]);
+}
+
+#[test]
+fn chunk_ordering_mdcv_and_clli_precede_plte_and_idat() {
+    // §11.3.2.7: "The mDCV chunk MUST come before the PLTE and IDAT
+    // chunks." §5.6 Table 1 says the same for cLLI.
+    let img = pal8_4x1();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            mdcv: Some(bt2100_mdcv()),
+            clli: Some(hdr10_clli()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
+    let mdcv_pos = pos(b"mDCV").expect("mDCV");
+    let clli_pos = pos(b"cLLI").expect("cLLI");
+    let plte_pos = pos(b"PLTE").expect("PLTE");
+    let idat_pos = pos(b"IDAT").expect("IDAT");
+    assert!(mdcv_pos < plte_pos, "mDCV must precede PLTE");
+    assert!(mdcv_pos < idat_pos, "mDCV must precede IDAT");
+    assert!(clli_pos < plte_pos, "cLLI must precede PLTE");
+    assert!(clli_pos < idat_pos, "cLLI must precede IDAT");
+}
+
+#[test]
+fn chunk_ordering_mdcv_clli_trail_basic_colour_chunks() {
+    // §4.3-ranked colour chunks (cICP/sRGB/sBIT/gAMA/cHRM) describe the
+    // colour space the samples live in; mDCV + cLLI add HDR
+    // tone-mapping metadata supplementing it. The encoder emits the
+    // ranked chunks first so a viewer walking the file in order picks
+    // up the basic colour signal before the HDR hints.
+    let img = rgba_2x2();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            cicp: Some(Cicp {
+                color_primaries: 9,
+                transfer_function: 16,
+                matrix_coefficients: 0,
+                video_full_range_flag: 1,
+            }),
+            mdcv: Some(bt2100_mdcv()),
+            clli: Some(hdr10_clli()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
+    let cicp_pos = pos(b"cICP").expect("cICP");
+    let mdcv_pos = pos(b"mDCV").expect("mDCV");
+    let clli_pos = pos(b"cLLI").expect("cLLI");
+    assert!(cicp_pos < mdcv_pos, "cICP precedes mDCV");
+    assert!(cicp_pos < clli_pos, "cICP precedes cLLI");
+    assert!(mdcv_pos < clli_pos, "mDCV precedes cLLI");
+}
+
+#[test]
+fn parse_metadata_detects_duplicate_mdcv() {
+    // §5.6 Table 1 marks mDCV "Multiple OK? No" — two consecutive
+    // chunks must be rejected.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25; // immediately after IHDR.
+    let mut single = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut single, b"mDCV", &bt2100_mdcv().to_bytes());
+    let mut tampered = Vec::with_capacity(bytes.len() + 2 * single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("two mDCV chunks must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("duplicate mDCV"),
+        "expected duplicate-mDCV error, got {msg}"
+    );
+}
+
+#[test]
+fn parse_metadata_detects_duplicate_clli() {
+    // §5.6 Table 1 marks cLLI "Multiple OK? No" — two consecutive
+    // chunks must be rejected.
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut single = Vec::new();
+    oxideav_png::chunk::write_chunk(&mut single, b"cLLI", &hdr10_clli().to_bytes());
+    let mut tampered = Vec::with_capacity(bytes.len() + 2 * single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("two cLLI chunks must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("duplicate cLLI"),
+        "expected duplicate-cLLI error, got {msg}"
+    );
+}
+
+#[test]
+fn parse_metadata_rejects_mdcv_with_wrong_length() {
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut single = Vec::new();
+    // 23 bytes — short by one.
+    oxideav_png::chunk::write_chunk(&mut single, b"mDCV", &[0u8; 23]);
+    let mut tampered = Vec::with_capacity(bytes.len() + single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("wrong-length mDCV must fail");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("mDCV"), "expected mDCV error, got {msg}");
+}
+
+#[test]
+fn parse_metadata_rejects_clli_with_wrong_length() {
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    let inject_pos = 8 + 25;
+    let mut single = Vec::new();
+    // 9 bytes — long by one.
+    oxideav_png::chunk::write_chunk(&mut single, b"cLLI", &[0u8; 9]);
+    let mut tampered = Vec::with_capacity(bytes.len() + single.len());
+    tampered.extend_from_slice(&bytes[..inject_pos]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[inject_pos..]);
+    let err = parse_metadata(&tampered).expect_err("wrong-length cLLI must fail");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("cLLI"), "expected cLLI error, got {msg}");
+}
+
+#[test]
+fn clli_zero_unknown_sentinel_roundtrips() {
+    // §11.3.2.8: "A value of zero for either MaxCLL or MaxFALL means
+    // that the value is unknown or not currently calculable." We
+    // preserve the raw integer rather than rejecting it — a live APNG
+    // encoder that does not yet know its peak values can emit a
+    // placeholder cLLI and rewrite the value when the stream ends.
+    let img = rgba_2x2();
+    let clli = Clli {
+        max_content_light_level: 0,
+        max_frame_average_light_level: 0,
+    };
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            clli: Some(clli),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.clli, Some(clli));
 }

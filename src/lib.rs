@@ -33,7 +33,8 @@
 //! Not implemented:
 //! * Sub-byte encode (decode only — encoder always writes 8/16-bit)
 //! * Round-tripped metadata: `sBIT`, `pHYs`, `tIME`, `bKGD`, `hIST`,
-//!   `eXIf`, `sRGB`, `cICP`, `iCCP`, `sPLT`, `tEXt`, `zTXt`, `iTXt` —
+//!   `eXIf`, `sRGB`, `cICP`, `iCCP`, `mDCV`, `cLLI`, `sPLT`, `tEXt`,
+//!   `zTXt`, `iTXt` —
 //!   surfaced via [`parse_metadata`] on decode and re-emitted by the
 //!   encoder when [`PngEncoderOptions::metadata`] is populated. `eXIf`
 //!   is carried as an opaque (TIFF-header-validated) blob; `sRGB`
@@ -99,8 +100,8 @@ pub use encoder::{
 pub use error::{PngError, Result};
 pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
 pub use metadata::{
-    Bkgd, Chrm, Cicp, Exif, Gama, Hist, Iccp, Itxt, Phys, PhysUnit, PngMetadata, RenderingIntent,
-    Sbit, Splt, SpltEntry, Srgb, Text, Time, Ztxt,
+    Bkgd, Chrm, Cicp, Clli, Exif, Gama, Hist, Iccp, Itxt, Mdcv, Phys, PhysUnit, PngMetadata,
+    RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time, Ztxt,
 };
 
 // Public registry-gated API — keeps the framework integration surface
