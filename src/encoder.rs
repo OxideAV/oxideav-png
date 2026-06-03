@@ -85,6 +85,31 @@ pub struct PngEncoderOptions {
     /// `None` (or an empty `splt` / `texts` / `ztxts` / `itxts` `Vec`)
     /// skips the chunk entirely.
     pub metadata: Option<PngMetadata>,
+    /// Sub-byte bit depth for the on-wire IHDR. Only valid for
+    /// `Gray8` (colour type 0) and `Pal8` (colour type 3) sources;
+    /// any other source pixel format is an encode error.
+    ///
+    /// Permitted values are `1`, `2`, and `4`. The caller's
+    /// `PngImage::data` continues to hold one byte per pixel: for
+    /// grayscale, the byte is treated as the *unscaled* sample in
+    /// `0..=(1 << bit_depth) - 1`; for indexed, the byte is the
+    /// palette index in the same range. Anything outside the range
+    /// is rejected so a malformed payload cannot reach the wire.
+    ///
+    /// Packing order matches the decode side and the PNG spec
+    /// (RFC 2083 §2.3 / W3C PNG3 §11.1.2): "the leftmost pixel in
+    /// the high-order bits of a byte, the rightmost in the low-order
+    /// bits." Sub-byte rows whose pixel count does not divide
+    /// `8 / bit_depth` are padded with zero bits in the trailing
+    /// byte's low-order positions ("the contents of these wasted
+    /// bits are unspecified" per §2.3).
+    ///
+    /// `None` (the default) emits the 8-bit-per-sample IHDR the
+    /// matching `PngPixelFormat` implies. `Some(8)` is also accepted
+    /// as a no-op equivalent to `None` for `Gray8` / `Pal8`. `16`
+    /// is rejected — the 16-bit forms are reached via
+    /// `Gray16Le` / `Rgb48Le` / `Rgba64Le` source formats instead.
+    pub bit_depth: Option<u8>,
 }
 
 // ---- Single-image encode -----------------------------------------------
@@ -102,8 +127,15 @@ pub fn encode_png_image_with_options(
     image: &PngImage,
     opts: &PngEncoderOptions,
 ) -> Result<Vec<u8>> {
-    let (mut ihdr, row_bytes, plte_bytes, trns_bytes) = ihdr_and_row_bytes(image)?;
+    let (mut ihdr, row_bytes, plte_bytes, trns_bytes) = ihdr_and_row_bytes(image, opts)?;
     if opts.interlace {
+        if ihdr.bit_depth < 8 {
+            return Err(Error::invalid(
+                "PNG encoder: Adam7 interlaced encode with sub-byte \
+                 bit_depth is not implemented (each pass would need its \
+                 own sub-byte pack); split the request across two rounds",
+            ));
+        }
         ihdr.interlace = 1;
     }
     // Resolve the on-wire tRNS payload. Two sources can supply it: the
@@ -115,7 +147,7 @@ pub fn encode_png_image_with_options(
     // errors if both are populated and otherwise picks whichever is
     // present.
     let trns_bytes = resolve_trns_bytes(&ihdr, trns_bytes.as_deref(), opts.metadata.as_ref())?;
-    let raw_pixels = flatten_and_normalise_pixels(image, row_bytes)?;
+    let raw_pixels = flatten_and_normalise_pixels(image, &ihdr, row_bytes)?;
     let idat = if opts.interlace {
         deflate_encode_pixels_adam7(
             &raw_pixels,
@@ -334,10 +366,50 @@ fn resolve_trns_bytes(
 /// IHDR + row byte count + optional PLTE / tRNS chunk payloads.
 type IhdrAndRowInfo = (Ihdr, usize, Option<Vec<u8>>, Option<Vec<u8>>);
 
-/// Given a [`PngImage`], produce an IHDR + row byte count + optional
-/// PLTE / tRNS chunk payloads.
-fn ihdr_and_row_bytes(image: &PngImage) -> Result<IhdrAndRowInfo> {
-    let (bit_depth, colour_type, channels): (u8, u8, usize) = match image.pixel_format {
+/// Validate and resolve the wire `bit_depth` from the source pixel
+/// format's natural depth plus the optional `opts.bit_depth` override.
+///
+/// `Some(1 | 2 | 4)` requires `colour_type ∈ {0, 3}` (the only colour
+/// types PNG allows sub-byte depths for — RFC 2083 §11.2.2 / Table 11.1
+/// rejects RGB / Ya / RGBA sub-byte combinations). `Some(8)` is a
+/// no-op for `Gray8` / `Pal8`. Anything else is an encode error.
+fn resolve_bit_depth(base: u8, colour_type: u8, opts: &PngEncoderOptions) -> Result<u8> {
+    let Some(requested) = opts.bit_depth else {
+        return Ok(base);
+    };
+    match requested {
+        // No-op overrides for the 8-bit Gray / indexed source formats.
+        8 if base == 8 => Ok(8),
+        1 | 2 | 4 if base == 8 && (colour_type == 0 || colour_type == 3) => Ok(requested),
+        1 | 2 | 4 => Err(Error::invalid(format!(
+            "PNG encoder: bit_depth {requested} requires a Gray8 or Pal8 \
+             source (got colour type {colour_type} at native {base}-bit) — \
+             the PNG allowed-combinations table (RFC 2083 §11.2.2 \
+             Color/Bit-Depths) forbids sub-byte depths on colour types \
+             2 / 4 / 6"
+        ))),
+        16 => Err(Error::invalid(
+            "PNG encoder: bit_depth = Some(16) is unsupported — reach the \
+             16-bit forms via Gray16Le / Rgb48Le / Rgba64Le source formats",
+        )),
+        other => Err(Error::invalid(format!(
+            "PNG encoder: bit_depth = Some({other}) is not a permitted PNG \
+             sample depth (allowed: 1, 2, 4 for Gray / indexed; 8 as no-op)"
+        ))),
+    }
+}
+
+/// Given a [`PngImage`] (and the encoder options), produce an IHDR +
+/// row byte count + optional PLTE / tRNS chunk payloads.
+///
+/// `opts.bit_depth = Some(1 | 2 | 4)` is honoured only when the source
+/// `pixel_format` is `Gray8` (colour type 0) or `Pal8` (colour type 3);
+/// any other combination is an encode error. The resulting `row_bytes`
+/// is the *packed* on-wire row length (`(width * bit_depth + 7) / 8`)
+/// rather than the source `image.data` row stride. The packing itself
+/// happens in [`flatten_and_normalise_pixels`].
+fn ihdr_and_row_bytes(image: &PngImage, opts: &PngEncoderOptions) -> Result<IhdrAndRowInfo> {
+    let (base_bit_depth, colour_type, channels): (u8, u8, usize) = match image.pixel_format {
         PngPixelFormat::Gray8 => (8, 0, 1),
         PngPixelFormat::Gray16Le => (16, 0, 1),
         PngPixelFormat::Rgb24 => (8, 2, 3),
@@ -347,7 +419,17 @@ fn ihdr_and_row_bytes(image: &PngImage) -> Result<IhdrAndRowInfo> {
         PngPixelFormat::Rgba => (8, 6, 4),
         PngPixelFormat::Rgba64Le => (16, 6, 4),
     };
-    let row_bytes = channels * (bit_depth as usize / 8) * image.width as usize;
+    let bit_depth = resolve_bit_depth(base_bit_depth, colour_type, opts)?;
+    // For sub-byte (bit_depth < 8) Gray / indexed, the row's wire bytes
+    // are `ceil(width * bit_depth / 8)` — pixels are packed MSB-first
+    // per PNG §2.3. For 8-bit and 16-bit, the channels-and-byte-width
+    // formula reduces to the historical `channels * (bit_depth / 8) *
+    // width`.
+    let row_bytes = if bit_depth < 8 {
+        ((image.width as usize) * (bit_depth as usize)).div_ceil(8)
+    } else {
+        channels * (bit_depth as usize / 8) * image.width as usize
+    };
     let ihdr = Ihdr {
         width: image.width,
         height: image.height,
@@ -388,11 +470,24 @@ fn ihdr_and_row_bytes(image: &PngImage) -> Result<IhdrAndRowInfo> {
 
 /// Pack `image` into a flat BE-oriented row-major byte buffer that matches
 /// the PNG wire format (before filtering / DEFLATE). `row_bytes` is the
-/// expected byte count per row.
-fn flatten_and_normalise_pixels(image: &PngImage, row_bytes: usize) -> Result<Vec<u8>> {
+/// expected byte count per row of the *wire* layout, which equals
+/// `ceil(width * bit_depth / 8)` for the sub-byte Gray / indexed cases
+/// and the source layout otherwise.
+fn flatten_and_normalise_pixels(
+    image: &PngImage,
+    ihdr: &Ihdr,
+    row_bytes: usize,
+) -> Result<Vec<u8>> {
     let h = image.height as usize;
     let w = image.width as usize;
     let stride = image.stride;
+
+    // Sub-byte: source is Gray8 / Pal8 (one byte per pixel in
+    // image.data); pack into MSB-first sub-byte cells per PNG §2.3.
+    if ihdr.bit_depth < 8 {
+        return pack_subbyte_rows(image, ihdr.bit_depth, row_bytes);
+    }
+
     let mut out = vec![0u8; row_bytes * h];
 
     match image.pixel_format {
@@ -439,6 +534,50 @@ fn flatten_and_normalise_pixels(image: &PngImage, row_bytes: usize) -> Result<Ve
                     out[y * row_bytes + i * 2 + 1] = lo;
                 }
             }
+        }
+    }
+    Ok(out)
+}
+
+/// Pack a `Gray8` / `Pal8` source buffer into sub-byte rows for
+/// PNG bit depths `1`, `2`, or `4`.
+///
+/// Each source byte (in `image.data`) is treated as the unscaled
+/// sample value or palette index in `0..=(1 << bit_depth) - 1`. Pixels
+/// are packed left-to-right with the leftmost pixel landing in the
+/// high-order bits of each output byte (PNG §2.3 / W3C PNG3 §11.1.2:
+/// "leftmost pixel in the high-order bits of a byte, the rightmost in
+/// the low-order bits"). The last byte of each row is padded with
+/// zero bits in its low-order positions when `width * bit_depth` is
+/// not a multiple of 8 (the spec marks these bits unspecified; we
+/// emit zeros for determinism).
+///
+/// A sample whose top bits exceed the `bit_depth` cap is rejected so
+/// a malformed payload cannot reach the wire.
+fn pack_subbyte_rows(image: &PngImage, bit_depth: u8, row_bytes: usize) -> Result<Vec<u8>> {
+    debug_assert!(bit_depth == 1 || bit_depth == 2 || bit_depth == 4);
+    let h = image.height as usize;
+    let w = image.width as usize;
+    let stride = image.stride;
+    let bd = bit_depth as usize;
+    let max: u8 = ((1u16 << bd) - 1) as u8;
+    let pixels_per_byte = 8 / bd;
+
+    let mut out = vec![0u8; row_bytes * h];
+    for y in 0..h {
+        let src_row = &image.data[y * stride..y * stride + w];
+        let dst_row = &mut out[y * row_bytes..(y + 1) * row_bytes];
+        for (x, &v) in src_row.iter().enumerate() {
+            if v > max {
+                return Err(Error::invalid(format!(
+                    "PNG encoder: sub-byte sample {v} at pixel ({x},{y}) exceeds \
+                     2^{bit_depth} - 1 ({max}) — callers supplying sub-byte input \
+                     must pre-quantize source samples to the target bit depth"
+                )));
+            }
+            let byte_idx = x / pixels_per_byte;
+            let shift_in_byte = (pixels_per_byte - 1 - (x % pixels_per_byte)) * bd;
+            dst_row[byte_idx] |= v << shift_in_byte;
         }
     }
     Ok(out)
@@ -581,8 +720,14 @@ pub fn encode_apng_with_options(
             ));
         }
     }
-    let (mut ihdr, row_bytes, plte, trns) = ihdr_and_row_bytes(&frames[0])?;
+    let (mut ihdr, row_bytes, plte, trns) = ihdr_and_row_bytes(&frames[0], opts)?;
     if opts.interlace {
+        if ihdr.bit_depth < 8 {
+            return Err(Error::invalid(
+                "PNG encoder: APNG interlaced encode with sub-byte \
+                 bit_depth is not implemented",
+            ));
+        }
         ihdr.interlace = 1;
     }
     // APNG shares the standalone path's tRNS resolution. The IHDR is
@@ -627,7 +772,7 @@ pub fn encode_apng_with_options(
         write_chunk(&mut out, b"fcTL", &fctl.to_bytes());
         seq += 1;
 
-        let raw = flatten_and_normalise_pixels(frame, row_bytes)?;
+        let raw = flatten_and_normalise_pixels(frame, &ihdr, row_bytes)?;
         let compressed = if opts.interlace {
             deflate_encode_pixels_adam7(&raw, ihdr.width as usize, ihdr.height as usize, &ihdr)?
         } else {

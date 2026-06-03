@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Sub-byte encode for colour type 0 (grayscale) and colour type 3
+  (indexed) at bit depths 1, 2, and 4. Opt-in via the new
+  `PngEncoderOptions::bit_depth: Option<u8>` field (also reachable
+  through the registry-side `CodecParameters::options` schema as a
+  `u32` named `"bit_depth"`, with `0` standing for "leave native"). On
+  `Gray8` and `Pal8` sources only — the RFC 2083 §11.2.2 allowed-
+  combinations table forbids sub-byte depths on colour types 2 / 4 / 6,
+  so any other source `PngPixelFormat` paired with a sub-byte option
+  is rejected as an encode error. Each source byte is treated as a
+  pre-quantized sample value or palette index in
+  `0..=(1 << bit_depth) - 1`; an over-range sample is rejected ahead of
+  the wire so the encoder cannot emit a payload whose high bits would
+  spill into a neighbouring pixel after the bit-pack. Packing follows
+  PNG §2.3 / W3C PNG3 §11.1.2: pixels lie left-to-right with the
+  leftmost pixel in the high-order bits of each byte, the rightmost in
+  the low-order bits. Rows whose pixel count is not a multiple of
+  `8 / bit_depth` (the spec's "Scanlines always begin on byte
+  boundaries" rule) get the trailing byte's low-order positions
+  zero-padded for deterministic output; §2.3 marks these padding bits
+  unspecified. The on-wire row count is `ceil(width * bit_depth / 8)`
+  per the spec; the §6 filters operate on the packed bytes (`bpp = 1`
+  per the existing `Ihdr::bpp_for_filter` rule for sub-byte depths,
+  matching the decoder's reconstruction path). APNG sub-byte encode
+  rides the same path — the IHDR is fixed across the whole APNG, so a
+  single `bit_depth` covers every frame.
+  Closes the long-standing "Not preserved: sub-byte encode (decode
+  only — encoder always writes 8/16-bit)" line in the crate README.
+  Adam7 interlaced sub-byte encode (`interlace = true` paired with a
+  sub-byte `bit_depth`) is rejected with a clear error for now — each
+  pass would need its own sub-byte pack, deferred to a follow-up round.
+  Non-interlaced sub-byte and Adam7-with-`bit_depth: None` encode are
+  both supported, including the round-trip through the standalone
+  `decode_png` path (1-bit gray ×255, 2-bit ×85, 4-bit ×17 §13.12
+  scale-up on the decode side). 23 new integration tests in
+  `tests/subbyte_encode.rs` cover the gray + indexed round-trip at
+  every depth (multiple-of-byte and odd widths each), the IHDR
+  bit-depth field placement, the MSB-first packing on a known 8-pixel
+  source, the four negative cases (RGB / RGBA source rejection;
+  over-range sample rejection; bit_depth = `0/3/5/6/7/9/16/32`
+  rejection; interlace + sub-byte rejection), the `bit_depth = Some(8)`
+  no-op behaviour for `Gray8` / `Pal8`, and an APNG sub-byte 2-frame
+  round-trip. The registry-side `CodecOptionsStruct` schema grows a
+  second `OptionField` so framework-side callers can request sub-byte
+  encode through the same string-typed `CodecParameters::options` map
+  the rest of the codec set uses.
+
 - `tRNS` (simple transparency, RFC 2083 §4.2.9 / W3C PNG3 §11.3.1.1)
   round-trip via `PngMetadata::trns`. Closes the long-standing
   "Not preserved: `tRNS` chunk emission for ct=0 / ct=2" line in the

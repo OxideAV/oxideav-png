@@ -29,9 +29,17 @@
 //! * Adam7 seven-pass interlaced encode, opt-in via
 //!   [`encoder::PngEncoderOptions`]`::interlace` (or
 //!   `CodecParameters::options` key `"interlace"`).
+//! * Sub-byte encode (1, 2, 4-bit) for colour type 0 (grayscale) and
+//!   colour type 3 (indexed), opt-in via
+//!   [`encoder::PngEncoderOptions`]`::bit_depth`. Source is a `Gray8`
+//!   or `Pal8` buffer with each byte already pre-quantized to
+//!   `0..=(1 << bit_depth) - 1`; pixels pack MSB-first per PNG §2.3.
+//!   The interlaced + sub-byte combination is not yet implemented and
+//!   is rejected as an encode error rather than producing wrong bytes.
 //!
 //! Not implemented:
-//! * Sub-byte encode (decode only — encoder always writes 8/16-bit)
+//! * Adam7 interlaced sub-byte encode (one of `interlace = true` and
+//!   `bit_depth = Some(1 | 2 | 4)`, not both)
 //! * Round-tripped metadata: `sBIT`, `pHYs`, `tIME`, `bKGD`, `hIST`,
 //!   `tRNS`, `eXIf`, `sRGB`, `cICP`, `iCCP`, `mDCV`, `cLLI`, `sPLT`,
 //!   `tEXt`, `zTXt`, `iTXt` —

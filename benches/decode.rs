@@ -291,6 +291,7 @@ fn encode_with_metadata(image: &PngImage) -> Vec<u8> {
     let opts = PngEncoderOptions {
         interlace: false,
         metadata: Some(metadata),
+        bit_depth: None,
     };
     oxideav_png::encode_png_image_with_options(image, &opts).expect("encode_png_image_with_options")
 }

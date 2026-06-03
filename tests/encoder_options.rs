@@ -10,12 +10,34 @@ use oxideav_core::{
 };
 use oxideav_png::PngEncoderOptions;
 
-/// The schema the PNG encoder advertises. Exactly one field, `interlace`.
+/// The schema the PNG encoder advertises: `interlace` (bool) and
+/// `bit_depth` (u32; 0 = native, 1/2/4 = sub-byte for Gray8 / Pal8,
+/// 8 = no-op for those sources).
 #[test]
-fn schema_advertises_interlace() {
+fn schema_advertises_interlace_and_bit_depth() {
     let schema = <PngEncoderOptions as CodecOptionsStruct>::SCHEMA;
-    assert_eq!(schema.len(), 1);
+    assert_eq!(schema.len(), 2);
     assert_eq!(schema[0].name, "interlace");
+    assert_eq!(schema[1].name, "bit_depth");
+}
+
+/// `bit_depth` accepts a u32 and threads through into
+/// `PngEncoderOptions::bit_depth: Option<u8>`. The `0` sentinel maps
+/// to `None` (= leave native), every other in-range value becomes
+/// `Some(value)`.
+#[test]
+fn parse_from_bag_sets_bit_depth() {
+    for (raw, expected) in [
+        ("0", None),
+        ("1", Some(1u8)),
+        ("2", Some(2)),
+        ("4", Some(4)),
+        ("8", Some(8)),
+    ] {
+        let opts = CodecOptions::new().set("bit_depth", raw);
+        let parsed = parse_options::<PngEncoderOptions>(&opts).expect("parse");
+        assert_eq!(parsed.bit_depth, expected, "bit_depth = {raw}");
+    }
 }
 
 #[test]

@@ -312,6 +312,7 @@ fn bench_encode_rgba_adam7_320x240(c: &mut Criterion) {
     let opts = PngEncoderOptions {
         interlace: true,
         metadata: None,
+        bit_depth: None,
     };
     let mut g = c.benchmark_group("encode_rgba_adam7_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));

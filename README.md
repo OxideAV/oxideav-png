@@ -37,6 +37,19 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
 
 - 8-bit: `Rgba`, `Rgb24`, `Gray8`, `Pal8`, `Ya8`
 - 16-bit: `Rgb48Le`, `Rgba64Le`, `Gray16Le`
+- Sub-byte (1, 2, 4-bit) for colour type 0 (grayscale) and colour type 3
+  (indexed), opt-in via `PngEncoderOptions::bit_depth` — accepted on
+  `Gray8` / `Pal8` sources only, mirroring the RFC 2083 §11.2.2
+  allowed-combinations table (colour types 2 / 4 / 6 reject sub-byte
+  depths). Source bytes are treated as already pre-quantized to
+  `0..=(1 << bit_depth) - 1`; an over-range sample is an encode error
+  ahead of the wire. Pixels pack MSB-first with the leftmost pixel in
+  the high-order bits of each output byte (§2.3). Rows whose pixel
+  count does not divide `8 / bit_depth` get the trailing byte's
+  low-order bits zero-padded for determinism (§2.3 "the contents of
+  these wasted bits are unspecified"). The encoder rejects
+  `interlace + sub-byte` for now (Adam7 pass-sub-image sub-byte
+  packing not yet implemented).
 - Per-row filter heuristic (min-sum-abs-delta per §12.8)
 - APNG output when multiple frames submitted or `frame_rate` is set
 
@@ -237,8 +250,11 @@ instances are explicitly permitted (§4.2.7 ¶3 / §4.2.10 ¶6 /
 
 ## Not preserved
 
-- Adam7 interlaced encode (decode only — encoder always writes non-interlaced)
-- Sub-byte encode (decode only — encoder always writes 8/16-bit)
+- Adam7 interlaced sub-byte encode — `interlace = true` combined with
+  `bit_depth = Some(1 | 2 | 4)` is rejected at encode time. Each Adam7
+  pass would need its own sub-byte pack; deferred to a follow-up round.
+  Non-interlaced sub-byte encode and `bit_depth = None` Adam7 encode
+  are both supported.
 
 ## Robustness
 

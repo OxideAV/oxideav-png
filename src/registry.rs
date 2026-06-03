@@ -106,15 +106,35 @@ fn png_image_to_video_frame(image: &PngImage, pts: Option<i64>) -> VideoFrame {
 // ---- CodecOptionsStruct (registry-only schema for PngEncoderOptions) ----
 
 impl CodecOptionsStruct for PngEncoderOptions {
-    const SCHEMA: &'static [OptionField] = &[OptionField {
-        name: "interlace",
-        kind: OptionKind::Bool,
-        default: OptionValue::Bool(false),
-        help: "Emit an Adam7 seven-pass interlaced PNG stream (IHDR.interlace = 1)",
-    }];
+    const SCHEMA: &'static [OptionField] = &[
+        OptionField {
+            name: "interlace",
+            kind: OptionKind::Bool,
+            default: OptionValue::Bool(false),
+            help: "Emit an Adam7 seven-pass interlaced PNG stream (IHDR.interlace = 1)",
+        },
+        OptionField {
+            name: "bit_depth",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(0),
+            help: "Sub-byte IHDR bit depth (1, 2, or 4). \
+                   Only valid for Gray8 / Pal8 sources. \
+                   8 is a no-op for those sources. \
+                   0 (the default) keeps the source format's native depth.",
+        },
+    ];
     fn apply(&mut self, key: &str, v: &OptionValue) -> oxideav_core::Result<()> {
         match key {
             "interlace" => self.interlace = v.as_bool()?,
+            "bit_depth" => {
+                let raw = v.as_u32()?;
+                // `0` is the sentinel for "leave it at the source's native
+                // depth" — matches `bit_depth: None`. The actual range
+                // validation happens at encode time in `resolve_bit_depth`,
+                // so a bogus value here surfaces as a clear encode error
+                // rather than getting silently rewritten.
+                self.bit_depth = if raw == 0 { None } else { Some(raw as u8) };
+            }
             _ => unreachable!("guarded by SCHEMA"),
         }
         Ok(())
