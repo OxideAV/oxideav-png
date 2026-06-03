@@ -33,8 +33,8 @@
 //! Not implemented:
 //! * Sub-byte encode (decode only — encoder always writes 8/16-bit)
 //! * Round-tripped metadata: `sBIT`, `pHYs`, `tIME`, `bKGD`, `hIST`,
-//!   `eXIf`, `sRGB`, `cICP`, `iCCP`, `mDCV`, `cLLI`, `sPLT`, `tEXt`,
-//!   `zTXt`, `iTXt` —
+//!   `tRNS`, `eXIf`, `sRGB`, `cICP`, `iCCP`, `mDCV`, `cLLI`, `sPLT`,
+//!   `tEXt`, `zTXt`, `iTXt` —
 //!   surfaced via [`parse_metadata`] on decode and re-emitted by the
 //!   encoder when [`PngEncoderOptions::metadata`] is populated. `eXIf`
 //!   is carried as an opaque (TIFF-header-validated) blob; `sRGB`
@@ -52,12 +52,17 @@
 //!   language tag and an optional zlib-compressed UTF-8 text body
 //!   (W3C PNG3 §11.3.3.4). All three text-chunk types may repeat with
 //!   identical keywords.
-//! * `tRNS` chunk emission for colour type 0 (grayscale) / colour type 2
-//!   (truecolor). Decode applies the chunk during [`decode_png_to_rgba`]
-//!   per RFC 2083 §4.2.9 (single transparent gray sample or RGB triple,
-//!   compared at the source bit depth so the §4.2.9 note about both
-//!   bytes of a 16-bit sample holds); the standalone encoder still only
-//!   carries per-entry alpha for `Pal8` via the palette tail.
+//!   `tRNS` is round-tripped through [`PngMetadata::trns`] for colour
+//!   types 0 (grayscale) / 2 (truecolor) / 3 (indexed); the variant
+//!   matches the IHDR colour type ([`Trns::Grayscale`] / [`Trns::Rgb`]
+//!   / [`Trns::Palette`]), colour types 4 and 6 are rejected (a full
+//!   alpha channel is already present per RFC 2083 §4.2.9 final
+//!   paragraph), and the encoder errors if both [`PngMetadata::trns`]
+//!   and the legacy `image.palette` `PLTE || tRNS` tail are present
+//!   (W3C PNG3 §5.6 Table 1 "Multiple OK? No"). Decode-side keyed-
+//!   transparency promotion still happens in [`decode_png_to_rgba`]
+//!   per §4.2.9 (both bytes of a 16-bit sample compared before the
+//!   8-bit truncation).
 //!
 //! ## Standalone (no `oxideav-core`) mode
 //!
@@ -101,7 +106,7 @@ pub use error::{PngError, Result};
 pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
 pub use metadata::{
     Bkgd, Chrm, Cicp, Clli, Exif, Gama, Hist, Iccp, Itxt, Mdcv, Phys, PhysUnit, PngMetadata,
-    RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time, Ztxt,
+    RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time, Trns, Ztxt,
 };
 
 // Public registry-gated API — keeps the framework integration surface

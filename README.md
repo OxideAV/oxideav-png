@@ -60,6 +60,23 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
 - `hIST` (palette histogram, RFC 2083 §4.2.4 / W3C PNG3 §11.3.4.2) —
   one `u16` per `PLTE` entry; the entry count must match exactly.
   Requires `PLTE` to be present (decode rejects orphan `hIST`).
+- `tRNS` (simple transparency, RFC 2083 §4.2.9 / W3C PNG3 §11.3.1.1) —
+  per-IHDR-colour-type variant (`Grayscale(u16)` for ct=0, `Rgb(u16,
+  u16, u16)` for ct=2, `Palette(Vec<u8>)` for ct=3). Encoder honours
+  `PngMetadata::trns` for ct=0/ct=2 keyed-sample emission (closes the
+  long-standing "Not preserved" entry) and accepts a ct=3 alpha table
+  too; for backwards-compat the `Pal8` path still routes the alpha
+  tail through `image.palette = PLTE || tRNS`, and supplying *both*
+  sources is an explicit encode error since a file can carry at most
+  one `tRNS` chunk (PNG3 §5.6 Table 1 "Multiple OK? No"). Variant /
+  IHDR colour-type mismatch (e.g. `Rgb` on `Gray8`) and keyed-sample
+  values past `(1 << bit_depth) - 1` are encode errors so a malformed
+  payload cannot reach the wire. Decode rejects `tRNS` outright on
+  ct=4/ct=6 ("prohibited" per §4.2.9 final paragraph). 16-bit keyed
+  samples preserve both bytes through the round-trip per §4.2.9 note
+  (`0x0001` keyed transparent must NOT flag `0x0002` as transparent
+  too). Emitted "After PLTE; before IDAT" per §5.6 Table 1; emission
+  ordering pins land in a dedicated test.
 - `eXIf` (Exif profile, W3C PNG3 §11.3.4.5) — carried as an opaque
   TIFF blob. Decode validates only the byte-order header (`II`/42 LE
   or `MM`/42 BE, §11.3.4.5.2) and round-trips the bytes verbatim; the
@@ -207,8 +224,10 @@ supported field populated for any chunks present. Encode:
 fields are emitted at spec-compliant chunk positions (`cICP` / `iCCP` /
 `sBIT` / `sRGB` / `gAMA` / `cHRM` / `mDCV` / `cLLI` before
 `PLTE`/`IDAT`, the four §4.3 colour-priority chunks first then the
-HDR-side colour-volume pair; `bKGD` / `hIST` after `PLTE`, before
-`IDAT`; `pHYs`, `tIME`, `eXIf`, `sPLT`, `tEXt`, `zTXt`, and `iTXt`
+HDR-side colour-volume pair; `bKGD` / `hIST` / `tRNS` after `PLTE`,
+before `IDAT` (`tRNS` shares the post-PLTE slot per RFC 2083 §4.2.9
+"must precede the first IDAT chunk, and must follow the PLTE chunk,
+if any"); `pHYs`, `tIME`, `eXIf`, `sPLT`, `tEXt`, `zTXt`, and `iTXt`
 before `IDAT`). Single-instance chunks are rejected on decode if
 repeated (the "Multiple OK? No" rule in RFC 2083 §4.3 / W3C PNG3
 §5.6); `sPLT` requires distinct palette names; `tEXt`, `zTXt`, and
@@ -220,9 +239,6 @@ instances are explicitly permitted (§4.2.7 ¶3 / §4.2.10 ¶6 /
 
 - Adam7 interlaced encode (decode only — encoder always writes non-interlaced)
 - Sub-byte encode (decode only — encoder always writes 8/16-bit)
-- `tRNS` chunk emission for ct=0 / ct=2 (decode applies it during
-  `decode_png_to_rgba`; the standalone encoder still only carries
-  per-entry alpha for `Pal8` via the palette tail)
 
 ## Robustness
 

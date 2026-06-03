@@ -600,6 +600,167 @@ impl Bkgd {
     }
 }
 
+/// `tRNS` payload (RFC 2083 §4.2.9 / W3C PNG3 §11.3.1.1).
+///
+/// "Simple transparency" — either a single keyed source sample (for
+/// grayscale and truecolor) or a per-palette-entry alpha table (for
+/// indexed). The variant matches the IHDR colour type:
+///
+/// | Colour type     | Variant                  | On-wire length            |
+/// |-----------------|--------------------------|---------------------------|
+/// | 0 (grayscale)   | [`Self::Grayscale`]      | 2 bytes                   |
+/// | 2 (truecolor)   | [`Self::Rgb`]            | 6 bytes                   |
+/// | 3 (indexed)     | [`Self::Palette`]        | 1..=PLTE-entry-count bytes|
+/// | 4 / 6 (already-α) | not representable      | rejected on parse         |
+///
+/// For colour types 0 and 2 the spec stores the keyed sample as a
+/// 2-byte big-endian value regardless of IHDR `bit_depth` "for
+/// consistency", capping the value at `(2^bit_depth) - 1`. The match
+/// against image samples is performed at the source bit depth, so the
+/// §4.2.9 note about both bytes of a 16-bit sample holds (a 16-bit
+/// gray of `0x0001` keyed transparent must not flag `0x0002`).
+///
+/// For colour type 3 the chunk carries one `u8` alpha per `PLTE` entry,
+/// strictly fewer-or-equal — missing trailing entries are opaque
+/// (RFC 2083 §4.2.9 "alpha value for all remaining palette entries is
+/// assumed to be 255"). The decoder accepts a one-byte chunk that only
+/// addresses palette index 0.
+///
+/// `tRNS` is "Multiple OK? No" (PNG3 §5.6 Table 1); a duplicate is an
+/// `InvalidData` error. Ordering: "After PLTE; before IDAT" — the
+/// encoder emits the chunk in the same slot as `bKGD`/`hIST`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Trns {
+    /// Colour type 0: a single transparent gray sample, stored as a
+    /// `u16` at the IHDR bit depth's natural range. Sample values that
+    /// match this exactly emerge from `decode_png_to_rgba` with α=0.
+    Grayscale(u16),
+    /// Colour type 2: a single transparent RGB sample triple, each
+    /// channel a `u16` at the IHDR bit depth's natural range.
+    Rgb(u16, u16, u16),
+    /// Colour type 3: alpha tail, one entry per (leading) `PLTE` entry.
+    /// Trailing palette entries the table does not cover are opaque
+    /// (α=255). Minimum length 1 byte; maximum the `PLTE` entry count.
+    Palette(Vec<u8>),
+}
+
+impl Trns {
+    /// Parse a `tRNS` chunk. `colour_type` selects the variant per
+    /// RFC 2083 §4.2.9. `bit_depth` is the IHDR `bit_depth`; for colour
+    /// types 0 and 2 it bounds-checks the keyed sample so the high bits
+    /// beyond `bit_depth` are zero (§4.2.9 "range 0 .. (2^bitdepth)-1").
+    /// `palette_entries` is the `PLTE`-derived entry count and is
+    /// honoured only when `colour_type == 3` (where the chunk's length
+    /// must not exceed it).
+    ///
+    /// Colour types 4 and 6 are rejected — RFC 2083 §4.2.9 final
+    /// paragraph "tRNS is prohibited for color types 4 and 6, since a
+    /// full alpha channel is already present in those cases".
+    pub fn parse(
+        data: &[u8],
+        colour_type: u8,
+        bit_depth: u8,
+        palette_entries: Option<usize>,
+    ) -> Result<Self> {
+        match colour_type {
+            0 => {
+                if data.len() != 2 {
+                    return Err(Error::invalid(format!(
+                        "PNG tRNS (colour type 0): expected 2 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let v = u16::from_be_bytes([data[0], data[1]]);
+                let max = (1u32 << bit_depth) - 1;
+                if (v as u32) > max {
+                    return Err(Error::invalid(format!(
+                        "PNG tRNS (colour type 0, bit depth {bit_depth}): \
+                         gray value {v} exceeds {max}"
+                    )));
+                }
+                Ok(Self::Grayscale(v))
+            }
+            2 => {
+                if data.len() != 6 {
+                    return Err(Error::invalid(format!(
+                        "PNG tRNS (colour type 2): expected 6 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let max = (1u32 << bit_depth) - 1;
+                let r = u16::from_be_bytes([data[0], data[1]]);
+                let g = u16::from_be_bytes([data[2], data[3]]);
+                let b = u16::from_be_bytes([data[4], data[5]]);
+                for (name, v) in [("R", r), ("G", g), ("B", b)] {
+                    if (v as u32) > max {
+                        return Err(Error::invalid(format!(
+                            "PNG tRNS (colour type 2, bit depth {bit_depth}): \
+                             {name} value {v} exceeds {max}"
+                        )));
+                    }
+                }
+                Ok(Self::Rgb(r, g, b))
+            }
+            3 => {
+                let n = palette_entries.ok_or_else(|| {
+                    Error::invalid("PNG tRNS (colour type 3): missing PLTE chunk")
+                })?;
+                if data.is_empty() {
+                    return Err(Error::invalid(
+                        "PNG tRNS (colour type 3): empty payload (need ≥1 alpha entry)",
+                    ));
+                }
+                if data.len() > n {
+                    return Err(Error::invalid(format!(
+                        "PNG tRNS (colour type 3): {} alpha values exceed {n} PLTE entries",
+                        data.len()
+                    )));
+                }
+                Ok(Self::Palette(data.to_vec()))
+            }
+            4 | 6 => Err(Error::invalid(format!(
+                "PNG tRNS: prohibited for colour type {colour_type} \
+                 (alpha channel already present)"
+            ))),
+            other => Err(Error::invalid(format!(
+                "PNG tRNS: colour type {other} has no defined layout"
+            ))),
+        }
+    }
+
+    /// Emit the on-wire payload.
+    ///
+    /// * `Grayscale(v)` — 2 bytes, big-endian.
+    /// * `Rgb(r, g, b)` — 6 bytes, three big-endian `u16`s.
+    /// * `Palette(alphas)` — `alphas.len()` bytes (`1..=PLTE` entry
+    ///   count; the caller is responsible for matching the size to the
+    ///   image's `PLTE` and stripping trailing 255s if it cares about
+    ///   minimum on-wire size).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::Grayscale(v) => v.to_be_bytes().to_vec(),
+            Self::Rgb(r, g, b) => {
+                let mut out = Vec::with_capacity(6);
+                out.extend_from_slice(&r.to_be_bytes());
+                out.extend_from_slice(&g.to_be_bytes());
+                out.extend_from_slice(&b.to_be_bytes());
+                out
+            }
+            Self::Palette(alphas) => alphas.clone(),
+        }
+    }
+
+    /// True when the IHDR colour type is one this variant maps to. Used
+    /// by the encoder so an `Rgb` `tRNS` on a grayscale image surfaces
+    /// as an explicit error rather than emitting nonsense on the wire.
+    pub fn matches_colour_type(&self, colour_type: u8) -> bool {
+        matches!(
+            (self, colour_type),
+            (Self::Grayscale(_), 0) | (Self::Rgb(..), 2) | (Self::Palette(_), 3)
+        )
+    }
+}
+
 /// `hIST` payload (RFC 2083 §4.2.4 / W3C PNG3 §11.3.4.2).
 ///
 /// One `u16` frequency per `PLTE` entry. Zero means "palette index unused
@@ -2014,6 +2175,15 @@ pub struct PngMetadata {
     pub time: Option<Time>,
     pub bkgd: Option<Bkgd>,
     pub hist: Option<Hist>,
+    /// `tRNS` simple-transparency chunk (RFC 2083 §4.2.9 / W3C PNG3
+    /// §11.3.1.1). On decode the variant matches the IHDR colour type:
+    /// `Grayscale` for ct=0, `Rgb` for ct=2, `Palette` for ct=3. Colour
+    /// types 4 / 6 are rejected outright (a full alpha channel is
+    /// already present). The encoder emits this chunk for ct=0 / ct=2
+    /// inputs (`Pal8` ct=3 still rides via `image.palette`'s `PLTE ||
+    /// tRNS` tail for backwards-compat; setting both is a duplicate-
+    /// emission error).
+    pub trns: Option<Trns>,
     pub exif: Option<Exif>,
     pub srgb: Option<Srgb>,
     pub cicp: Option<Cicp>,
@@ -2075,6 +2245,7 @@ impl PngMetadata {
             && self.time.is_none()
             && self.bkgd.is_none()
             && self.hist.is_none()
+            && self.trns.is_none()
             && self.exif.is_none()
             && self.srgb.is_none()
             && self.cicp.is_none()
@@ -2411,6 +2582,157 @@ mod tests {
         // but not a spec violation in itself).
         let h = Hist::parse(&[], 0).unwrap();
         assert!(h.frequencies.is_empty());
+    }
+
+    #[test]
+    fn trns_grayscale_roundtrip_8bit() {
+        // §4.2.9: ct=0, exactly 2 bytes BE, must fit (1<<bit_depth)-1.
+        let t = Trns::Grayscale(0x00FE);
+        let b = t.to_bytes();
+        assert_eq!(b, vec![0x00, 0xFE]);
+        let back = Trns::parse(&b, 0, 8, None).unwrap();
+        assert_eq!(back, t);
+        assert!(t.matches_colour_type(0));
+        assert!(!t.matches_colour_type(2));
+    }
+
+    #[test]
+    fn trns_grayscale_roundtrip_16bit() {
+        let t = Trns::Grayscale(0xBEEF);
+        let b = t.to_bytes();
+        assert_eq!(b, vec![0xBE, 0xEF]);
+        let back = Trns::parse(&b, 0, 16, None).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn trns_grayscale_value_exceeding_bit_depth_rejected() {
+        // 4-bit IHDR ⇒ max gray sample 15; 16 is out of range.
+        let err = Trns::parse(&[0, 16], 0, 4, None).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn trns_grayscale_wrong_length_rejected() {
+        // §4.2.9: 2 bytes regardless of bit_depth. 1 byte is malformed.
+        let err = Trns::parse(&[0xFF], 0, 8, None).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+        let err = Trns::parse(&[0, 0, 0], 0, 8, None).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn trns_rgb_roundtrip_8bit() {
+        // §4.2.9: ct=2, six BE bytes (R/G/B each u16).
+        let t = Trns::Rgb(0x00FF, 0x0000, 0x0080);
+        let b = t.to_bytes();
+        assert_eq!(b, vec![0x00, 0xFF, 0x00, 0x00, 0x00, 0x80]);
+        let back = Trns::parse(&b, 2, 8, None).unwrap();
+        assert_eq!(back, t);
+        assert!(t.matches_colour_type(2));
+        assert!(!t.matches_colour_type(0));
+    }
+
+    #[test]
+    fn trns_rgb_roundtrip_16bit() {
+        let t = Trns::Rgb(0xDEAD, 0xBEEF, 0xCAFE);
+        let b = t.to_bytes();
+        assert_eq!(b.len(), 6);
+        let back = Trns::parse(&b, 2, 16, None).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn trns_rgb_channel_exceeding_bit_depth_rejected() {
+        // 8-bit IHDR; G sample stored as 0x0100 (256) is out of range.
+        let mut bad = vec![0x00, 0xFF, 0x01, 0x00, 0x00, 0xFF];
+        let err = Trns::parse(&bad, 2, 8, None).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+        bad[2] = 0x00;
+        bad[3] = 0xFF;
+        // Now all three within range.
+        assert!(Trns::parse(&bad, 2, 8, None).is_ok());
+    }
+
+    #[test]
+    fn trns_rgb_wrong_length_rejected() {
+        let err = Trns::parse(&[0; 5], 2, 8, None).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+        let err = Trns::parse(&[0; 7], 2, 8, None).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn trns_palette_full_length_roundtrip() {
+        // §4.2.9: ct=3, one byte per PLTE entry, length ≤ PLTE entry count.
+        let t = Trns::Palette(vec![0, 64, 128, 255]);
+        let b = t.to_bytes();
+        assert_eq!(b, vec![0, 64, 128, 255]);
+        let back = Trns::parse(&b, 3, 8, Some(4)).unwrap();
+        assert_eq!(back, t);
+        assert!(t.matches_colour_type(3));
+    }
+
+    #[test]
+    fn trns_palette_shorter_than_plte_accepted() {
+        // §4.2.9: "In the common case in which only palette index 0
+        // need be made transparent, only a one-byte tRNS chunk is needed."
+        let t = Trns::parse(&[0], 3, 8, Some(16)).unwrap();
+        assert_eq!(t, Trns::Palette(vec![0]));
+    }
+
+    #[test]
+    fn trns_palette_exceeding_plte_count_rejected() {
+        // §4.2.9: "The tRNS chunk must not contain more alpha values
+        // than there are palette entries."
+        let err = Trns::parse(&[0, 64, 128, 255, 200], 3, 8, Some(4)).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn trns_palette_without_plte_rejected() {
+        // No PLTE on a ct=3 file ⇒ tRNS has nothing to address.
+        let err = Trns::parse(&[0], 3, 8, None).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn trns_palette_empty_payload_rejected() {
+        let err = Trns::parse(&[], 3, 8, Some(4)).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn trns_prohibited_on_ct4_and_ct6() {
+        // §4.2.9 final paragraph: ct=4 / ct=6 already have a full alpha
+        // channel; tRNS is "prohibited" — InvalidData regardless of
+        // payload content.
+        let err = Trns::parse(&[0, 0], 4, 8, None).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+        let err = Trns::parse(&[0; 6], 6, 8, None).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn trns_unknown_colour_type_rejected() {
+        // Spec defines layouts for ct ∈ {0,2,3,4,6}; ct=1/5/7 etc. is a
+        // non-conforming IHDR but Trns::parse must still refuse to
+        // synthesise a payload for it.
+        let err = Trns::parse(&[0, 0], 1, 8, None).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn trns_matches_colour_type_table() {
+        // Quick sanity check on the discriminator helper the encoder
+        // uses to refuse cross-variant emission.
+        assert!(Trns::Grayscale(0).matches_colour_type(0));
+        assert!(!Trns::Grayscale(0).matches_colour_type(2));
+        assert!(!Trns::Grayscale(0).matches_colour_type(3));
+        assert!(Trns::Rgb(0, 0, 0).matches_colour_type(2));
+        assert!(!Trns::Rgb(0, 0, 0).matches_colour_type(0));
+        assert!(Trns::Palette(vec![0]).matches_colour_type(3));
+        assert!(!Trns::Palette(vec![0]).matches_colour_type(0));
     }
 
     #[test]

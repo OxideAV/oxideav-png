@@ -46,7 +46,7 @@ use crate::chunk::{read_chunk, ChunkRef, PNG_MAGIC};
 use crate::filter::{unfilter_row, FilterType};
 use crate::metadata::{
     Bkgd, Chrm, Cicp, Clli, Exif, Gama, Hist, Iccp, Itxt, Mdcv, Phys, PngMetadata, Sbit, Splt,
-    Srgb, Text, Time, Ztxt,
+    Srgb, Text, Time, Trns, Ztxt,
 };
 
 pub const CODEC_ID_STR: &str = "png";
@@ -331,6 +331,23 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                     Error::invalid("PNG hIST: chunk requires a PLTE chunk (PNG3 §11.3.4.2)")
                 })?;
                 out.hist = Some(Hist::parse(c.data, n)?);
+            }
+            b"tRNS" => {
+                // W3C PNG3 §5.6 Table 1: tRNS is "Multiple OK? No".
+                // RFC 2083 §4.2.9 forbids the chunk on colour types 4 / 6
+                // and constrains the variant to the IHDR colour type
+                // (Trns::parse enforces both). For colour type 3 the
+                // chunk length is bounded by the PLTE entry count;
+                // missing PLTE on ct=3 is itself an error.
+                if out.trns.is_some() {
+                    return Err(Error::invalid("PNG: duplicate tRNS chunk"));
+                }
+                out.trns = Some(Trns::parse(
+                    c.data,
+                    ihdr.colour_type,
+                    ihdr.bit_depth,
+                    plte_entries,
+                )?);
             }
             b"eXIf" => {
                 if out.exif.is_some() {

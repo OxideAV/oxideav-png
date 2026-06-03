@@ -5,7 +5,8 @@
 use oxideav_png::{
     decode_png, encode_png_image, encode_png_image_with_options, parse_metadata, Bkgd, Chrm, Cicp,
     Clli, Exif, Gama, Hist, Iccp, Itxt, Mdcv, Phys, PhysUnit, PngEncoderOptions, PngImage,
-    PngMetadata, PngPixelFormat, RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time, Ztxt,
+    PngMetadata, PngPixelFormat, RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time, Trns,
+    Ztxt,
 };
 
 fn rgba_2x2() -> PngImage {
@@ -196,6 +197,11 @@ fn all_three_chunks_roundtrip() {
         // (no PLTE on RGBA).
         bkgd: Some(Bkgd::Rgb(255, 255, 255)),
         hist: None,
+        // tRNS is prohibited on ct=6 (full alpha channel present per
+        // RFC 2083 §4.2.9 final paragraph). The "all chunks" fixture
+        // omits it for that reason; a dedicated ct=0/ct=2 round-trip
+        // test below covers the on-wire path.
+        trns: None,
         exif: None,
         srgb: Some(Srgb {
             rendering_intent: RenderingIntent::Saturation,
@@ -2450,4 +2456,298 @@ fn clli_zero_unknown_sentinel_roundtrips() {
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.clli, Some(clli));
+}
+
+// ---- tRNS round-trip (RFC 2083 §4.2.9 / W3C PNG3 §11.3.1.1) ------------
+
+/// Helper: build a 4×1 `Rgb24` image with the four canonical primaries
+/// (red, green, blue, white). Stride matches `3 * width` since the data
+/// is tightly packed.
+fn rgb24_4x1() -> PngImage {
+    PngImage {
+        width: 4,
+        height: 1,
+        pixel_format: PngPixelFormat::Rgb24,
+        stride: 12,
+        data: vec![
+            255, 0, 0, // red
+            0, 255, 0, // green
+            0, 0, 255, // blue
+            255, 255, 255, // white
+        ],
+        palette: Vec::new(),
+    }
+}
+
+/// Helper: build a 2×1 `Gray16Le` image. `Gray16Le` per [`PngPixelFormat`]
+/// stores each sample as two little-endian bytes; the encoder swaps them
+/// to big-endian when packing the IDAT.
+fn gray16le_2x1() -> PngImage {
+    PngImage {
+        width: 2,
+        height: 1,
+        pixel_format: PngPixelFormat::Gray16Le,
+        stride: 4,
+        data: vec![0x00, 0x10, 0xFF, 0x80],
+        palette: Vec::new(),
+    }
+}
+
+#[test]
+fn trns_gray_keyed_sample_roundtrips_through_encoder() {
+    // ct=0, 8-bit: encode a grayscale image with a keyed-sample tRNS,
+    // re-parse, expect the same Trns::Grayscale(v) back.
+    let img = gray8_2x2();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            trns: Some(Trns::Grayscale(64)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.trns, Some(Trns::Grayscale(64)));
+    // The decoder must still round-trip the pixels.
+    let img_back = decode_png(&bytes).expect("decode");
+    assert_eq!(img_back.pixel_format, PngPixelFormat::Gray8);
+    assert_eq!(img_back.data, img.data);
+}
+
+#[test]
+fn trns_rgb_keyed_sample_roundtrips_through_encoder() {
+    // ct=2, 8-bit: a keyed RGB triple round-trips byte-for-byte.
+    let img = rgb24_4x1();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            trns: Some(Trns::Rgb(255, 0, 0)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.trns, Some(Trns::Rgb(255, 0, 0)));
+    let img_back = decode_png(&bytes).expect("decode");
+    assert_eq!(img_back.pixel_format, PngPixelFormat::Rgb24);
+    assert_eq!(img_back.data, img.data);
+}
+
+#[test]
+fn trns_gray16_keyed_sample_preserves_both_bytes() {
+    // §4.2.9 note: "if the grayscale level 0x0001 is specified to be
+    // transparent, it would be incorrect to compare only the high-order
+    // byte and decide that 0x0002 is also transparent." The encoder must
+    // store both bytes; the parse path returns them unchanged.
+    let img = gray16le_2x1();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            trns: Some(Trns::Grayscale(0x0001)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.trns, Some(Trns::Grayscale(0x0001)));
+}
+
+#[test]
+fn trns_palette_table_routed_via_metadata_round_trips() {
+    // ct=3: the long-standing path is image.palette = `PLTE || tRNS`,
+    // but the new metadata.trns field also accepts the alpha table. A
+    // Pal8 image with an EMPTY palette tail (no per-entry alpha) plus
+    // a metadata.trns table must produce the same on-wire result as
+    // the legacy path.
+    let mut img = pal8_4x1();
+    // Strip any per-entry alpha tail by leaving palette at the bare 4×3
+    // RGB entries; pal8_4x1 already does that.
+    assert_eq!(img.palette.len(), 12);
+    let alphas = vec![0, 128, 255, 200];
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            trns: Some(Trns::Palette(alphas.clone())),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let meta = parse_metadata(&bytes).expect("parse");
+    assert_eq!(meta.trns, Some(Trns::Palette(alphas.clone())));
+
+    // Legacy path: append the alpha tail to image.palette directly and
+    // emit without metadata.trns. The on-wire tRNS payload must match.
+    img.palette.extend_from_slice(&alphas);
+    let opts_legacy = PngEncoderOptions::default();
+    let bytes_legacy = encode_png_image_with_options(&img, &opts_legacy).expect("encode legacy");
+    let meta_legacy = parse_metadata(&bytes_legacy).expect("parse legacy");
+    assert_eq!(meta_legacy.trns, Some(Trns::Palette(alphas)));
+}
+
+#[test]
+fn trns_two_sources_reject_to_avoid_duplicate_chunk() {
+    // PNG3 §5.6 Table 1 marks tRNS "Multiple OK? No". If the caller
+    // supplies BOTH image.palette's tRNS tail AND metadata.trns the
+    // encoder must refuse to emit, since each path independently writes
+    // a tRNS chunk and the file would end up non-conforming.
+    let mut img = pal8_4x1();
+    img.palette.extend_from_slice(&[0, 0]); // palette tail = 2-byte tRNS
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            trns: Some(Trns::Palette(vec![0, 0, 0, 0])),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let err = encode_png_image_with_options(&img, &opts).expect_err("must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("tRNS") || msg.contains("trns"),
+        "expected tRNS-conflict error, got {msg}"
+    );
+}
+
+#[test]
+fn trns_variant_mismatching_colour_type_rejected_by_encoder() {
+    // Asking the encoder to emit a Trns::Rgb on a Gray8 image must fail
+    // — the resulting on-wire chunk would not parse.
+    let img = gray8_2x2();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            trns: Some(Trns::Rgb(0, 0, 0)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let err = encode_png_image_with_options(&img, &opts).expect_err("must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("colour type") || msg.contains("variant"),
+        "expected variant/colour-type mismatch error, got {msg}"
+    );
+}
+
+#[test]
+fn trns_gray_sample_beyond_bit_depth_rejected_by_encoder() {
+    // 8-bit grayscale ⇒ key sample cap is 255. Asking for 256 is
+    // structurally impossible (u16 fits but the IHDR width says no).
+    let img = gray8_2x2();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            trns: Some(Trns::Grayscale(256)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let err = encode_png_image_with_options(&img, &opts).expect_err("must fail");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("256") || msg.contains("exceeds"), "got {msg}");
+}
+
+#[test]
+fn trns_chunk_lands_after_plte_in_encoded_stream() {
+    // §5.6 ordering: tRNS comes "After PLTE; before IDAT". A Pal8 image
+    // with both PLTE and tRNS in the same metadata round-trip must have
+    // PLTE before tRNS before IDAT in the resulting wire bytes.
+    let img = pal8_4x1();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            trns: Some(Trns::Palette(vec![0, 0])),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let plte_pos = bytes.windows(4).position(|w| w == b"PLTE").expect("PLTE");
+    let trns_pos = bytes.windows(4).position(|w| w == b"tRNS").expect("tRNS");
+    let idat_pos = bytes.windows(4).position(|w| w == b"IDAT").expect("IDAT");
+    assert!(plte_pos < trns_pos, "PLTE must precede tRNS");
+    assert!(trns_pos < idat_pos, "tRNS must precede IDAT");
+}
+
+#[test]
+fn trns_decoder_rejects_duplicate_chunk() {
+    // §5.6 Table 1: tRNS is "Multiple OK? No". An attacker-crafted file
+    // with two tRNS chunks must be rejected by parse_metadata.
+    let img = gray8_2x2();
+    let opts = PngEncoderOptions {
+        metadata: Some(PngMetadata {
+            trns: Some(Trns::Grayscale(64)),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    // Splice a second tRNS chunk in just after the legitimate one.
+    let trns_pos = bytes.windows(4).position(|w| w == b"tRNS").expect("tRNS");
+    // tRNS chunk: 4-byte length + 4-byte type + 2-byte payload + 4-byte CRC = 14 bytes total.
+    // Chunk header starts 4 bytes before the type marker.
+    let chunk_start = trns_pos - 4;
+    let chunk_len = 12 + 2; // header(4)+type(4)+payload(2)+CRC(4) = 14
+    let single = bytes[chunk_start..chunk_start + chunk_len].to_vec();
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..chunk_start + chunk_len]);
+    tampered.extend_from_slice(&single);
+    tampered.extend_from_slice(&bytes[chunk_start + chunk_len..]);
+    let err = parse_metadata(&tampered).expect_err("duplicate tRNS must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("tRNS") || msg.contains("duplicate"),
+        "got {msg}"
+    );
+}
+
+#[test]
+fn trns_decoder_rejects_chunk_on_ct6_input() {
+    // RFC 2083 §4.2.9 final paragraph: tRNS is "prohibited" on ct=4/ct=6.
+    // Splice a synthetic tRNS into an RGBA stream and confirm
+    // parse_metadata rejects it (rather than silently round-tripping).
+    let img = rgba_2x2();
+    let bytes = encode_png_image(&img).expect("encode");
+    // Build a minimal tRNS chunk (6 bytes of zero payload) including
+    // its CRC and inject it right before IDAT.
+    let idat_pos = bytes.windows(4).position(|w| w == b"IDAT").expect("IDAT");
+    let chunk_start = idat_pos - 4;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&6u32.to_be_bytes());
+    payload.extend_from_slice(b"tRNS");
+    payload.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+    // Compute CRC over type+data per §5.5 (use a tiny inline impl so the
+    // test stays self-contained).
+    let crc = simple_crc32(&payload[4..]);
+    payload.extend_from_slice(&crc.to_be_bytes());
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(&bytes[..chunk_start]);
+    tampered.extend_from_slice(&payload);
+    tampered.extend_from_slice(&bytes[chunk_start..]);
+    let err = parse_metadata(&tampered).expect_err("tRNS on ct=6 must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("tRNS") || msg.contains("prohibited"),
+        "got {msg}"
+    );
+}
+
+/// Self-contained PNG-spec CRC-32 (§5.5) for the splice tests above.
+/// Polynomial 0xEDB88320, init 0xFFFFFFFF, post-invert. Reproduced from
+/// the algorithm pseudocode in RFC 2083 Annex D (which is the
+/// canonical reference for the chunk-CRC computation).
+fn simple_crc32(buf: &[u8]) -> u32 {
+    let mut table = [0u32; 256];
+    for (n, item) in table.iter_mut().enumerate() {
+        let mut c = n as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
+        }
+        *item = c;
+    }
+    let mut c: u32 = 0xFFFF_FFFF;
+    for &b in buf {
+        c = table[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8);
+    }
+    c ^ 0xFFFF_FFFF
 }

@@ -40,9 +40,10 @@ pub struct PngEncoderOptions {
     /// Compressed payload gets ~5–15% larger but the image is
     /// progressively renderable.
     pub interlace: bool,
-    /// Optional `sBIT` / `pHYs` / `tIME` / `bKGD` / `hIST` / `eXIf` /
-    /// `sRGB` / `cICP` / `iCCP` / `gAMA` / `cHRM` / `mDCV` / `cLLI` /
-    /// `sPLT` / `tEXt` / `zTXt` / `iTXt` ancillary metadata to embed.
+    /// Optional `sBIT` / `pHYs` / `tIME` / `bKGD` / `hIST` / `tRNS` /
+    /// `eXIf` / `sRGB` / `cICP` / `iCCP` / `gAMA` / `cHRM` / `mDCV` /
+    /// `cLLI` / `sPLT` / `tEXt` / `zTXt` / `iTXt` ancillary metadata
+    /// to embed.
     /// Each `Some(_)` field (and each `sPLT` / `tEXt` / `zTXt` /
     /// `itxt` in its `Vec`) is written; chunk ordering follows
     /// RFC 2083 §4.3 / W3C PNG3 §5.6 Table 7:
@@ -55,7 +56,12 @@ pub struct PngEncoderOptions {
     ///   the §4.3 table does not enumerate, emitted after the ranked
     ///   chunks so the basic colour-space signal leads the file
     ///   (§11.3.2.7 / §11.3.2.8).
-    /// * `bKGD` / `hIST` — after `PLTE`, before `IDAT`.
+    /// * `bKGD` / `hIST` — after `PLTE`, before `IDAT`. `tRNS` (the
+    ///   ct=0/ct=2 keyed-sample form, or the ct=3 alpha table when the
+    ///   caller routes it through `metadata.trns` instead of the legacy
+    ///   `image.palette` tail) also rides in this bucket per RFC 2083
+    ///   §4.2.9 "must precede the first IDAT chunk, and must follow the
+    ///   PLTE chunk, if any."
     /// * `pHYs` — before `IDAT`.
     /// * `tIME` — unconstrained; we emit it before `IDAT` for
     ///   determinism.
@@ -100,6 +106,15 @@ pub fn encode_png_image_with_options(
     if opts.interlace {
         ihdr.interlace = 1;
     }
+    // Resolve the on-wire tRNS payload. Two sources can supply it: the
+    // palette tail (`Pal8` only — `ihdr_and_row_bytes` splits
+    // `image.palette` into `PLTE || tRNS`), and `metadata.trns` (the
+    // ct=0 / ct=2 path; opt-in for ct=3 too). The two are mutually
+    // exclusive — emitting both would put two `tRNS` chunks on the
+    // wire, violating §5.6 Table 1 "Multiple OK? No" — so the resolver
+    // errors if both are populated and otherwise picks whichever is
+    // present.
+    let trns_bytes = resolve_trns_bytes(&ihdr, trns_bytes.as_deref(), opts.metadata.as_ref())?;
     let raw_pixels = flatten_and_normalise_pixels(image, row_bytes)?;
     let idat = if opts.interlace {
         deflate_encode_pixels_adam7(
@@ -240,6 +255,80 @@ fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
         write_chunk(out, b"iTXt", &itxt.to_bytes()?);
     }
     Ok(())
+}
+
+/// Pick the on-wire `tRNS` payload bytes given the IHDR + the two
+/// possible sources: the palette tail (`Pal8` only — derived from
+/// `image.palette`'s `PLTE || tRNS` blob in [`ihdr_and_row_bytes`]) and
+/// the optional `metadata.trns` field. The PNG spec allows at most one
+/// `tRNS` chunk per file (W3C PNG3 §5.6 Table 1 "Multiple OK? No"),
+/// so:
+///
+/// * Both sources `None` → no chunk on the wire.
+/// * Exactly one source `Some` → that source's bytes.
+/// * Both sources `Some` → encode error (the caller asked for two
+///   `tRNS` chunks on the same file).
+///
+/// When `metadata.trns` is used, the variant must match the IHDR colour
+/// type — a `Trns::Rgb` paired with a grayscale IHDR would put a
+/// 6-byte payload on the wire that a strict decoder would reject.
+fn resolve_trns_bytes(
+    ihdr: &Ihdr,
+    palette_trns: Option<&[u8]>,
+    meta: Option<&PngMetadata>,
+) -> Result<Option<Vec<u8>>> {
+    let meta_trns = meta.and_then(|m| m.trns.as_ref());
+    match (palette_trns, meta_trns) {
+        (None, None) => Ok(None),
+        (Some(p), None) => Ok(Some(p.to_vec())),
+        (None, Some(t)) => {
+            if !t.matches_colour_type(ihdr.colour_type) {
+                return Err(Error::invalid(format!(
+                    "PNG encoder: metadata.trns variant does not match \
+                     IHDR colour type {} (RFC 2083 §4.2.9)",
+                    ihdr.colour_type
+                )));
+            }
+            // For ct=0 / ct=2 the keyed sample must fit in `bit_depth`
+            // bits — same range check the parse path enforces (Trns::parse).
+            match t {
+                crate::metadata::Trns::Grayscale(v) => {
+                    let max = (1u32 << ihdr.bit_depth) - 1;
+                    if (*v as u32) > max {
+                        return Err(Error::invalid(format!(
+                            "PNG encoder: tRNS gray value {v} exceeds 2^{} - 1 ({max})",
+                            ihdr.bit_depth
+                        )));
+                    }
+                }
+                crate::metadata::Trns::Rgb(r, g, b) => {
+                    let max = (1u32 << ihdr.bit_depth) - 1;
+                    for (name, v) in [("R", *r), ("G", *g), ("B", *b)] {
+                        if (v as u32) > max {
+                            return Err(Error::invalid(format!(
+                                "PNG encoder: tRNS {name} value {v} \
+                                 exceeds 2^{} - 1 ({max})",
+                                ihdr.bit_depth
+                            )));
+                        }
+                    }
+                }
+                crate::metadata::Trns::Palette(_) => {
+                    // No bit-depth bound on indexed alpha tables — the
+                    // chunk's length-vs-PLTE-entry-count constraint is
+                    // enforced when the encoder splits image.palette,
+                    // not here (since we landed in the "no palette tail"
+                    // branch).
+                }
+            }
+            Ok(Some(t.to_bytes()))
+        }
+        (Some(_), Some(_)) => Err(Error::invalid(
+            "PNG encoder: both image.palette tail and metadata.trns supply a tRNS \
+             chunk — only one source is allowed per file (W3C PNG3 §5.6 Table 1 \
+             \"Multiple OK? No\")",
+        )),
+    }
 }
 
 /// IHDR + row byte count + optional PLTE / tRNS chunk payloads.
@@ -496,6 +585,10 @@ pub fn encode_apng_with_options(
     if opts.interlace {
         ihdr.interlace = 1;
     }
+    // APNG shares the standalone path's tRNS resolution. The IHDR is
+    // fixed across the whole APNG so a single resolve on the first-
+    // frame palette + opts.metadata covers every frame.
+    let trns = resolve_trns_bytes(&ihdr, trns.as_deref(), opts.metadata.as_ref())?;
 
     let actl = Actl {
         num_frames: frames.len() as u32,

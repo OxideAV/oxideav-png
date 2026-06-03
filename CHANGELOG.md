@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `tRNS` (simple transparency, RFC 2083 §4.2.9 / W3C PNG3 §11.3.1.1)
+  round-trip via `PngMetadata::trns`. Closes the long-standing
+  "Not preserved: `tRNS` chunk emission for ct=0 / ct=2" line in the
+  crate README. Surfaced as `metadata::Trns`, a three-variant enum
+  whose discriminant matches the IHDR colour type — `Grayscale(u16)`
+  for ct=0 (2-byte BE keyed gray sample, bounds-checked against
+  `(1<<bit_depth)-1`), `Rgb(u16, u16, u16)` for ct=2 (6-byte BE keyed
+  RGB triple, same per-channel bound), and `Palette(Vec<u8>)` for
+  ct=3 (1..=PLTE-entry-count alpha tail; the spec's "missing trailing
+  entries are opaque" rule from §4.2.9 is preserved by reading the
+  vector verbatim and letting the existing decode-side promotion
+  default uncovered indices to 255). Colour types 4 and 6 are
+  rejected on parse — "tRNS is prohibited for color types 4 and 6,
+  since a full alpha channel is already present" (§4.2.9 final
+  paragraph). The encoder gains a `resolve_trns_bytes` helper that
+  reconciles the new metadata path against the long-standing
+  `image.palette = PLTE || tRNS` tail (Pal8 only); supplying both is
+  an explicit "duplicate tRNS chunk would be emitted" encode error
+  per §5.6 Table 1 "Multiple OK? No". Variant-vs-IHDR-colour-type
+  mismatch (e.g. `Trns::Rgb` on a Gray8 image) is also an explicit
+  encode error so a malformed payload cannot reach the wire. The
+  chunk lands "After PLTE; before IDAT" per the same table — the
+  encoder writes it in the existing PLTE/tRNS slot for both static
+  PNG and APNG paths. The §4.2.9 "compare both bytes of a 16-bit
+  sample" rule (a 16-bit gray of `0x0001` keyed transparent must NOT
+  flag `0x0002` as transparent too) is preserved by the existing
+  `png_image_to_rgba` 16-bit comparison path; a fresh integration
+  test pins the round-trip of a `Trns::Grayscale(0x0001)` value
+  through `Gray16Le`. 16 new unit tests in `metadata.rs` (variant
+  round-trip at 8/16-bit, wrong-length rejection, bit-depth-cap
+  rejection, ct=4/6 prohibition, ct=3 shorter-than-PLTE acceptance,
+  ct=3 longer-than-PLTE rejection, missing-PLTE rejection, the
+  `matches_colour_type` discriminator) plus 9 new integration tests
+  in `metadata_roundtrip.rs` (ct=0/ct=2/ct=3 encoder round-trip,
+  Gray16Le both-bytes preservation, palette-path-vs-metadata-path
+  equivalence, dual-source duplicate rejection, variant/IHDR
+  mismatch rejection, sample-beyond-bit-depth rejection,
+  PLTE→tRNS→IDAT ordering, duplicate-chunk rejection via byte splice,
+  and ct=6 prohibition rejection via byte splice).
+
 - `mDCV` (Mastering Display Color Volume, W3C PNG3 §11.3.2.7) and
   `cLLI` (Content Light Level Information, W3C PNG3 §11.3.2.8)
   HDR static-metadata round-trip. Surfaced as `metadata::Mdcv`
