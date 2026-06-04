@@ -258,7 +258,7 @@ instances are explicitly permitted (§4.2.7 ¶3 / §4.2.10 ¶6 /
 
 ## Robustness
 
-The decoder is fuzzed with `cargo-fuzz`. Five targets live under `fuzz/`:
+The decoder is fuzzed with `cargo-fuzz`. Six targets live under `fuzz/`:
 
 - `decode` — feeds arbitrary bytes straight at the standalone decode
   entry points (`decode_png`, `decode_png_to_rgba`, `parse_metadata`,
@@ -280,6 +280,17 @@ The decoder is fuzzed with `cargo-fuzz`. Five targets live under `fuzz/`:
   the no-`oxideav-core` standalone API path.
 - `png_self_roundtrip` — encode → decode pixel-equality round-trip
   through the framework `VideoFrame` surface.
+- `filter_roundtrip` — drives `filter_row` + `unfilter_row` directly
+  with fuzz-derived `(FilterType, bpp, row_size, prev_row, row)`
+  tuples. Bypasses the chunk-CRC / IDAT-inflate / IHDR-shape gates so
+  the mutation budget lands inside the §6.2..§6.6 reconstruction
+  arithmetic — every filter type at every `bpp` value (1..=8 — the
+  full range `Ihdr::bpp_for_filter` emits) with row sizes up to 2 KB
+  and arbitrary prior-row bytes. Asserts (1) liveness on equal-length
+  slices (the only documented `Err` path is a row / prev_row length
+  mismatch — impossible by construction here) and (2) the §6.1
+  reversibility property `unfilter(filter(row)) == row` for every
+  shape sampled.
 - `libpng_encode_oxideav_decode` / `oxideav_encode_libpng_decode` —
   cross-decode against a `dlopen`ed system libpng (skipped when absent).
 

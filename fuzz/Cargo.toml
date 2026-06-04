@@ -79,3 +79,16 @@ name = "encode_decode_roundtrip"
 path = "fuzz_targets/encode_decode_roundtrip.rs"
 test = false
 doc = false
+
+# Per-row-filter round-trip target (r234). Drives `filter_row` +
+# `unfilter_row` directly with fuzz-derived (FilterType, bpp, row_size,
+# prev_row, row) tuples — bypasses the chunk-CRC / IDAT-inflate / IHDR-
+# shape gates so the mutation budget lands inside the §6.2..§6.6
+# reconstruction arithmetic. Asserts (1) liveness on all five filter
+# types across bpp ∈ 1..=8, and (2) the §6.1 reversibility property
+# `unfilter(filter(row)) == row` for every shape sampled.
+[[bin]]
+name = "filter_roundtrip"
+path = "fuzz_targets/filter_roundtrip.rs"
+test = false
+doc = false

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- New `filter_roundtrip` fuzz target driving `filter_row` +
+  `unfilter_row` directly with fuzz-derived `(FilterType, bpp,
+  row_size, prev_row, row)` tuples. Bypasses the chunk-CRC / IDAT-
+  inflate / IHDR-shape gates so the mutation budget lands inside the
+  RFC 2083 §6.2..§6.6 reconstruction arithmetic — all five filter
+  types, every `bpp` ∈ 1..=8 (the full range
+  `Ihdr::bpp_for_filter` emits), row sizes up to 2 KB, and arbitrary
+  prior-row bytes. Asserts two properties: (1) liveness on equal-
+  length slices — the only documented `Err` path is a row / prev_row
+  length mismatch, impossible by construction — and (2) the §6.1
+  reversibility property `unfilter(filter(row)) == row` for every
+  shape sampled. Counterpart to the existing `decode` target, which
+  reaches `unfilter_row` only after the framing gates have absorbed
+  most of the mutation budget; the new target widens filter-path
+  coverage without re-paying the CRC + inflate cost on every
+  iteration. Six fuzz targets total now under `fuzz/fuzz_targets/`.
 - Sub-byte encode for colour type 0 (grayscale) and colour type 3
   (indexed) at bit depths 1, 2, and 4. Opt-in via the new
   `PngEncoderOptions::bit_depth: Option<u8>` field (also reachable
