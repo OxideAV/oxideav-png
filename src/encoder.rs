@@ -129,13 +129,6 @@ pub fn encode_png_image_with_options(
 ) -> Result<Vec<u8>> {
     let (mut ihdr, row_bytes, plte_bytes, trns_bytes) = ihdr_and_row_bytes(image, opts)?;
     if opts.interlace {
-        if ihdr.bit_depth < 8 {
-            return Err(Error::invalid(
-                "PNG encoder: Adam7 interlaced encode with sub-byte \
-                 bit_depth is not implemented (each pass would need its \
-                 own sub-byte pack); split the request across two rounds",
-            ));
-        }
         ihdr.interlace = 1;
     }
     // Resolve the on-wire tRNS payload. Two sources can supply it: the
@@ -147,16 +140,29 @@ pub fn encode_png_image_with_options(
     // errors if both are populated and otherwise picks whichever is
     // present.
     let trns_bytes = resolve_trns_bytes(&ihdr, trns_bytes.as_deref(), opts.metadata.as_ref())?;
-    let raw_pixels = flatten_and_normalise_pixels(image, &ihdr, row_bytes)?;
-    let idat = if opts.interlace {
-        deflate_encode_pixels_adam7(
-            &raw_pixels,
-            image.width as usize,
-            image.height as usize,
-            &ihdr,
-        )?
+    let idat = if opts.interlace && ihdr.bit_depth < 8 {
+        // Sub-byte (ct=0 / ct=3, depth 1/2/4) Adam7: each pass is laid
+        // out as an independent sub-image (RFC 2083 §A.8 / §2.6
+        // "The data within each pass is laid out as though it were a
+        // complete image of the appropriate dimensions … each such
+        // scanline is padded as needed to fill an integral number of
+        // bytes"), so we gather each pass from the source `Gray8` /
+        // `Pal8` plane, pack its rows MSB-first into the pass's own
+        // wire row_bytes, then filter + concatenate exactly like the
+        // ≥8-bit Adam7 path.
+        deflate_encode_pixels_adam7_subbyte(image, &ihdr)?
     } else {
-        deflate_encode_pixels(&raw_pixels, row_bytes, image.height as usize, &ihdr)?
+        let raw_pixels = flatten_and_normalise_pixels(image, &ihdr, row_bytes)?;
+        if opts.interlace {
+            deflate_encode_pixels_adam7(
+                &raw_pixels,
+                image.width as usize,
+                image.height as usize,
+                &ihdr,
+            )?
+        } else {
+            deflate_encode_pixels(&raw_pixels, row_bytes, image.height as usize, &ihdr)?
+        }
     };
 
     let mut out = Vec::with_capacity(64 + idat.len());
@@ -675,6 +681,103 @@ pub(crate) fn deflate_encode_pixels_adam7(
     Ok(compress_to_vec_zlib(&filtered_all, 6))
 }
 
+/// Sub-byte (ct=0 / ct=3, depth 1/2/4) counterpart to
+/// [`deflate_encode_pixels_adam7`].
+///
+/// The non-interlaced sub-byte encoder ([`pack_subbyte_rows`]) packs the
+/// whole image's rows in one shot because the wire layout is contiguous.
+/// Adam7 interlaced sub-byte needs a per-pass pack because each pass is
+/// laid out as a standalone image: RFC 2083 §2.6 ("The data within each
+/// pass is laid out as though it were a complete image of the
+/// appropriate dimensions … when pixels have fewer than 8 bits, each
+/// such scanline is padded as needed to fill an integral number of
+/// bytes"), reinforced by §A.8 / Section 13.7 of W3C PNG3. Each pass's
+/// row therefore packs `pw` pixels at `bit_depth` bits/pixel into
+/// `ceil(pw * bit_depth / 8)` wire bytes, with the trailing-byte
+/// low-order bits zero-padded for determinism (§2.3).
+///
+/// The source `image.data` is the same one-byte-per-pixel `Gray8` /
+/// `Pal8` plane the non-interlaced sub-byte path consumes; samples are
+/// range-checked against `(1 << bit_depth) - 1` before they reach the
+/// wire so a malformed payload cannot survive an encode.
+///
+/// Filtering uses `bpp_for_filter` (= 1 for sub-byte per
+/// [`Ihdr::bpp_for_filter`]) and the same per-row min-sum-abs heuristic
+/// the non-interlaced path uses (§12.8).
+fn deflate_encode_pixels_adam7_subbyte(image: &PngImage, ihdr: &Ihdr) -> Result<Vec<u8>> {
+    debug_assert!(ihdr.bit_depth == 1 || ihdr.bit_depth == 2 || ihdr.bit_depth == 4);
+    debug_assert!(ihdr.colour_type == 0 || ihdr.colour_type == 3);
+    let bpp = ihdr.bpp_for_filter()?; // = 1 for sub-byte
+    let bd = ihdr.bit_depth as usize;
+    let max: u8 = ((1u16 << bd) - 1) as u8;
+    let pixels_per_byte = 8 / bd;
+    let img_w = image.width as usize;
+    let img_h = image.height as usize;
+    let src_stride = image.stride;
+
+    let mut filtered_all = Vec::new();
+    for (pass, &(sr, sc, rs, cs)) in ADAM7.iter().enumerate() {
+        let (pw, ph) = adam7_pass_dims(img_w, img_h, pass);
+        if pw == 0 || ph == 0 {
+            // §A.8 / RFC 2083 §2.6 "Caution: …some passes will be
+            // entirely empty … no filter type bytes are present in an
+            // empty pass."
+            continue;
+        }
+
+        // Gather + pack each pass row in one go: read pw source samples
+        // for this pass row at the gather stride (sr + py*rs, sc + px*cs),
+        // validate the bit-depth cap, then MSB-pack into the pass's wire
+        // row bytes (the same packing rule [`pack_subbyte_rows`] uses).
+        let pass_row_bytes = (pw * bd).div_ceil(8);
+        let mut pass_raw = vec![0u8; pass_row_bytes * ph];
+        for py in 0..ph {
+            let src_y = sr + py * rs;
+            let dst_row = &mut pass_raw[py * pass_row_bytes..(py + 1) * pass_row_bytes];
+            for px in 0..pw {
+                let src_x = sc + px * cs;
+                let v = image.data[src_y * src_stride + src_x];
+                if v > max {
+                    return Err(Error::invalid(format!(
+                        "PNG encoder: sub-byte sample {v} at pixel ({src_x},{src_y}) \
+                         (Adam7 pass {p} cell ({px},{py})) exceeds \
+                         2^{bd} - 1 ({max}) — callers supplying sub-byte input \
+                         must pre-quantize source samples to the target bit depth",
+                        p = pass + 1,
+                    )));
+                }
+                let byte_idx = px / pixels_per_byte;
+                let shift_in_byte = (pixels_per_byte - 1 - (px % pixels_per_byte)) * bd;
+                dst_row[byte_idx] |= v << shift_in_byte;
+            }
+        }
+
+        // Filter this pass's rows independently with a zero prev-row at
+        // the top of the pass (RFC 2083 §6.3 "For filters that refer to
+        // the prior scanline, the entire prior scanline must be treated
+        // as being zeroes for the first scanline of an image (or of a
+        // pass of an interlaced image).").
+        let prev_start = filtered_all.len();
+        filtered_all.resize(prev_start + (1 + pass_row_bytes) * ph, 0);
+        let mut scratch = vec![0u8; pass_row_bytes];
+        let zero_row = vec![0u8; pass_row_bytes];
+        for y in 0..ph {
+            let row = &pass_raw[y * pass_row_bytes..(y + 1) * pass_row_bytes];
+            let prev: &[u8] = if y == 0 {
+                &zero_row
+            } else {
+                &pass_raw[(y - 1) * pass_row_bytes..y * pass_row_bytes]
+            };
+            let ft = choose_filter_heuristic(row, prev, bpp, &mut scratch);
+            let dst_off = prev_start + y * (1 + pass_row_bytes);
+            filtered_all[dst_off] = ft as u8;
+            let data_slot = &mut filtered_all[dst_off + 1..dst_off + 1 + pass_row_bytes];
+            filter_row(ft, row, prev, bpp, data_slot);
+        }
+    }
+    Ok(compress_to_vec_zlib(&filtered_all, 6))
+}
+
 // ---- APNG encode --------------------------------------------------------
 
 /// Build an APNG file from the supplied sequence of [`PngImage`]s.
@@ -722,12 +825,6 @@ pub fn encode_apng_with_options(
     }
     let (mut ihdr, row_bytes, plte, trns) = ihdr_and_row_bytes(&frames[0], opts)?;
     if opts.interlace {
-        if ihdr.bit_depth < 8 {
-            return Err(Error::invalid(
-                "PNG encoder: APNG interlaced encode with sub-byte \
-                 bit_depth is not implemented",
-            ));
-        }
         ihdr.interlace = 1;
     }
     // APNG shares the standalone path's tRNS resolution. The IHDR is
@@ -772,11 +869,18 @@ pub fn encode_apng_with_options(
         write_chunk(&mut out, b"fcTL", &fctl.to_bytes());
         seq += 1;
 
-        let raw = flatten_and_normalise_pixels(frame, &ihdr, row_bytes)?;
-        let compressed = if opts.interlace {
-            deflate_encode_pixels_adam7(&raw, ihdr.width as usize, ihdr.height as usize, &ihdr)?
+        let compressed = if opts.interlace && ihdr.bit_depth < 8 {
+            // Sub-byte (ct=0/ct=3) interlaced: same per-pass pack +
+            // filter path the standalone encoder uses (RFC 2083 §A.8
+            // sub-image-per-pass rule).
+            deflate_encode_pixels_adam7_subbyte(frame, &ihdr)?
         } else {
-            deflate_encode_pixels(&raw, row_bytes, ihdr.height as usize, &ihdr)?
+            let raw = flatten_and_normalise_pixels(frame, &ihdr, row_bytes)?;
+            if opts.interlace {
+                deflate_encode_pixels_adam7(&raw, ihdr.width as usize, ihdr.height as usize, &ihdr)?
+            } else {
+                deflate_encode_pixels(&raw, row_bytes, ihdr.height as usize, &ihdr)?
+            }
         };
 
         if idx == 0 {

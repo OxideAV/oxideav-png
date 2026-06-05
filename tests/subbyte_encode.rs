@@ -396,21 +396,166 @@ fn bit_depth_8_is_a_no_op_for_gray_and_pal() {
     assert_eq!(decoded.pixel_format, PngPixelFormat::Gray8);
 }
 
+// ---- Adam7 interlaced sub-byte round-trip ------------------------------
+
+/// Round-trip helper for the Adam7 interlaced path on `Gray8` /
+/// `Pal8` sources. We compare the recovered pixels against the
+/// non-interlaced encode of the same source so the test pins
+/// (1) the seven-pass scatter/gather layout, (2) per-pass sub-byte
+/// packing (each pass laid out as a complete image of its own
+/// dimensions per RFC 2083 §2.6), and (3) per-pass independent
+/// filtering against a zero prior row at the top of the pass
+/// (§6.3 first-scanline-of-a-pass rule).
+fn adam7_subbyte_roundtrip_gray(w: u32, h: u32, bit_depth: u8) {
+    let src = gray_source(w, h, bit_depth);
+    let mut opts = PngEncoderOptions {
+        bit_depth: Some(bit_depth),
+        interlace: true,
+        ..Default::default()
+    };
+    let bytes_interlaced =
+        encode_png_image_with_options(&src, &opts).expect("Adam7 sub-byte encode");
+    let decoded_interlaced = decode_png(&bytes_interlaced).expect("Adam7 sub-byte decode");
+    opts.interlace = false;
+    let bytes_progressive =
+        encode_png_image_with_options(&src, &opts).expect("non-interlaced sub-byte encode");
+    let decoded_progressive =
+        decode_png(&bytes_progressive).expect("non-interlaced sub-byte decode");
+    assert_eq!(decoded_interlaced.width, w);
+    assert_eq!(decoded_interlaced.height, h);
+    assert_eq!(decoded_interlaced.pixel_format, PngPixelFormat::Gray8);
+    assert_eq!(
+        decoded_interlaced.data, decoded_progressive.data,
+        "interlaced round-trip must recover the same pixel plane as the \
+         non-interlaced encode at depth {bit_depth} ({w}x{h})"
+    );
+    // IHDR.interlace byte at offset 16+12 = 28 (13-byte payload, last byte).
+    assert_eq!(bytes_interlaced[28], 1, "IHDR.interlace must be 1");
+    assert_eq!(
+        bytes_progressive[28], 0,
+        "non-interlaced IHDR.interlace = 0"
+    );
+}
+
+fn adam7_subbyte_roundtrip_pal(w: u32, h: u32, bit_depth: u8) {
+    let palette_entries = 1 << bit_depth;
+    let src = pal_source(w, h, bit_depth, palette_entries);
+    let mut opts = PngEncoderOptions {
+        bit_depth: Some(bit_depth),
+        interlace: true,
+        ..Default::default()
+    };
+    let bytes = encode_png_image_with_options(&src, &opts).expect("Adam7 sub-byte indexed encode");
+    let decoded = decode_png(&bytes).expect("Adam7 sub-byte indexed decode");
+    opts.interlace = false;
+    let bytes_progressive =
+        encode_png_image_with_options(&src, &opts).expect("non-interlaced sub-byte indexed encode");
+    let decoded_progressive = decode_png(&bytes_progressive).expect("non-interlaced decode");
+    assert_eq!(decoded.width, w);
+    assert_eq!(decoded.height, h);
+    assert_eq!(decoded.pixel_format, PngPixelFormat::Pal8);
+    assert_eq!(
+        decoded.data, decoded_progressive.data,
+        "interlaced indexed round-trip must recover the same pixels as the \
+         non-interlaced encode at depth {bit_depth} ({w}x{h})"
+    );
+    // Decoded palette tail matches the source palette bytes.
+    assert_eq!(&decoded.palette[..src.palette.len()], &src.palette[..]);
+}
+
 #[test]
-fn rejects_subbyte_combined_with_interlace() {
-    let src = gray_source(8, 4, 1);
+fn adam7_gray_1bit_roundtrip() {
+    adam7_subbyte_roundtrip_gray(16, 16, 1);
+}
+
+#[test]
+fn adam7_gray_2bit_roundtrip() {
+    adam7_subbyte_roundtrip_gray(16, 12, 2);
+}
+
+#[test]
+fn adam7_gray_4bit_roundtrip() {
+    adam7_subbyte_roundtrip_gray(13, 11, 4);
+}
+
+#[test]
+fn adam7_pal_1bit_roundtrip() {
+    adam7_subbyte_roundtrip_pal(16, 8, 1);
+}
+
+#[test]
+fn adam7_pal_2bit_roundtrip() {
+    adam7_subbyte_roundtrip_pal(12, 12, 2);
+}
+
+#[test]
+fn adam7_pal_4bit_roundtrip() {
+    adam7_subbyte_roundtrip_pal(11, 5, 4);
+}
+
+/// Tiny image (≤ 4 columns / rows) where some Adam7 passes are
+/// entirely empty — RFC 2083 §2.6 "Caution: If the image contains
+/// fewer than five columns or fewer than five rows, some passes
+/// will be entirely empty. Encoders and decoders must handle this
+/// case correctly. In particular, filter type bytes are only
+/// associated with nonempty scanlines; no filter type bytes are
+/// present in an empty pass."
+#[test]
+fn adam7_gray_1bit_tiny_drops_empty_passes() {
+    adam7_subbyte_roundtrip_gray(3, 3, 1);
+}
+
+#[test]
+fn adam7_pal_2bit_tiny_drops_empty_passes() {
+    // 4-bit + 2x2 would over-size the palette (1<<4 = 16 entries for
+    // 4 pixels), tripping the encoder's PLTE/tRNS split. The
+    // empty-pass behaviour we're checking is purely a function of
+    // image dimensions, so a 2-bit fixture exercises it identically.
+    adam7_subbyte_roundtrip_pal(2, 2, 2);
+}
+
+/// 2-bit indexed encode where a source sample exceeds the bit-depth
+/// cap must be rejected on the interlaced path the same way the
+/// non-interlaced path rejects it. The error message names the
+/// offending source pixel coordinate (not a pass coordinate) so the
+/// caller can fix the upstream quantization.
+#[test]
+fn adam7_rejects_overflowing_subbyte_sample() {
+    let mut src = pal_source(8, 4, 2, 4);
+    src.data[3] = 7; // overflows 2-bit cap of 3
     let opts = PngEncoderOptions {
-        bit_depth: Some(1),
+        bit_depth: Some(2),
         interlace: true,
         ..Default::default()
     };
     let err = encode_png_image_with_options(&src, &opts)
-        .expect_err("Adam7 + sub-byte must be rejected for now");
+        .expect_err("Adam7 sub-byte must reject overflow samples");
     let msg = format!("{err}");
     assert!(
-        msg.contains("Adam7") && msg.contains("sub-byte"),
-        "error must mention both Adam7 and sub-byte, got: {msg}"
+        msg.contains("exceeds") && msg.contains("(3)"),
+        "error must mention the 2-bit cap, got: {msg}"
     );
+}
+
+#[test]
+fn apng_adam7_subbyte_roundtrip() {
+    use oxideav_png::{decode_apng, encode_apng_with_options};
+    let frames: Vec<_> = (0..2).map(|_| gray_source(13, 11, 4)).collect();
+    let opts = PngEncoderOptions {
+        bit_depth: Some(4),
+        interlace: true,
+        ..Default::default()
+    };
+    let bytes = encode_apng_with_options(&frames, 10, 0, &opts)
+        .expect("APNG Adam7 sub-byte encode must succeed");
+    let decoded = decode_apng(&bytes).expect("APNG Adam7 sub-byte decode must succeed");
+    assert_eq!(decoded.frames.len(), 2);
+    let scale = gray_scale_factor(4);
+    for (src_frame, decoded_frame) in frames.iter().zip(decoded.frames.iter()) {
+        for (a, b) in src_frame.data.iter().zip(decoded_frame.image.data.iter()) {
+            assert_eq!(*b, a.wrapping_mul(scale));
+        }
+    }
 }
 
 #[test]

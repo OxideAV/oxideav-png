@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Adam7 interlaced sub-byte encode. `PngEncoderOptions::interlace =
+  true` combined with `bit_depth = Some(1 | 2 | 4)` is now supported
+  on colour type 0 (grayscale) and colour type 3 (indexed) sources.
+  Each of the seven Adam7 passes is gathered into its own
+  `pw × ph` sub-image, packed MSB-first into `ceil(pw * bit_depth /
+  8)` wire row bytes per RFC 2083 §2.6 ("The data within each pass is
+  laid out as though it were a complete image of the appropriate
+  dimensions … each such scanline is padded as needed to fill an
+  integral number of bytes"), then filtered with the per-row min-sum-
+  abs heuristic (§12.8) against a zero prior row at the top of each
+  pass (§6.3 "the entire prior scanline must be treated as being
+  zeroes for the first scanline … of a pass of an interlaced image").
+  Empty passes (the §2.6 caution for fewer-than-five-columns / rows
+  inputs) emit no filter-type bytes. Available on both the standalone
+  PNG encoder (`encode_png_image_with_options`) and APNG output
+  (`encode_apng_with_options`). Source sample range remains validated
+  against `(1 << bit_depth) - 1` per pixel.
+
+### Removed
+
+- The "Adam7 + sub-byte not implemented" rejection on
+  `encode_png_image_with_options` and `encode_apng_with_options`.
+
+### Added (existing entries)
+
 - New `filter_roundtrip` fuzz target driving `filter_row` +
   `unfilter_row` directly with fuzz-derived `(FilterType, bpp,
   row_size, prev_row, row)` tuples. Bypasses the chunk-CRC / IDAT-

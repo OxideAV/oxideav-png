@@ -47,9 +47,16 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   the high-order bits of each output byte (§2.3). Rows whose pixel
   count does not divide `8 / bit_depth` get the trailing byte's
   low-order bits zero-padded for determinism (§2.3 "the contents of
-  these wasted bits are unspecified"). The encoder rejects
-  `interlace + sub-byte` for now (Adam7 pass-sub-image sub-byte
-  packing not yet implemented).
+  these wasted bits are unspecified"). Combinable with `interlace =
+  true` — each Adam7 pass is laid out "as though it were a complete
+  image of the appropriate dimensions" (RFC 2083 §2.6) and packed
+  into its own `ceil(pw * bit_depth / 8)` wire row bytes. Filtering
+  is per-pass independent with a zero prior row at the top of each
+  pass (§6.3 "the entire prior scanline must be treated as being
+  zeroes for the first scanline … of a pass of an interlaced image").
+  Empty passes (the §2.6 caution for images with fewer than five rows
+  or columns) emit no filter-type bytes. The Adam7 sub-byte path is
+  available on both the standalone PNG encoder and APNG output.
 - Per-row filter heuristic (min-sum-abs-delta per §12.8)
 - APNG output when multiple frames submitted or `frame_rate` is set
 
@@ -247,14 +254,6 @@ repeated (the "Multiple OK? No" rule in RFC 2083 §4.3 / W3C PNG3
 `iTXt` are the three chunks where identical keywords on multiple
 instances are explicitly permitted (§4.2.7 ¶3 / §4.2.10 ¶6 /
 §11.3.3.4).
-
-## Not preserved
-
-- Adam7 interlaced sub-byte encode — `interlace = true` combined with
-  `bit_depth = Some(1 | 2 | 4)` is rejected at encode time. Each Adam7
-  pass would need its own sub-byte pack; deferred to a follow-up round.
-  Non-interlaced sub-byte encode and `bit_depth = None` Adam7 encode
-  are both supported.
 
 ## Robustness
 

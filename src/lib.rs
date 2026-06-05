@@ -34,12 +34,12 @@
 //!   [`encoder::PngEncoderOptions`]`::bit_depth`. Source is a `Gray8`
 //!   or `Pal8` buffer with each byte already pre-quantized to
 //!   `0..=(1 << bit_depth) - 1`; pixels pack MSB-first per PNG §2.3.
-//!   The interlaced + sub-byte combination is not yet implemented and
-//!   is rejected as an encode error rather than producing wrong bytes.
+//!   Combinable with `interlace = true` — each Adam7 pass is packed
+//!   independently into `ceil(pw * bit_depth / 8)` wire bytes per
+//!   row, treating each pass "as though it were a complete image of
+//!   the appropriate dimensions" (RFC 2083 §2.6).
 //!
 //! Not implemented:
-//! * Adam7 interlaced sub-byte encode (one of `interlace = true` and
-//!   `bit_depth = Some(1 | 2 | 4)`, not both)
 //! * Round-tripped metadata: `sBIT`, `pHYs`, `tIME`, `bKGD`, `hIST`,
 //!   `tRNS`, `eXIf`, `sRGB`, `cICP`, `iCCP`, `mDCV`, `cLLI`, `sPLT`,
 //!   `tEXt`, `zTXt`, `iTXt` —
