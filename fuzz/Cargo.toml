@@ -92,3 +92,21 @@ name = "filter_roundtrip"
 path = "fuzz_targets/filter_roundtrip.rs"
 test = false
 doc = false
+
+# Ancillary-chunk metadata round-trip target (r242). Builds a small
+# fixed RGBA image plus a fuzz-derived `PngMetadata` mixing
+# `sBIT`/`pHYs`/`tIME`/`bKGD`/`eXIf`/`sRGB`/`cICP`/`iCCP`/`gAMA`/
+# `cHRM`/`mDCV`/`cLLI`/`sPLT`/`tEXt`/`zTXt`/`iTXt` in arbitrary
+# combinations, encodes through `encode_png_image_with_options`, and
+# re-parses with `parse_metadata` + `decode_png`. Asserts the encoder
+# accepts every well-formed combination the harness assembles, every
+# populated field round-trips byte-exactly, and the IDAT pixels still
+# decode to the original image. The fuzzer's mutation budget lands
+# inside the encoder-emitter / parser-validator pair across the full
+# 16-chunk metadata surface — coverage that the top-level `decode`
+# target only reaches by accident on the parser side.
+[[bin]]
+name = "metadata_roundtrip"
+path = "fuzz_targets/metadata_roundtrip.rs"
+test = false
+doc = false

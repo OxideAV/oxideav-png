@@ -257,7 +257,7 @@ instances are explicitly permitted (§4.2.7 ¶3 / §4.2.10 ¶6 /
 
 ## Robustness
 
-The decoder is fuzzed with `cargo-fuzz`. Six targets live under `fuzz/`:
+The decoder is fuzzed with `cargo-fuzz`. Seven targets live under `fuzz/`:
 
 - `decode` — feeds arbitrary bytes straight at the standalone decode
   entry points (`decode_png`, `decode_png_to_rgba`, `parse_metadata`,
@@ -290,6 +290,19 @@ The decoder is fuzzed with `cargo-fuzz`. Six targets live under `fuzz/`:
   mismatch — impossible by construction here) and (2) the §6.1
   reversibility property `unfilter(filter(row)) == row` for every
   shape sampled.
+- `metadata_roundtrip` — fuzz-derives a `PngMetadata` populating any
+  subset of the 16 ancillary chunks the codec round-trips (`sBIT` /
+  `pHYs` / `tIME` / `bKGD` / `eXIf` / `sRGB` / `cICP` / `iCCP` / `gAMA`
+  / `cHRM` / `mDCV` / `cLLI` / `sPLT` / `tEXt` / `zTXt` / `iTXt`),
+  encodes a fixed 2×2 RGBA image with `encode_png_image_with_options`,
+  and re-parses with `parse_metadata` + `decode_png`. Each populated
+  field is constructed inside the encoder's acceptance domain (sample
+  bounds, keyword shape, distinct `sPLT` palette names, RGB-pinned
+  `cICP::matrix_coefficients`) so the mutation budget lands in the
+  encoder-emit / decoder-parse pair rather than the encoder-reject
+  surface. Asserts the encoder accepts every well-formed combination,
+  every populated field round-trips byte-exactly, and the IDAT pixels
+  still decode to the original image.
 - `libpng_encode_oxideav_decode` / `oxideav_encode_libpng_decode` —
   cross-decode against a `dlopen`ed system libpng (skipped when absent).
 

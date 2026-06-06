@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- New `metadata_roundtrip` fuzz target. Builds a fixed 2×2 RGBA image
+  plus a fuzz-derived `PngMetadata` populating any subset of the 16
+  ancillary chunks the codec round-trips (`sBIT` / `pHYs` / `tIME` /
+  `bKGD` / `eXIf` / `sRGB` / `cICP` / `iCCP` / `gAMA` / `cHRM` /
+  `mDCV` / `cLLI` / `sPLT` / `tEXt` / `zTXt` / `iTXt`), encodes
+  through `encode_png_image_with_options`, and re-parses with
+  `parse_metadata` + `decode_png`. Each populated field is
+  constructed inside the encoder's acceptance domain (sample bounds,
+  keyword shape, distinct `sPLT` palette names, RGB-pinned
+  `cICP::matrix_coefficients`) so the mutation budget lands in the
+  encoder-emit / decoder-parse pair across the full metadata surface
+  — coverage the top-level `decode` target only reaches by accident
+  on the parser side. Asserts the encoder accepts every well-formed
+  combination, every populated field round-trips byte-exactly, and
+  the IDAT pixels still decode to the original image. Counterpart to
+  the existing `decode` / `filter_roundtrip` / `encode_decode_roundtrip`
+  targets; lands the seventh fuzz harness under `fuzz/`.
+
 - Adam7 interlaced sub-byte encode. `PngEncoderOptions::interlace =
   true` combined with `bit_depth = Some(1 | 2 | 4)` is now supported
   on colour type 0 (grayscale) and colour type 3 (indexed) sources.
