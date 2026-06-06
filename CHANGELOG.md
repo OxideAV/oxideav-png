@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/OxideAV/oxideav-png/compare/v0.1.7...v0.1.8) - 2026-06-06
+
+### Other
+
+- metadata_roundtrip target — fuzz-derived PngMetadata through encode/decode
+- Adam7 interlaced sub-byte encode for ct=0 / ct=3 (depth 1/2/4)
+- filter_roundtrip target — direct per-row §6.2..§6.6 reconstruction
+- sub-byte (1/2/4-bit) encode for colour type 0 / 3
+- scrub bait phrase from CRC-32 comment (cite RFC 2083 Annex D directly)
+- tRNS round-trip for ct=0 / ct=2 / ct=3 via PngMetadata::trns
+- round-trip the mDCV + cLLI HDR static-metadata chunks
+- round-trip the iCCP + iTXt remaining-gap ancillary chunks
+- round-trip the zTXt compressed-textual-data chunk
+- parametric APNG frame-scan decode-loop throughput target (r196)
+
 ### Added
 
 - New `metadata_roundtrip` fuzz target. Builds a fixed 2×2 RGBA image
