@@ -171,6 +171,53 @@ pub fn choose_filter_heuristic(
     best
 }
 
+/// Encoder-side filter-selection policy.
+///
+/// Maps to the recommendations in W3C PNG3 §12.7 ("Filter selection").
+/// `Adaptive` is the per-row min-sum-abs-delta heuristic from §12.8 — the
+/// spec's "general heuristic which may perform well enough" when an
+/// exhaustive trial is unacceptable — and is the default for every
+/// encode path.
+///
+/// `Fixed(f)` pins a single filter for every row in the image (each
+/// Adam7 pass when interlaced). §12.7 advises that for an encoder which
+/// chooses a fixed filter, the Paeth filter type is most likely to be
+/// the best choice on truecolour and grayscale images; `Fixed(Paeth)`
+/// is the recommended fixed-filter pick. For colour type 3 (indexed)
+/// and bit depths below 8, §12.7 instead recommends filter type 0
+/// (`Fixed(None)`); the encoder still emits exactly the filter the
+/// caller selected, leaving the §12.7 mapping to the caller.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FilterStrategy {
+    /// Per-row §12.8 min-sum-abs-delta heuristic. Tries all five
+    /// filter types on every row and keeps the row that minimises the
+    /// signed-byte absolute sum. Highest compression at the cost of
+    /// five filter evaluations per row.
+    #[default]
+    Adaptive,
+    /// Apply the same filter type to every row of the image. Skips
+    /// the per-row heuristic so the filter loop becomes a single
+    /// pass (~5× faster than `Adaptive`) at the cost of compression
+    /// for content the chosen filter does not suit.
+    Fixed(FilterType),
+}
+
+impl FilterStrategy {
+    /// Resolve the strategy to a concrete filter type for one row.
+    ///
+    /// For `Adaptive` this runs the §12.8 heuristic; for `Fixed(f)`
+    /// it returns `f` directly (no scratch evaluation). The caller is
+    /// responsible for `filter_row` into the output slot afterwards;
+    /// the `scratch` buffer here is only used when the heuristic
+    /// branch runs.
+    pub fn pick(self, row: &[u8], prev_row: &[u8], bpp: usize, scratch: &mut [u8]) -> FilterType {
+        match self {
+            FilterStrategy::Adaptive => choose_filter_heuristic(row, prev_row, bpp, scratch),
+            FilterStrategy::Fixed(f) => f,
+        }
+    }
+}
+
 // --- CRC32 ---------------------------------------------------------------
 
 use std::sync::OnceLock;
@@ -229,6 +276,43 @@ mod tests {
         assert_eq!(a, b);
         // Known value: CRC32 of "IEND" chunk type (empty payload) — well-known.
         assert_eq!(a, 0xAE42_6082);
+    }
+
+    #[test]
+    fn strategy_default_is_adaptive() {
+        assert_eq!(FilterStrategy::default(), FilterStrategy::Adaptive);
+    }
+
+    #[test]
+    fn strategy_fixed_pick_returns_chosen_filter() {
+        // `Fixed(_)` skips the heuristic; the returned type is the
+        // exact filter the caller pinned, regardless of row content.
+        let row = [10u8, 20, 30, 40];
+        let prev = [5u8; 4];
+        let mut scratch = [0u8; 4];
+        for f in [
+            FilterType::None,
+            FilterType::Sub,
+            FilterType::Up,
+            FilterType::Average,
+            FilterType::Paeth,
+        ] {
+            let got = FilterStrategy::Fixed(f).pick(&row, &prev, 1, &mut scratch);
+            assert_eq!(got, f);
+        }
+    }
+
+    #[test]
+    fn strategy_adaptive_matches_heuristic() {
+        // `Adaptive` is a thin wrapper around `choose_filter_heuristic`
+        // — same input, same pick.
+        let row = [10u8, 11, 12, 13, 14, 15, 16, 17];
+        let prev = [5u8; 8];
+        let mut s1 = [0u8; 8];
+        let mut s2 = [0u8; 8];
+        let a = FilterStrategy::Adaptive.pick(&row, &prev, 1, &mut s1);
+        let b = choose_filter_heuristic(&row, &prev, 1, &mut s2);
+        assert_eq!(a, b);
     }
 
     #[test]

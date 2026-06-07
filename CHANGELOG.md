@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Encoder filter-selection strategy (W3C PNG3 §12.7). New
+  `PngEncoderOptions::filter_strategy: FilterStrategy` field plumbed
+  through every encode path — non-interlaced ≥ 8-bit, Adam7 ≥ 8-bit,
+  and Adam7 sub-byte (and both the standalone `encode_png_image_with_
+  options` and `encode_apng_with_options` entry points). Two variants:
+  `Adaptive` (the default — keeps the long-standing per-row §12.8
+  min-sum-abs-delta heuristic across all five filter types) and
+  `Fixed(FilterType)` which pins one filter type for every row and
+  skips the heuristic trial. §12.7's spec mapping is preserved as a
+  doc reference: `Fixed(Paeth)` is most likely the best fixed choice
+  on truecolour / grayscale, `Fixed(None)` is recommended for indexed
+  (colour type 3) and bit depths below 8. Registry-side schema gains
+  a `filter` string option that accepts `adaptive` / `none` / `sub` /
+  `up` / `average` / `paeth` (case-insensitive); the empty string maps
+  to `adaptive` for back-compat with callers that bind the field but
+  leave it empty. Default-options encodes produce the same bytes as
+  pre-r245 so callers that never touch the new field see no change.
+
 - Adam7 interlaced sub-byte encode. `PngEncoderOptions::interlace =
   true` combined with `bit_depth = Some(1 | 2 | 4)` is now supported
   on colour type 0 (grayscale) and colour type 3 (indexed) sources.

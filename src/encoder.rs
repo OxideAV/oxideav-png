@@ -29,7 +29,7 @@ use miniz_oxide::deflate::compress_to_vec_zlib;
 
 use crate::chunk::{write_chunk, PNG_MAGIC};
 use crate::decoder::{adam7_pass_dims, Ihdr, ADAM7};
-use crate::filter::{choose_filter_heuristic, filter_row};
+use crate::filter::{filter_row, FilterStrategy};
 
 /// PNG encoder tuning knobs, attached via
 /// `CodecParameters::options` (when the `registry` feature is on) or
@@ -110,6 +110,30 @@ pub struct PngEncoderOptions {
     /// is rejected — the 16-bit forms are reached via
     /// `Gray16Le` / `Rgb48Le` / `Rgba64Le` source formats instead.
     pub bit_depth: Option<u8>,
+    /// Filter-selection policy applied to every row (and every Adam7
+    /// pass row when `interlace = true`).
+    ///
+    /// Default is [`FilterStrategy::Adaptive`] — the per-row §12.8
+    /// min-sum-abs-delta heuristic that picks the best of all five
+    /// filter types for each row. W3C PNG3 §12.7 calls this out as
+    /// the appropriate path "if compression efficiency is valued
+    /// over speed of compression."
+    ///
+    /// [`FilterStrategy::Fixed`] pins one filter type for every row,
+    /// skipping the heuristic's five-filter trial and emitting the
+    /// chosen filter directly. §12.7 maps:
+    ///
+    /// * Truecolour / grayscale and a fixed filter is desired —
+    ///   `Fixed(FilterType::Paeth)` is most likely the best choice.
+    /// * Indexed-colour (colour type 3) — `Fixed(FilterType::None)`
+    ///   is usually the most effective.
+    /// * Bit depths less than 8 — `Fixed(FilterType::None)` is also
+    ///   recommended.
+    ///
+    /// The encoder applies whatever strategy the caller supplies as
+    /// is; the spec mapping is left for the caller so a benchmarking
+    /// or worst-case-compression study can pin any combination.
+    pub filter_strategy: FilterStrategy,
 }
 
 // ---- Single-image encode -----------------------------------------------
@@ -150,7 +174,7 @@ pub fn encode_png_image_with_options(
         // `Pal8` plane, pack its rows MSB-first into the pass's own
         // wire row_bytes, then filter + concatenate exactly like the
         // ≥8-bit Adam7 path.
-        deflate_encode_pixels_adam7_subbyte(image, &ihdr)?
+        deflate_encode_pixels_adam7_subbyte(image, &ihdr, opts.filter_strategy)?
     } else {
         let raw_pixels = flatten_and_normalise_pixels(image, &ihdr, row_bytes)?;
         if opts.interlace {
@@ -159,9 +183,16 @@ pub fn encode_png_image_with_options(
                 image.width as usize,
                 image.height as usize,
                 &ihdr,
+                opts.filter_strategy,
             )?
         } else {
-            deflate_encode_pixels(&raw_pixels, row_bytes, image.height as usize, &ihdr)?
+            deflate_encode_pixels(
+                &raw_pixels,
+                row_bytes,
+                image.height as usize,
+                &ihdr,
+                opts.filter_strategy,
+            )?
         }
     };
 
@@ -589,13 +620,14 @@ fn pack_subbyte_rows(image: &PngImage, bit_depth: u8, row_bytes: usize) -> Resul
     Ok(out)
 }
 
-/// Filter each row (per the PNG spec's sum-of-abs heuristic), prepend the
+/// Filter each row according to `strategy` (W3C PNG3 §12.7), prepend the
 /// filter-type byte, then zlib compress. Returns the compressed IDAT bytes.
 pub(crate) fn deflate_encode_pixels(
     raw: &[u8],
     row_bytes: usize,
     height: usize,
     ihdr: &Ihdr,
+    strategy: FilterStrategy,
 ) -> Result<Vec<u8>> {
     let bpp = ihdr.bpp_for_filter()?;
     // 1 filter byte + row_bytes per row.
@@ -609,7 +641,7 @@ pub(crate) fn deflate_encode_pixels(
         } else {
             &raw[(y - 1) * row_bytes..y * row_bytes]
         };
-        let ft = choose_filter_heuristic(row, prev, bpp, &mut scratch);
+        let ft = strategy.pick(row, prev, bpp, &mut scratch);
         let dst_off = y * (1 + row_bytes);
         filtered[dst_off] = ft as u8;
         let data_slot = &mut filtered[dst_off + 1..dst_off + 1 + row_bytes];
@@ -630,6 +662,7 @@ pub(crate) fn deflate_encode_pixels_adam7(
     width: usize,
     height: usize,
     ihdr: &Ihdr,
+    strategy: FilterStrategy,
 ) -> Result<Vec<u8>> {
     let bpp = ihdr.bpp_for_filter()?;
     let bytes_per_pixel = ihdr.decoded_bytes_per_pixel()?;
@@ -671,7 +704,7 @@ pub(crate) fn deflate_encode_pixels_adam7(
             } else {
                 &pass_raw[(y - 1) * pass_row_bytes..y * pass_row_bytes]
             };
-            let ft = choose_filter_heuristic(row, prev, bpp, &mut scratch);
+            let ft = strategy.pick(row, prev, bpp, &mut scratch);
             let dst_off = prev_start + y * (1 + pass_row_bytes);
             filtered_all[dst_off] = ft as u8;
             let data_slot = &mut filtered_all[dst_off + 1..dst_off + 1 + pass_row_bytes];
@@ -702,9 +735,13 @@ pub(crate) fn deflate_encode_pixels_adam7(
 /// wire so a malformed payload cannot survive an encode.
 ///
 /// Filtering uses `bpp_for_filter` (= 1 for sub-byte per
-/// [`Ihdr::bpp_for_filter`]) and the same per-row min-sum-abs heuristic
-/// the non-interlaced path uses (§12.8).
-fn deflate_encode_pixels_adam7_subbyte(image: &PngImage, ihdr: &Ihdr) -> Result<Vec<u8>> {
+/// [`Ihdr::bpp_for_filter`]) and `strategy` (W3C PNG3 §12.7) to pick the
+/// filter for each pass row.
+fn deflate_encode_pixels_adam7_subbyte(
+    image: &PngImage,
+    ihdr: &Ihdr,
+    strategy: FilterStrategy,
+) -> Result<Vec<u8>> {
     debug_assert!(ihdr.bit_depth == 1 || ihdr.bit_depth == 2 || ihdr.bit_depth == 4);
     debug_assert!(ihdr.colour_type == 0 || ihdr.colour_type == 3);
     let bpp = ihdr.bpp_for_filter()?; // = 1 for sub-byte
@@ -768,7 +805,7 @@ fn deflate_encode_pixels_adam7_subbyte(image: &PngImage, ihdr: &Ihdr) -> Result<
             } else {
                 &pass_raw[(y - 1) * pass_row_bytes..y * pass_row_bytes]
             };
-            let ft = choose_filter_heuristic(row, prev, bpp, &mut scratch);
+            let ft = strategy.pick(row, prev, bpp, &mut scratch);
             let dst_off = prev_start + y * (1 + pass_row_bytes);
             filtered_all[dst_off] = ft as u8;
             let data_slot = &mut filtered_all[dst_off + 1..dst_off + 1 + pass_row_bytes];
@@ -873,13 +910,25 @@ pub fn encode_apng_with_options(
             // Sub-byte (ct=0/ct=3) interlaced: same per-pass pack +
             // filter path the standalone encoder uses (RFC 2083 §A.8
             // sub-image-per-pass rule).
-            deflate_encode_pixels_adam7_subbyte(frame, &ihdr)?
+            deflate_encode_pixels_adam7_subbyte(frame, &ihdr, opts.filter_strategy)?
         } else {
             let raw = flatten_and_normalise_pixels(frame, &ihdr, row_bytes)?;
             if opts.interlace {
-                deflate_encode_pixels_adam7(&raw, ihdr.width as usize, ihdr.height as usize, &ihdr)?
+                deflate_encode_pixels_adam7(
+                    &raw,
+                    ihdr.width as usize,
+                    ihdr.height as usize,
+                    &ihdr,
+                    opts.filter_strategy,
+                )?
             } else {
-                deflate_encode_pixels(&raw, row_bytes, ihdr.height as usize, &ihdr)?
+                deflate_encode_pixels(
+                    &raw,
+                    row_bytes,
+                    ihdr.height as usize,
+                    &ihdr,
+                    opts.filter_strategy,
+                )?
             }
         };
 

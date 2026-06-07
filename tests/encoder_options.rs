@@ -10,15 +10,61 @@ use oxideav_core::{
 };
 use oxideav_png::PngEncoderOptions;
 
-/// The schema the PNG encoder advertises: `interlace` (bool) and
+/// The schema the PNG encoder advertises: `interlace` (bool),
 /// `bit_depth` (u32; 0 = native, 1/2/4 = sub-byte for Gray8 / Pal8,
-/// 8 = no-op for those sources).
+/// 8 = no-op for those sources), and `filter` (string;
+/// `adaptive` / `none` / `sub` / `up` / `average` / `paeth`, default
+/// `adaptive` per W3C PNG3 §12.7).
 #[test]
-fn schema_advertises_interlace_and_bit_depth() {
+fn schema_advertises_interlace_bit_depth_and_filter() {
     let schema = <PngEncoderOptions as CodecOptionsStruct>::SCHEMA;
-    assert_eq!(schema.len(), 2);
+    assert_eq!(schema.len(), 3);
     assert_eq!(schema[0].name, "interlace");
     assert_eq!(schema[1].name, "bit_depth");
+    assert_eq!(schema[2].name, "filter");
+}
+
+/// `filter` accepts every §12.7 filter type by name (case-insensitive)
+/// plus the explicit `adaptive` / empty string defaults; an unknown
+/// value is rejected with an error message that names the offending
+/// token so the caller can see what they typed.
+#[test]
+fn parse_from_bag_sets_filter_strategy() {
+    use oxideav_png::{FilterStrategy, FilterType};
+    for (raw, expected) in [
+        ("", FilterStrategy::Adaptive),
+        ("adaptive", FilterStrategy::Adaptive),
+        ("Adaptive", FilterStrategy::Adaptive),
+        ("none", FilterStrategy::Fixed(FilterType::None)),
+        ("NONE", FilterStrategy::Fixed(FilterType::None)),
+        ("sub", FilterStrategy::Fixed(FilterType::Sub)),
+        ("up", FilterStrategy::Fixed(FilterType::Up)),
+        ("average", FilterStrategy::Fixed(FilterType::Average)),
+        ("paeth", FilterStrategy::Fixed(FilterType::Paeth)),
+        ("Paeth", FilterStrategy::Fixed(FilterType::Paeth)),
+    ] {
+        let opts = CodecOptions::new().set("filter", raw);
+        let parsed = parse_options::<PngEncoderOptions>(&opts).expect("parse");
+        assert_eq!(parsed.filter_strategy, expected, "filter = {raw:?}");
+    }
+}
+
+#[test]
+fn filter_strategy_default_when_unset() {
+    use oxideav_png::FilterStrategy;
+    let opts = CodecOptions::new();
+    let parsed = parse_options::<PngEncoderOptions>(&opts).expect("parse");
+    assert_eq!(parsed.filter_strategy, FilterStrategy::Adaptive);
+}
+
+#[test]
+fn unknown_filter_value_rejected() {
+    let opts = CodecOptions::new().set("filter", "median");
+    let err = parse_options::<PngEncoderOptions>(&opts).unwrap_err();
+    assert!(
+        matches!(err, Error::InvalidData(ref s) if s.contains("median")),
+        "got {err:?}"
+    );
 }
 
 /// `bit_depth` accepts a u32 and threads through into

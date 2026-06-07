@@ -57,7 +57,23 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   Empty passes (the §2.6 caution for images with fewer than five rows
   or columns) emit no filter-type bytes. The Adam7 sub-byte path is
   available on both the standalone PNG encoder and APNG output.
-- Per-row filter heuristic (min-sum-abs-delta per §12.8)
+- Per-row filter heuristic (min-sum-abs-delta per §12.8) by default;
+  caller-selectable filter strategy via `PngEncoderOptions::
+  filter_strategy: FilterStrategy` (W3C PNG3 §12.7). `Adaptive` (the
+  default) keeps the §12.8 trial-all-five heuristic and matches the
+  pre-r245 byte stream. `Fixed(FilterType)` pins one filter for every
+  row and skips the per-row trial — about 5× cheaper to run, at the
+  compression cost of giving up the per-row best pick. §12.7's spec
+  guidance maps to: `Fixed(FilterType::Paeth)` is most likely the
+  best fixed choice on truecolour and grayscale; `Fixed(FilterType::
+  None)` is recommended for colour type 3 (indexed) and for bit
+  depths below 8. The encoder applies whatever strategy the caller
+  picks at all three filter sites — the non-interlaced ≥ 8-bit path,
+  the Adam7 ≥ 8-bit path, and the Adam7 sub-byte path. Registry-side
+  `CodecOptions` exposes a `filter` string key with the values
+  `adaptive` / `none` / `sub` / `up` / `average` / `paeth`
+  (case-insensitive); the empty string maps to `adaptive` so callers
+  that set the key without picking a value get the default.
 - APNG output when multiple frames submitted or `frame_rate` is set
 
 ## Metadata round-trip

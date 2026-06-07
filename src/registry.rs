@@ -122,8 +122,20 @@ impl CodecOptionsStruct for PngEncoderOptions {
                    8 is a no-op for those sources. \
                    0 (the default) keeps the source format's native depth.",
         },
+        OptionField {
+            name: "filter",
+            kind: OptionKind::String,
+            default: OptionValue::String(String::new()),
+            help: "Filter-selection policy (W3C PNG3 §12.7). \
+                   `adaptive` (the default) applies the §12.8 per-row \
+                   min-sum-abs-delta heuristic across all five filter types. \
+                   `none` / `sub` / `up` / `average` / `paeth` pin a single \
+                   filter type for every row, skipping the per-row trial. \
+                   An empty value is treated as `adaptive`.",
+        },
     ];
     fn apply(&mut self, key: &str, v: &OptionValue) -> oxideav_core::Result<()> {
+        use crate::filter::{FilterStrategy, FilterType};
         match key {
             "interlace" => self.interlace = v.as_bool()?,
             "bit_depth" => {
@@ -134,6 +146,26 @@ impl CodecOptionsStruct for PngEncoderOptions {
                 // so a bogus value here surfaces as a clear encode error
                 // rather than getting silently rewritten.
                 self.bit_depth = if raw == 0 { None } else { Some(raw as u8) };
+            }
+            "filter" => {
+                let raw = v.as_str()?;
+                // Case-insensitive so "Paeth" / "PAETH" / "paeth" all
+                // map to the same strategy — matches W3C PNG3 §12.7's
+                // mixed-case prose.
+                self.filter_strategy = match raw.to_ascii_lowercase().as_str() {
+                    "" | "adaptive" => FilterStrategy::Adaptive,
+                    "none" => FilterStrategy::Fixed(FilterType::None),
+                    "sub" => FilterStrategy::Fixed(FilterType::Sub),
+                    "up" => FilterStrategy::Fixed(FilterType::Up),
+                    "average" => FilterStrategy::Fixed(FilterType::Average),
+                    "paeth" => FilterStrategy::Fixed(FilterType::Paeth),
+                    other => {
+                        return Err(oxideav_core::Error::invalid(format!(
+                            "PNG encoder: option `filter` got {other:?}; \
+                             expected one of adaptive / none / sub / up / average / paeth"
+                        )))
+                    }
+                };
             }
             _ => unreachable!("guarded by SCHEMA"),
         }

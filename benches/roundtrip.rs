@@ -215,6 +215,7 @@ fn bench_roundtrip_rgba_adam7_320x240(c: &mut Criterion) {
         interlace: true,
         metadata: None,
         bit_depth: None,
+        ..Default::default()
     };
     let mut g = c.benchmark_group("roundtrip_rgba_adam7_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));

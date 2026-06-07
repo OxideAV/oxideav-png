@@ -111,6 +111,7 @@ pub use encoder::{
     PngEncoderOptions,
 };
 pub use error::{PngError, Result};
+pub use filter::{FilterStrategy, FilterType};
 pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
 pub use metadata::{
     Bkgd, Chrm, Cicp, Clli, Exif, Gama, Hist, Iccp, Itxt, Mdcv, Phys, PhysUnit, PngMetadata,
