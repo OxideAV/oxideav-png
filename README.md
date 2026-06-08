@@ -271,6 +271,24 @@ repeated (the "Multiple OK? No" rule in RFC 2083 §4.3 / W3C PNG3
 instances are explicitly permitted (§4.2.7 ¶3 / §4.2.10 ¶6 /
 §11.3.3.4).
 
+## Chunk naming property bits
+
+`ChunkType` wraps a four-byte chunk name and exposes the W3C PNG 3rd
+Edition §5.4 ("Chunk naming conventions") property bits as `const fn`
+predicates: `is_ancillary` / `is_critical`, `is_private` / `is_public`,
+`is_reserved_bit_set`, `is_safe_to_copy` / `is_unsafe_to_copy`, plus the
+§13.1 `is_well_formed_name` letter-only check. Bit 5 (value `0x20`) of
+each name byte is the property bit — uppercase = `0`, lowercase = `1`.
+A `ChunkRef::type_code()` bridge drops a borrowed chunk straight into
+the typed accessor without copying the four bytes through a local. The
+property bits are "an inherent part of the chunk type, and hence are
+fixed for any chunk type" (§5.4), so e.g. `acTL` / `fcTL` / `fdAT`
+read as private even though W3C PNG 3rd Edition now documents APNG —
+the chunks were minted with a lowercase second letter under the
+original Mozilla extension and §5.4 freezes the property bit there.
+The accessor is pure read-only inspection; nothing in the decode /
+encode flow has changed.
+
 ## Robustness
 
 The decoder is fuzzed with `cargo-fuzz`. Six targets live under `fuzz/`:

@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Typed `ChunkType` accessor exposing the W3C PNG 3rd Edition §5.4
+  ("Chunk naming conventions") property bits — `is_ancillary`,
+  `is_critical`, `is_private`, `is_public`, `is_reserved_bit_set`,
+  `is_safe_to_copy`, `is_unsafe_to_copy` — all `const fn` for use in
+  compile-time tables. Wraps the existing four-byte `chunk_type`
+  `[u8; 4]` so the bit-5 (value `0x20`) property-bit decoding lives in
+  one place instead of being re-derived at every call site. Backed by
+  a `ChunkRef::type_code()` bridge so callers that hold a borrowed
+  chunk can drop straight into the typed accessor without copying the
+  four bytes through a local. Also exposes `is_well_formed_name()`
+  which enforces the §13.1 "type names shall consist of letters"
+  constraint (ASCII A..Z / a..z only — digits, punctuation, and
+  control bytes all rejected), and `as_str()` which mirrors the
+  `ChunkRef::type_str` `"????"` fallback for non-letter bytes.
+  `From<[u8; 4]>` and `Into<[u8; 4]>` round-trip the wrapped name.
+  Eleven unit tests cross-check the property bits against the §5.4
+  worked example (`cHNk` → ancillary, public, reserved-bit-clear,
+  safe-to-copy), the four critical chunks (`IHDR` / `PLTE` / `IDAT` /
+  `IEND` all uppercase first letter), every §11.3 ancillary chunk
+  the codec round-trips, the §11.3.2 colour-space chunks plus `tIME`
+  carrying the unsafe-to-copy bit set, the §11.3.6 APNG chunks
+  (`acTL` / `fcTL` / `fdAT`) reading as private (their second letter
+  is lowercase from the original Mozilla minting and §5.4's "property
+  bits are an inherent part of the chunk type" rule freezes that),
+  and the reserved-bit / well-formedness rejection of synthesised
+  ill-formed names (digits, underscores, high-bit bytes). Pure
+  accessor — no parsing or chunk-stream behaviour changes, additive
+  to the existing `chunk` module surface. Re-exported from the crate
+  root as `oxideav_png::ChunkType` so consumers don't need to import
+  through `chunk::`.
+
 - Encoder filter-selection strategy (W3C PNG3 §12.7). New
   `PngEncoderOptions::filter_strategy: FilterStrategy` field plumbed
   through every encode path — non-interlaced ≥ 8-bit, Adam7 ≥ 8-bit,
