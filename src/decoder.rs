@@ -124,14 +124,28 @@ impl Ihdr {
 
     /// Number of channels implied by `colour_type`.
     pub fn channels(&self) -> Result<usize> {
-        Ok(match self.colour_type {
-            0 => 1, // grayscale
-            2 => 3, // RGB
-            3 => 1, // palette index
-            4 => 2, // gray + alpha
-            6 => 4, // RGBA
-            other => return Err(Error::invalid(format!("PNG: bad colour type {other}"))),
-        })
+        Ok(self.colour_type_typed()?.channels())
+    }
+
+    /// Decode the raw IHDR colour-type byte into the typed
+    /// [`crate::chunk::ColourType`] enum (W3C PNG3 §6.1 / Table 9).
+    /// Errors with `InvalidData` when the byte is outside the
+    /// `{0, 2, 3, 4, 6}` set of valid values — the same rejection
+    /// the existing `channels()` returned.
+    pub fn colour_type_typed(&self) -> Result<crate::chunk::ColourType> {
+        crate::chunk::ColourType::from_byte(self.colour_type)
+            .ok_or_else(|| Error::invalid(format!("PNG: bad colour type {}", self.colour_type)))
+    }
+
+    /// W3C PNG3 §11.2.1 Table 12 ("Allowed combinations of color type
+    /// and bit depth"): `true` when the IHDR (colour_type, bit_depth)
+    /// pair is one of the table's rows. Returns `Err` when
+    /// `colour_type` itself is out of range. The decoder's wire-byte
+    /// validation routes through this so the Table 12 acceptance
+    /// criterion lives in one place rather than being re-derived at
+    /// every gate.
+    pub fn is_allowed_combination(&self) -> Result<bool> {
+        Ok(self.colour_type_typed()?.allows_bit_depth(self.bit_depth))
     }
 
     /// Bytes per full pixel (rounded up to at least 1 for filtering

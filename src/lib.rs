@@ -101,7 +101,7 @@ pub mod metadata;
 pub mod registry;
 
 // Public unconditional API — works whether or not `registry` is enabled.
-pub use chunk::ChunkType;
+pub use chunk::{ChunkType, ColourType};
 pub use decoder::CODEC_ID_STR;
 pub use decoder::{
     decode_apng, decode_apng_info, decode_png, decode_png_to_rgba, parse_apng, parse_metadata,

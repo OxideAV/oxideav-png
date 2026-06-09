@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Typed `ColourType` primitive wrapping the IHDR colour-type byte
+  (W3C PNG3 §11.2.1 "Color type is a single-byte integer") with the
+  §6.1 / Table 9 named encoding: `Greyscale` (0), `Truecolor` (2),
+  `IndexedColor` (3), `GreyscaleAlpha` (4), `TruecolorAlpha` (6).
+  `ColourType::from_byte` rejects every value outside that set so a
+  malformed IHDR cannot slip an undefined combination (1 = palette
+  without truecolor, 5 / 7 = palette + alpha) past the typed gate.
+  The §6.1 component bits — `1` palette used, `2` truecolor used,
+  `4` alpha used — are surfaced as `palette_used` / `truecolor_used`
+  / `alpha_used` `const fn` predicates so callers do not re-derive
+  the bit math at every branch. `channels` returns 1 / 3 / 1 / 2 / 4
+  per §4.5 pixel layouts and `requires_plte` flags the colour-type-3
+  row of Table 12 where a `PLTE` chunk is mandatory.
+  `allows_bit_depth` decodes W3C PNG3 §11.2.1 Table 12 ("Allowed
+  combinations of color type and bit depth") in one place — greyscale
+  accepts 1/2/4/8/16, indexed 1/2/4/8 (no 16-bit), truecolor /
+  greyscale-with-alpha / truecolor-with-alpha 8 and 16 only.
+  `Ihdr::colour_type_typed()` lifts the raw `u8` field into the
+  typed enum without breaking the existing `colour_type: u8` field;
+  `Ihdr::is_allowed_combination()` returns the Table 12 verdict for
+  the parsed (colour_type, bit_depth) pair. `Ihdr::channels()` was
+  rewired through the typed primitive so the channel-count math
+  lives behind a single typed accessor. Seven unit tests cross-
+  check the typed primitive against the worked entries in §6.1 /
+  Table 9 (every named row + every undefined byte rejected), the
+  §6.1 component-bit decomposition (palette / truecolor / alpha
+  bits set on exactly the expected variants), §4.5 channel counts
+  (1, 3, 1, 2, 4 across the five rows), Table 12 acceptance for
+  each colour type's allowed bit depths, and the indexed-only
+  `requires_plte` rider. Re-exported from the crate root as
+  `oxideav_png::ColourType`. Pure typed-primitive addition; no
+  decode / encode behavioural change.
+
 - Typed `ChunkType` accessor exposing the W3C PNG 3rd Edition §5.4
   ("Chunk naming conventions") property bits — `is_ancillary`,
   `is_critical`, `is_private`, `is_public`, `is_reserved_bit_set`,

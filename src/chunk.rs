@@ -192,6 +192,145 @@ impl From<ChunkType> for [u8; 4] {
     }
 }
 
+/// The IHDR colour-type byte (W3C PNG 3rd Edition §11.2.1 "Color type
+/// is a single-byte integer") with the W3C PNG3 §6.1 / Table 9 named
+/// values surfaced so callers do not have to memorise the numeric
+/// encoding every time they branch on it.
+///
+/// §6.1 defines each colour type as "the sum of the following values:
+/// 1 (palette used), 2 (truecolor used) and 4 (alpha used)" — so the
+/// five permitted values land on a sparse subset of `0..=7`:
+///
+/// | Value | PNG image type        | Components               |
+/// |-------|-----------------------|--------------------------|
+/// | 0     | Greyscale             | gray                     |
+/// | 2     | Truecolor             | R, G, B                  |
+/// | 3     | Indexed-color         | palette index            |
+/// | 4     | Greyscale with alpha  | gray, alpha              |
+/// | 6     | Truecolor with alpha  | R, G, B, alpha           |
+///
+/// Values 1, 5, and 7 are explicitly absent from §6.1 / Table 9 — `1`
+/// would mean "palette used without truecolor", which is meaningless
+/// (an indexed image is colour type 3, not 1), and `5` / `7` would
+/// imply "palette + alpha" combinations the spec does not define
+/// (indexed transparency lives in the `tRNS` chunk, not the colour
+/// type byte). [`ColourType::from_byte`] therefore rejects every
+/// value outside `{0, 2, 3, 4, 6}` so callers cannot accidentally
+/// invent a non-conforming combination.
+///
+/// W3C PNG3 §11.2.1 Table 12 ("Allowed combinations of color type and
+/// bit depth") restricts which bit depths pair with which colour
+/// type; the [`ColourType::allows_bit_depth`] predicate decodes that
+/// table without reproducing it at every call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum ColourType {
+    /// Colour type 0 — each pixel is a greyscale sample.
+    Greyscale = 0,
+    /// Colour type 2 — each pixel is an R,G,B triple.
+    Truecolor = 2,
+    /// Colour type 3 — each pixel is a palette index; a `PLTE` chunk
+    /// shall appear (Table 12).
+    IndexedColor = 3,
+    /// Colour type 4 — each pixel is a greyscale sample followed by
+    /// an alpha sample.
+    GreyscaleAlpha = 4,
+    /// Colour type 6 — each pixel is an R,G,B triple followed by an
+    /// alpha sample.
+    TruecolorAlpha = 6,
+}
+
+impl ColourType {
+    /// W3C PNG3 §6.1 "palette used" component bit of the colour-type
+    /// integer (set on colour type 3 only).
+    pub const PALETTE_USED_BIT: u8 = 1;
+    /// W3C PNG3 §6.1 "truecolor used" component bit (set on colour
+    /// types 2 and 6).
+    pub const TRUECOLOR_USED_BIT: u8 = 2;
+    /// W3C PNG3 §6.1 "alpha used" component bit (set on colour types
+    /// 4 and 6).
+    pub const ALPHA_USED_BIT: u8 = 4;
+
+    /// Parse the raw IHDR colour-type byte into the typed enum. Values
+    /// outside `{0, 2, 3, 4, 6}` are rejected — §6.1 / Table 9 lists
+    /// no other valid combinations.
+    pub const fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Greyscale),
+            2 => Some(Self::Truecolor),
+            3 => Some(Self::IndexedColor),
+            4 => Some(Self::GreyscaleAlpha),
+            6 => Some(Self::TruecolorAlpha),
+            _ => None,
+        }
+    }
+
+    /// The on-wire byte for this colour type.
+    pub const fn as_byte(self) -> u8 {
+        self as u8
+    }
+
+    /// `true` when the §6.1 "palette used" component bit is set
+    /// (colour type 3 only).
+    pub const fn palette_used(self) -> bool {
+        self.as_byte() & Self::PALETTE_USED_BIT != 0
+    }
+
+    /// `true` when the §6.1 "truecolor used" component bit is set
+    /// (colour types 2 and 6).
+    pub const fn truecolor_used(self) -> bool {
+        self.as_byte() & Self::TRUECOLOR_USED_BIT != 0
+    }
+
+    /// `true` when the §6.1 "alpha used" component bit is set
+    /// (colour types 4 and 6).
+    pub const fn alpha_used(self) -> bool {
+        self.as_byte() & Self::ALPHA_USED_BIT != 0
+    }
+
+    /// Number of samples per pixel implied by the colour type.
+    /// `3` for truecolor, `4` for truecolor-with-alpha, `2` for
+    /// greyscale-with-alpha, `1` for greyscale and indexed.
+    pub const fn channels(self) -> usize {
+        match self {
+            Self::Greyscale | Self::IndexedColor => 1,
+            Self::GreyscaleAlpha => 2,
+            Self::Truecolor => 3,
+            Self::TruecolorAlpha => 4,
+        }
+    }
+
+    /// Decode W3C PNG3 §11.2.1 Table 12 ("Allowed combinations of
+    /// color type and bit depth"). `true` when the `(colour_type,
+    /// bit_depth)` pair is one of the rows in that table:
+    ///
+    /// * colour type 0 (greyscale): 1, 2, 4, 8, 16
+    /// * colour type 2 (truecolor): 8, 16
+    /// * colour type 3 (indexed-color): 1, 2, 4, 8
+    /// * colour type 4 (greyscale with alpha): 8, 16
+    /// * colour type 6 (truecolor with alpha): 8, 16
+    ///
+    /// Every other pair is non-conforming — e.g. an attempt to
+    /// encode RGB at 4-bit, or indexed at 16-bit.
+    pub const fn allows_bit_depth(self, bit_depth: u8) -> bool {
+        match self {
+            Self::Greyscale => matches!(bit_depth, 1 | 2 | 4 | 8 | 16),
+            Self::IndexedColor => matches!(bit_depth, 1 | 2 | 4 | 8),
+            Self::Truecolor | Self::GreyscaleAlpha | Self::TruecolorAlpha => {
+                matches!(bit_depth, 8 | 16)
+            }
+        }
+    }
+
+    /// `true` when colour type 3 (indexed) — the one row of Table 12
+    /// that requires a `PLTE` chunk. Convenience wrapper around
+    /// [`Self::palette_used`] kept for readability at call sites that
+    /// branch on the chunk presence rather than the bit.
+    pub const fn requires_plte(self) -> bool {
+        matches!(self, Self::IndexedColor)
+    }
+}
+
 /// Read one chunk starting at `buf[pos..]`, verify its CRC32, and return
 /// the parsed `ChunkRef` + the updated position.
 pub fn read_chunk<'a>(buf: &'a [u8], pos: usize) -> Result<(ChunkRef<'a>, usize)> {
@@ -455,6 +594,136 @@ mod tests {
         assert!(ChunkType::new(*b"IHDR").is_well_formed_name());
         assert!(ChunkType::new(*b"abcd").is_well_formed_name());
         assert!(ChunkType::new(*b"AbCd").is_well_formed_name());
+    }
+
+    // §6.1 / Table 9 colour-type encoding + §11.2.1 / Table 12
+    // allowed-combinations table — every assertion below cross-checks
+    // the typed wrapper against the worked entries in those tables.
+
+    #[test]
+    fn colour_type_from_byte_accepts_section_6_1_table_9_values() {
+        assert_eq!(ColourType::from_byte(0), Some(ColourType::Greyscale));
+        assert_eq!(ColourType::from_byte(2), Some(ColourType::Truecolor));
+        assert_eq!(ColourType::from_byte(3), Some(ColourType::IndexedColor));
+        assert_eq!(ColourType::from_byte(4), Some(ColourType::GreyscaleAlpha));
+        assert_eq!(ColourType::from_byte(6), Some(ColourType::TruecolorAlpha));
+    }
+
+    #[test]
+    fn colour_type_from_byte_rejects_undefined_combinations() {
+        // §6.1 / Table 9 does not list 1 ("palette without truecolor"),
+        // 5, or 7 ("palette + alpha"). Values above 7 cannot be valid
+        // either since the §6.1 bit components only span 0..=7.
+        for b in [1u8, 5, 7, 8, 16, 127, 255] {
+            assert_eq!(
+                ColourType::from_byte(b),
+                None,
+                "byte {b} should not parse as a colour type"
+            );
+        }
+    }
+
+    #[test]
+    fn colour_type_round_trips_through_byte() {
+        for ct in [
+            ColourType::Greyscale,
+            ColourType::Truecolor,
+            ColourType::IndexedColor,
+            ColourType::GreyscaleAlpha,
+            ColourType::TruecolorAlpha,
+        ] {
+            assert_eq!(ColourType::from_byte(ct.as_byte()), Some(ct));
+        }
+    }
+
+    #[test]
+    fn colour_type_component_bits_match_section_6_1_definition() {
+        // §6.1 "the sum of the following values: 1 (palette used),
+        // 2 (truecolor used) and 4 (alpha used)".
+        // Greyscale = 0: none of the bits set.
+        assert!(!ColourType::Greyscale.palette_used());
+        assert!(!ColourType::Greyscale.truecolor_used());
+        assert!(!ColourType::Greyscale.alpha_used());
+        // Truecolor = 2: truecolor bit only.
+        assert!(!ColourType::Truecolor.palette_used());
+        assert!(ColourType::Truecolor.truecolor_used());
+        assert!(!ColourType::Truecolor.alpha_used());
+        // IndexedColor = 3 = 1 | 2: palette + truecolor (a palette
+        // entry IS an RGB triple per §11.2.2).
+        assert!(ColourType::IndexedColor.palette_used());
+        assert!(ColourType::IndexedColor.truecolor_used());
+        assert!(!ColourType::IndexedColor.alpha_used());
+        // GreyscaleAlpha = 4: alpha bit only.
+        assert!(!ColourType::GreyscaleAlpha.palette_used());
+        assert!(!ColourType::GreyscaleAlpha.truecolor_used());
+        assert!(ColourType::GreyscaleAlpha.alpha_used());
+        // TruecolorAlpha = 6 = 2 | 4: truecolor + alpha.
+        assert!(!ColourType::TruecolorAlpha.palette_used());
+        assert!(ColourType::TruecolorAlpha.truecolor_used());
+        assert!(ColourType::TruecolorAlpha.alpha_used());
+    }
+
+    #[test]
+    fn colour_type_channels_match_section_4_5_pixel_layout() {
+        // §4.5 / §6.1 pixel decompositions: greyscale + indexed are
+        // 1 channel, greyscale-with-alpha is 2, truecolor is 3,
+        // truecolor-with-alpha is 4. The numbers also fall out of
+        // the §6.1 bit math: channels = (truecolor_used ? 3 : 1) +
+        // (alpha_used ? 1 : 0).
+        assert_eq!(ColourType::Greyscale.channels(), 1);
+        assert_eq!(ColourType::Truecolor.channels(), 3);
+        assert_eq!(ColourType::IndexedColor.channels(), 1);
+        assert_eq!(ColourType::GreyscaleAlpha.channels(), 2);
+        assert_eq!(ColourType::TruecolorAlpha.channels(), 4);
+    }
+
+    #[test]
+    fn colour_type_allows_bit_depth_decodes_table_12_rows() {
+        // Greyscale (row 1): 1, 2, 4, 8, 16 allowed; nothing else.
+        for bd in [1u8, 2, 4, 8, 16] {
+            assert!(ColourType::Greyscale.allows_bit_depth(bd));
+        }
+        for bd in [0u8, 3, 5, 6, 7, 9, 12, 32] {
+            assert!(!ColourType::Greyscale.allows_bit_depth(bd));
+        }
+        // Truecolor (row 2): 8, 16 only.
+        assert!(ColourType::Truecolor.allows_bit_depth(8));
+        assert!(ColourType::Truecolor.allows_bit_depth(16));
+        for bd in [1u8, 2, 4, 32] {
+            assert!(!ColourType::Truecolor.allows_bit_depth(bd));
+        }
+        // IndexedColor (row 3): 1, 2, 4, 8 (no 16-bit indexed).
+        for bd in [1u8, 2, 4, 8] {
+            assert!(ColourType::IndexedColor.allows_bit_depth(bd));
+        }
+        for bd in [0u8, 3, 5, 7, 16, 32] {
+            assert!(!ColourType::IndexedColor.allows_bit_depth(bd));
+        }
+        // GreyscaleAlpha (row 4): 8, 16 only.
+        for bd in [8u8, 16] {
+            assert!(ColourType::GreyscaleAlpha.allows_bit_depth(bd));
+        }
+        for bd in [1u8, 2, 4] {
+            assert!(!ColourType::GreyscaleAlpha.allows_bit_depth(bd));
+        }
+        // TruecolorAlpha (row 5): 8, 16 only.
+        for bd in [8u8, 16] {
+            assert!(ColourType::TruecolorAlpha.allows_bit_depth(bd));
+        }
+        for bd in [1u8, 2, 4] {
+            assert!(!ColourType::TruecolorAlpha.allows_bit_depth(bd));
+        }
+    }
+
+    #[test]
+    fn colour_type_requires_plte_matches_table_12_palette_row() {
+        // Only colour type 3 (indexed) carries the "a PLTE chunk
+        // shall appear" rider in Table 12.
+        assert!(ColourType::IndexedColor.requires_plte());
+        assert!(!ColourType::Greyscale.requires_plte());
+        assert!(!ColourType::Truecolor.requires_plte());
+        assert!(!ColourType::GreyscaleAlpha.requires_plte());
+        assert!(!ColourType::TruecolorAlpha.requires_plte());
     }
 
     #[test]

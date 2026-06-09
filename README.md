@@ -289,6 +289,33 @@ original Mozilla extension and §5.4 freezes the property bit there.
 The accessor is pure read-only inspection; nothing in the decode /
 encode flow has changed.
 
+## Colour-type typed primitive
+
+`ColourType` wraps the IHDR colour-type byte (W3C PNG3 §11.2.1 "Color
+type is a single-byte integer") and surfaces the §6.1 / Table 9
+named encoding — `Greyscale` (0), `Truecolor` (2), `IndexedColor` (3),
+`GreyscaleAlpha` (4), `TruecolorAlpha` (6). The five variants are the
+*only* values §6.1 / Table 9 defines; `ColourType::from_byte` rejects
+every other byte (1, 5, 7, anything ≥ 8) so a malformed IHDR cannot
+slip an invented combination past the typed gate. The §6.1 component
+bits — `1` palette used, `2` truecolor used, `4` alpha used — are
+exposed as `palette_used` / `truecolor_used` / `alpha_used`
+predicates and the §4.5 pixel-channel count rolls up through
+`channels` (1 / 3 / 1 / 2 / 4 across the five rows). The
+`allows_bit_depth` predicate decodes W3C PNG3 §11.2.1 Table 12
+("Allowed combinations of color type and bit depth") in one place:
+greyscale accepts 1, 2, 4, 8, 16; indexed accepts 1, 2, 4, 8
+(no 16-bit); truecolor / greyscale-with-alpha / truecolor-with-alpha
+all accept only 8 and 16. `requires_plte` flags the one Table 12
+row where a `PLTE` chunk is mandatory (colour type 3). `Ihdr` grows
+a `colour_type_typed()` accessor that lifts the raw `u8` field into
+the typed enum without breaking the existing `colour_type: u8` field,
+and `is_allowed_combination()` returns the Table 12 verdict for the
+(colour_type, bit_depth) pair on the parsed IHDR — handy as a single
+gate at decode entry where the byte combinations used to be
+re-derived inline. Pure typed-primitive addition; no behavioural
+change to existing decode / encode paths.
+
 ## Robustness
 
 The decoder is fuzzed with `cargo-fuzz`. Six targets live under `fuzz/`:
