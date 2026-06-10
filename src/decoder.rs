@@ -1285,6 +1285,13 @@ pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
     let mut out_frames: Vec<ApngFrameImage> = Vec::new();
 
     for frame in info.frames.iter() {
+        // W3C PNG3 §11.3.6.1: the frame region (non-zero width/height,
+        // x_offset + width ≤ canvas width, y_offset + height ≤ canvas height)
+        // "may not fall outside of the default image". Reject a hostile fcTL
+        // here rather than relying on the blit/clear clip to silently drop the
+        // out-of-canvas pixels.
+        frame.fctl.validate_within_canvas(canvas_w, canvas_h)?;
+
         // Build a synthetic IHDR-like block for the sub-frame dimensions.
         // Same colour_type / bit_depth / compression / filter / interlace.
         let sub_ihdr = Ihdr {

@@ -16,7 +16,14 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
 - Sub-byte grayscale scaled up to 8-bit (PNG §13.12 ×255 / ×85 / ×17)
 - Sub-byte indexed expanded to one index-byte-per-pixel
 - APNG: `acTL` / `fcTL` / `fdAT` with None/Background/Previous disposal and
-  Source/Over blending
+  Source/Over blending. Each `fcTL` frame region is policed against the
+  IHDR canvas per W3C PNG3 §11.3.6.1: `width` / `height` must be greater
+  than zero, and the region "may not fall outside of the default image"
+  (`x_offset + width ≤` canvas width, `y_offset + height ≤` canvas height,
+  the two sums taken in `u64` so an offset/extent pair near `u32::MAX`
+  cannot wrap past the bound). A hostile out-of-canvas frame is rejected
+  with an error on both the standalone `decode_apng` path and the demuxer
+  frame-splitter rather than silently clipped.
 - `PLTE` + `tRNS` palettes — `PLTE` drives `Pal8` index resolution and the
   demuxer preserves both verbatim in `CodecParameters::extradata` so the
   encoder can faithfully rewrite them

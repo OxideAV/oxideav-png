@@ -1,13 +1,18 @@
 //! Regression: a malformed APNG `fcTL` may carry an `x_offset` /
 //! `y_offset` (or sub-frame width/height) that places the frame entirely
-//! outside the canvas. The PNG spec (§ APNG fcTL) says these must lie
-//! within the canvas, but a hostile stream need not honour it. The
-//! decoder must reject / clamp such frames gracefully, never panic.
+//! outside the canvas. W3C PNG 3rd Edition §11.3.6.1 says the region "may
+//! not fall outside of the default image" — a hostile stream need not
+//! honour it, so the decoder rejects such a frame with an `Err` (and, as
+//! before, never panics).
 //!
-//! Found by the `decode` cargo-fuzz target's attack-surface analysis:
-//! `clear_region` (Background-disposal clear) turned an out-of-canvas
-//! `x_offset` into a byte offset past the canvas buffer and indexed an
-//! (even empty) slice out of bounds. Fixed in `decoder::clear_region`.
+//! Originally found by the `decode` cargo-fuzz target's attack-surface
+//! analysis: `clear_region` (Background-disposal clear) turned an
+//! out-of-canvas `x_offset` into a byte offset past the canvas buffer and
+//! indexed an (even empty) slice out of bounds — first hardened in
+//! `decoder::clear_region` so the clip never panicked. The §11.3.6.1
+//! bounds gate in `Fctl::validate_within_canvas` now rejects the frame up
+//! front, so these crafted streams return `Err` rather than a clamped
+//! decode.
 
 use oxideav_png::chunk::write_chunk;
 use oxideav_png::decode_apng;
@@ -68,24 +73,24 @@ fn craft_apng(x_offset: u32, y_offset: u32, dispose_op: u8) -> Vec<u8> {
 }
 
 #[test]
-fn apng_xoffset_past_canvas_background_dispose_does_not_panic() {
+fn apng_xoffset_past_canvas_background_dispose_rejected() {
     // x_offset 1000 >> canvas width 6, Background disposal (op 1) — the
-    // path that previously indexed `canvas[4000..4000]` and panicked.
+    // path that previously indexed `canvas[4000..4000]`. §11.3.6.1 rejects
+    // the frame (x_offset + width > canvas width); never panics.
     let png = craft_apng(1000, 0, 1);
-    // Must return (Ok or Err), never panic.
-    let _ = decode_apng(&png);
+    assert!(decode_apng(&png).is_err());
 }
 
 #[test]
-fn apng_yoffset_past_canvas_background_dispose_does_not_panic() {
+fn apng_yoffset_past_canvas_background_dispose_rejected() {
     let png = craft_apng(0, 1000, 1);
-    let _ = decode_apng(&png);
+    assert!(decode_apng(&png).is_err());
 }
 
 #[test]
-fn apng_both_offsets_past_canvas_all_dispose_ops_do_not_panic() {
+fn apng_both_offsets_past_canvas_all_dispose_ops_rejected() {
     for dispose_op in 0..=2u8 {
         let png = craft_apng(5000, 5000, dispose_op);
-        let _ = decode_apng(&png);
+        assert!(decode_apng(&png).is_err());
     }
 }

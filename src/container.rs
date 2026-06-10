@@ -200,6 +200,14 @@ fn build_apng_packets(
     let plte = chunks.iter().find(|c| c.is_type(b"PLTE")).map(|c| c.data);
     let trns = chunks.iter().find(|c| c.is_type(b"tRNS")).map(|c| c.data);
 
+    // Canvas (default-image) dimensions from IHDR — every fcTL frame region is
+    // policed against these per W3C PNG3 §11.3.6.1.
+    if ihdr.len() < 8 {
+        return Err(Error::invalid("PNG: IHDR too short for width/height"));
+    }
+    let canvas_width = u32::from_be_bytes([ihdr[0], ihdr[1], ihdr[2], ihdr[3]]);
+    let canvas_height = u32::from_be_bytes([ihdr[4], ihdr[5], ihdr[6], ihdr[7]]);
+
     let mut packets: Vec<Packet> = Vec::new();
     let mut pts: i64 = 0;
 
@@ -227,7 +235,9 @@ fn build_apng_packets(
                     packets.push(p);
                 }
                 pending_data.clear();
-                pending_fctl = Some(Fctl::parse(c.data)?);
+                let fctl = Fctl::parse(c.data)?;
+                fctl.validate_within_canvas(canvas_width, canvas_height)?;
+                pending_fctl = Some(fctl);
             }
             // Only attach IDAT bytes to a frame when they're claimed by a
             // preceding fcTL — otherwise they belong to the default image.
@@ -499,4 +509,75 @@ fn merge_still_packets_to_apng(packets: &[Packet], _stream: &StreamInfo) -> Resu
     }
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::apng::{Blend, Disposal, Fctl};
+
+    /// Assemble a single-frame APNG whose `fcTL` carries the supplied frame
+    /// region over a fixed `canvas_w × canvas_h` 8-bit RGBA canvas, then walk
+    /// it through the same `build_apng_packets` path the demuxer uses.
+    fn demux_one_frame_apng(
+        canvas_w: u32,
+        canvas_h: u32,
+        fctl: &Fctl,
+    ) -> Result<Vec<oxideav_core::Packet>> {
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&canvas_w.to_be_bytes());
+        ihdr.extend_from_slice(&canvas_h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // depth 8, RGBA, deflate/none/none
+
+        let mut actl = Vec::new();
+        actl.extend_from_slice(&1u32.to_be_bytes()); // num_frames
+        actl.extend_from_slice(&0u32.to_be_bytes()); // num_plays
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&PNG_MAGIC);
+        write_chunk(&mut out, b"IHDR", &ihdr);
+        write_chunk(&mut out, b"acTL", &actl);
+        write_chunk(&mut out, b"fcTL", &fctl.to_bytes());
+        // A one-byte IDAT placeholder is enough — the bounds gate fires
+        // before any pixel data is touched.
+        write_chunk(&mut out, b"IDAT", &[0u8]);
+        write_chunk(&mut out, b"IEND", &[]);
+
+        let chunks = parse_all_chunks(&out)?;
+        build_apng_packets(&out, &chunks, TimeBase::new(1, 100))
+    }
+
+    fn region_fctl(x: u32, y: u32, w: u32, h: u32) -> Fctl {
+        Fctl {
+            sequence_number: 0,
+            width: w,
+            height: h,
+            x_offset: x,
+            y_offset: y,
+            delay_num: 1,
+            delay_den: 100,
+            dispose_op: Disposal::None,
+            blend_op: Blend::Source,
+        }
+    }
+
+    #[test]
+    fn demux_accepts_in_bounds_frame_region() {
+        // A frame that exactly fills the canvas demuxes to one packet.
+        let pkts = demux_one_frame_apng(8, 8, &region_fctl(0, 0, 8, 8)).unwrap();
+        assert_eq!(pkts.len(), 1);
+    }
+
+    #[test]
+    fn demux_rejects_frame_region_past_canvas() {
+        // x_offset + width = 4 + 8 = 12 > canvas width 8 → §11.3.6.1 reject.
+        assert!(demux_one_frame_apng(8, 8, &region_fctl(4, 0, 8, 8)).is_err());
+        // y_offset + height = 4 + 8 = 12 > canvas height 8 → reject.
+        assert!(demux_one_frame_apng(8, 8, &region_fctl(0, 4, 8, 8)).is_err());
+    }
+
+    #[test]
+    fn demux_rejects_zero_extent_frame() {
+        assert!(demux_one_frame_apng(8, 8, &region_fctl(0, 0, 0, 8)).is_err());
+    }
 }
