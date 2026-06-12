@@ -60,7 +60,11 @@ fn craft_apng(x_offset: u32, y_offset: u32, dispose_op: u8) -> Vec<u8> {
         raw.push(0u8); // filter None
         raw.extend(std::iter::repeat(128u8).take(row_bytes));
     }
-    let idat = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6);
+    let idat = compcol::vec::compress_to_vec_with::<compcol::zlib::Zlib>(
+        &raw,
+        compcol::zlib::EncoderConfig { level: 6 },
+    )
+    .expect("zlib compress");
 
     let mut png = Vec::new();
     png.extend_from_slice(&SIG);

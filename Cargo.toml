@@ -22,7 +22,12 @@ categories = ["multimedia::encoding", "multimedia::images"]
 # API plus local `PngImage` / `PngError` types and never references
 # `oxideav-core`.
 oxideav-core = { version = "0.1", optional = true }
-miniz_oxide = "0.9"
+
+# `compcol` (Karpelès Lab's compression collection, the workspace-wide
+# DEFLATE/zlib provider) handles the RFC 1950/1951 framing for IDAT /
+# fdAT pixel streams and the zTXt / iTXt / iCCP metadata chunks. Only
+# the `zlib` algorithm feature is needed.
+compcol = { version = "0.6", default-features = false, features = ["zlib"] }
 
 [features]
 default = ["registry"]

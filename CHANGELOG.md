@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced `miniz_oxide` with `compcol` (the workspace-wide pure-Rust
+  compression collection, `zlib` feature only) as the DEFLATE/zlib
+  (RFC 1950/1951) provider for IDAT / fdAT pixel streams and the
+  `zTXt` / `iTXt` / `iCCP` chunk bodies. The crate's whole compression
+  surface now goes through two thin one-shot wrappers in a new private
+  `zlibvec` module (`compress_to_vec_zlib(data, level)` /
+  `decompress_to_vec_zlib(data)`), so the dependency choice is a
+  single-file concern. Decode output is byte-identical (verified
+  old-vs-new over an externally generated corpus covering gray 1/4/8/
+  16-bit, indexed, RGB/RGBA 8/16-bit, and Adam7-interlaced inputs);
+  encoded files carry different compressed bytes (different deflate
+  implementation, still level 6 — the zlib default — with the same
+  CMF/FLG `0x78` framing) but self-roundtrip bit-exactly and validate
+  externally (CRC + RFC 1950 stream incl. Adler-32, plus third-party
+  decoder pixel-match on plain and interlaced output). Compressed
+  output measures ~0.6 % larger at level 6 on a 1080p plasma frame.
+
 ### Added
 
 - Typed `ColourType` primitive wrapping the IHDR colour-type byte

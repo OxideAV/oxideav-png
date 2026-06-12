@@ -82,6 +82,11 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework â€
   (case-insensitive); the empty string maps to `adaptive` so callers
   that set the key without picking a value get the default.
 - APNG output when multiple frames submitted or `frame_rate` is set
+- DEFLATE/zlib (RFC 1950/1951) framing for IDAT / fdAT and the
+  `zTXt` / `iTXt` / `iCCP` chunk bodies is provided by
+  [`compcol`](https://crates.io/crates/compcol) (the workspace-wide
+  pure-Rust compression collection), compression level fixed at 6
+  (the zlib default)
 
 ## Metadata round-trip
 

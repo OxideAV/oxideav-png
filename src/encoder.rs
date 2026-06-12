@@ -10,7 +10,7 @@
 //! `send_frame` calls before the first drain), the trailing frames are
 //! buffered and an APNG is produced on `flush`.
 //!
-//! Compression level is fixed at miniz_oxide default (6). All rows use the
+//! Compression level is fixed at 6 (the zlib default). All rows use the
 //! PNG §12.8 "minimum sum of absolute differences" heuristic (i.e. try all
 //! 5 filters, pick the one with the smallest absolute byte sum).
 
@@ -25,7 +25,7 @@ use crate::metadata::PngMetadata;
 #[cfg(feature = "registry")]
 pub use crate::registry::make_encoder;
 
-use miniz_oxide::deflate::compress_to_vec_zlib;
+use crate::zlibvec::compress_to_vec_zlib;
 
 use crate::chunk::{write_chunk, PNG_MAGIC};
 use crate::decoder::{adam7_pass_dims, Ihdr, ADAM7};
@@ -649,7 +649,7 @@ pub(crate) fn deflate_encode_pixels(
         // last, not necessarily the winner — re-filter into the output slot.
         filter_row(ft, row, prev, bpp, data_slot);
     }
-    Ok(compress_to_vec_zlib(&filtered, 6))
+    compress_to_vec_zlib(&filtered, 6)
 }
 
 /// Adam7 counterpart to [`deflate_encode_pixels`]: gather each of the
@@ -711,7 +711,7 @@ pub(crate) fn deflate_encode_pixels_adam7(
             filter_row(ft, row, prev, bpp, data_slot);
         }
     }
-    Ok(compress_to_vec_zlib(&filtered_all, 6))
+    compress_to_vec_zlib(&filtered_all, 6)
 }
 
 /// Sub-byte (ct=0 / ct=3, depth 1/2/4) counterpart to
@@ -812,7 +812,7 @@ fn deflate_encode_pixels_adam7_subbyte(
             filter_row(ft, row, prev, bpp, data_slot);
         }
     }
-    Ok(compress_to_vec_zlib(&filtered_all, 6))
+    compress_to_vec_zlib(&filtered_all, 6)
 }
 
 // ---- APNG encode --------------------------------------------------------

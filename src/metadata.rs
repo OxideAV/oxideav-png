@@ -285,8 +285,7 @@
 //! §11.3.3.4).
 
 use crate::error::{PngError as Error, Result};
-use miniz_oxide::deflate::compress_to_vec_zlib;
-use miniz_oxide::inflate::decompress_to_vec_zlib;
+use crate::zlibvec::{compress_to_vec_zlib, decompress_to_vec_zlib};
 
 /// `sBIT` payload (RFC 2083 §4.2.6).
 ///
@@ -1738,8 +1737,8 @@ pub struct Ztxt {
     /// all fit in `U+0001..=U+00FF` (no `NUL` — the spec reserves it as
     /// the keyword separator). Empty text is permitted (the chunk's
     /// compressed-text field "n bytes" allows `n = 0` worth of plaintext
-    /// after inflate, which `compress_to_vec_zlib` represents as a
-    /// 2-byte zlib stored block).
+    /// after inflate, which the wire carries as a zlib stream whose
+    /// deflate body inflates to zero bytes).
     pub text: String,
 }
 
@@ -1822,10 +1821,10 @@ impl Ztxt {
             }
             text_bytes.push(cp as u8);
         }
-        // miniz_oxide's default level (6) matches the encoder's IDAT
+        // Level 6 (the zlib default) matches the encoder's IDAT
         // compression level — we don't yet expose a per-chunk knob, and
         // the spec leaves the choice entirely to the encoder.
-        let compressed = compress_to_vec_zlib(&text_bytes, 6);
+        let compressed = compress_to_vec_zlib(&text_bytes, 6)?;
         let mut out = Vec::with_capacity(keyword_bytes.len() + 2 + compressed.len());
         out.extend_from_slice(&keyword_bytes);
         out.push(0); // NUL separator.
@@ -1877,7 +1876,7 @@ impl Iccp {
     /// separator, compression-method byte, then zlib-compressed
     /// profile. Validates the name against the shared keyword
     /// predicate, rejects any compression method other than `0`, and
-    /// inflates the body via `miniz_oxide`.
+    /// inflates the body via `compcol`.
     pub fn parse(data: &[u8]) -> Result<Self> {
         let nul = data
             .iter()
@@ -1911,10 +1910,10 @@ impl Iccp {
     /// corrupt the output PNG.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let name_bytes = validate_keyword(&self.name, "iCCP")?;
-        // miniz_oxide's default level (6) matches the encoder's IDAT
+        // Level 6 (the zlib default) matches the encoder's IDAT
         // compression level — we don't yet expose a per-chunk knob, and
         // the spec leaves the choice entirely to the encoder.
-        let compressed = compress_to_vec_zlib(&self.profile, 6);
+        let compressed = compress_to_vec_zlib(&self.profile, 6)?;
         let mut out = Vec::with_capacity(name_bytes.len() + 2 + compressed.len());
         out.extend_from_slice(&name_bytes);
         out.push(0); // NUL separator.
@@ -2137,7 +2136,7 @@ impl Itxt {
 
         let text_bytes = self.text.as_bytes();
         let text_payload: Vec<u8> = if self.compressed {
-            compress_to_vec_zlib(text_bytes, 6)
+            compress_to_vec_zlib(text_bytes, 6)?
         } else {
             text_bytes.to_vec()
         };
@@ -3472,15 +3471,15 @@ mod tests {
         // then a zlib stream (starts with 0x78 for compression level
         // 6 — CMF byte = 0x78, FLG follows). The exact zlib header
         // depends on the dictionary / level, but the first byte of any
-        // zlib stream with CINFO=7 / CM=8 (the only combination
-        // miniz_oxide produces) is 0x78. We assert the layout is
+        // zlib stream with CINFO=7 / CM=8 (a full 32 KiB window, the
+        // only combination we emit) is 0x78. We assert the layout is
         // "keyword || NUL || 0 || zlib", not the level-specific bytes.
         let keyword_bytes = b"Description";
         assert_eq!(&raw[..keyword_bytes.len()], keyword_bytes);
         assert_eq!(raw[keyword_bytes.len()], 0);
         assert_eq!(raw[keyword_bytes.len() + 1], 0);
         // zlib magic byte (CMF = 0x78 for CM=8/CINFO=7 — the only mode
-        // miniz_oxide emits).
+        // our zlib encoder emits).
         assert_eq!(raw[keyword_bytes.len() + 2], 0x78);
         let back = Ztxt::parse(&raw).unwrap();
         assert_eq!(back, z);
@@ -3514,7 +3513,7 @@ mod tests {
         let raw = z.to_bytes().unwrap();
         // Keyword (4) + NUL (1) + method (1) + zlib stream. zlib of 2000
         // identical bytes compresses to well under 100 bytes; allow
-        // 200 for headroom against future miniz_oxide tuning.
+        // 200 for headroom against future deflate-encoder tuning.
         assert!(
             raw.len() < 200,
             "zTXt of 2000 identical chars should compress well (got {} bytes)",
@@ -3569,7 +3568,7 @@ mod tests {
         // "no NUL" rule as tEXt. Build a valid zTXt by deflating a NUL
         // ourselves and confirm parse rejects.
         let payload = b"valid\0invalid";
-        let compressed = compress_to_vec_zlib(payload, 6);
+        let compressed = compress_to_vec_zlib(payload, 6).unwrap();
         let mut raw = Vec::new();
         raw.extend_from_slice(b"kw");
         raw.push(0);
@@ -3976,7 +3975,7 @@ mod tests {
         // the codec must reject it per §11.3.3.4 "neither shall
         // contain a zero byte".
         let payload = b"hello\0world";
-        let compressed = compress_to_vec_zlib(payload, 6);
+        let compressed = compress_to_vec_zlib(payload, 6).unwrap();
         let mut raw = Vec::new();
         raw.extend_from_slice(b"k");
         raw.push(0);

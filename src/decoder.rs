@@ -7,7 +7,7 @@
 //! 3. `PLTE` + `tRNS` feed the palette for colour type 3 (and alpha for 0/2).
 //! 4. `acTL` + `fcTL` + `fdAT` carry animation frame metadata / data.
 //! 5. Each frame's compressed stream = concatenation of `IDAT` (for default
-//!    image) or `fdAT[4..]` (for animation frames) → `miniz_oxide` zlib
+//!    image) or `fdAT[4..]` (for animation frames) → `compcol` zlib
 //!    decode → reverse per-row filters → fill a [`PngImage`] (or, behind
 //!    the `registry` feature, an `oxideav_core::VideoFrame`).
 //!
@@ -39,7 +39,7 @@ use crate::image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitm
 #[cfg(feature = "registry")]
 pub use crate::registry::{decode_png_to_frame, make_decoder};
 
-use miniz_oxide::inflate::decompress_to_vec_zlib;
+use crate::zlibvec::decompress_to_vec_zlib;
 
 use crate::apng::{parse_fdat, Actl, Blend, Disposal, Fctl};
 use crate::chunk::{read_chunk, ChunkRef, PNG_MAGIC};

@@ -22,7 +22,7 @@
 //! * `Rgba` / `Rgb24` / `Gray8` / `Pal8` at 8-bit
 //! * `Rgb48Le` / `Rgba64Le` / `Gray16Le` at 16-bit
 //! * `Ya8` grayscale + alpha
-//! * Single IDAT, DEFLATE via `miniz_oxide`, per-row heuristic filter
+//! * Single IDAT, DEFLATE via `compcol`, per-row heuristic filter
 //!   selection (PNG §12.8 min-sum-abs-delta).
 //! * APNG: `acTL` + per-frame `fcTL`/`fdAT` when `frame_rate` is set or
 //!   more than one frame is submitted.
@@ -99,6 +99,7 @@ pub mod image;
 pub mod metadata;
 #[cfg(feature = "registry")]
 pub mod registry;
+mod zlibvec;
 
 // Public unconditional API — works whether or not `registry` is enabled.
 pub use chunk::{ChunkType, ColourType};

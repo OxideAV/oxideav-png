@@ -1647,7 +1647,7 @@ fn ztxt_compresses_large_repetitive_text() {
         bytes[zpos - 1],
     ]) as usize;
     // 4096-byte plaintext should compress to well under 200 bytes
-    // (miniz_oxide default level 6 produces ~50 B for runs).
+    // (deflate level 6 produces a few dozen bytes for runs).
     assert!(
         chunk_len < 200,
         "zTXt body for 4096 identical chars should be <200 B (got {chunk_len})"

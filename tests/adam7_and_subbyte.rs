@@ -5,12 +5,20 @@
 //! Adam7 or sub-byte output — decoding those formats is purely a decoder
 //! capability.
 
-use miniz_oxide::deflate::compress_to_vec_zlib;
-
 use oxideav_png::chunk::{write_chunk, PNG_MAGIC};
 use oxideav_png::decoder::{decode_png_to_frame, Ihdr};
 
 // ---- shared helpers -----------------------------------------------------
+
+/// Wrap `data` in a zlib (RFC 1950) stream so the hand-built IDAT
+/// payloads below are spec-valid for the decoder under test.
+fn compress_to_vec_zlib(data: &[u8], level: u8) -> Vec<u8> {
+    compcol::vec::compress_to_vec_with::<compcol::zlib::Zlib>(
+        data,
+        compcol::zlib::EncoderConfig { level },
+    )
+    .expect("zlib compress")
+}
 
 fn build_png_file(ihdr: &Ihdr, idat: &[u8], plte: Option<&[u8]>) -> Vec<u8> {
     let mut out = Vec::new();

@@ -10,7 +10,7 @@
 //!     CRC (`parse_all_chunks`),
 //!   * the 13-byte `IHDR` (attacker-controlled width / height / bit-depth
 //!     / colour-type / interlace),
-//!   * the concatenated `IDAT` zlib stream (`miniz_oxide` inflate, whose
+//!   * the concatenated `IDAT` zlib stream (`compcol` inflate, whose
 //!     output size must be cross-checked against the IHDR-derived
 //!     `(1 + row_bytes) * height`),
 //!   * per-row filter reconstruction (None / Sub / Up / Average / Paeth),

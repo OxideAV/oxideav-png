@@ -30,7 +30,6 @@ use oxideav_png::{
 /// decoder concatenates them before inflating). Returns the
 /// decompressed filtered-row stream.
 fn collect_idat_inflated(png: &[u8]) -> Vec<u8> {
-    use miniz_oxide::inflate::decompress_to_vec_zlib;
     let mut idat = Vec::new();
     // Skip 8-byte magic.
     let mut p = 8usize;
@@ -46,7 +45,7 @@ fn collect_idat_inflated(png: &[u8]) -> Vec<u8> {
         }
         p += 12 + len;
     }
-    decompress_to_vec_zlib(&idat).expect("zlib decompress")
+    compcol::vec::decompress_to_vec::<compcol::zlib::Zlib>(&idat).expect("zlib decompress")
 }
 
 /// Build a small synthetic RGB image with deterministic gradient

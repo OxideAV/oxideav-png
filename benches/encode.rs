@@ -3,7 +3,7 @@
 //! Round 154 (depth-mode benchmarks): the encoder owns the §12.8
 //! min-sum-abs-delta filter heuristic, sub-image flattening across all
 //! 8 supported pixel layouts (8 + 16-bit grayscale, RGB, RGBA, plus
-//! 8-bit indexed and 8-bit Ya8), miniz_oxide-driven DEFLATE on the
+//! 8-bit indexed and 8-bit Ya8), compcol-driven DEFLATE on the
 //! filtered row stream, Adam7 seven-pass interlaced output, and APNG
 //! `acTL` / `fcTL` / `fdAT` framing. These benches make each layer's
 //! cost measurable so a future "Lever N+1" optimisation round can
