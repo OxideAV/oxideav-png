@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/OxideAV/oxideav-png/compare/v0.1.7...v0.1.8) - 2026-06-12
+
+### Other
+
+- migrate DEFLATE/zlib from miniz_oxide to compcol
+- police fcTL frame region against IHDR canvas (W3C PNG3 §11.3.6.1)
+- typed ColourType primitive for the IHDR colour-type byte
+- typed ChunkType accessor for W3C PNG3 §5.4 property bits
+- drop release-plz.toml — use release-plz defaults across the workspace
+- caller-selectable per-row filter strategy (W3C PNG3 §12.7)
+- Adam7 interlaced sub-byte encode for ct=0 / ct=3 (depth 1/2/4)
+- filter_roundtrip target — direct per-row §6.2..§6.6 reconstruction
+- sub-byte (1/2/4-bit) encode for colour type 0 / 3
+- scrub bait phrase from CRC-32 comment (cite RFC 2083 Annex D directly)
+- tRNS round-trip for ct=0 / ct=2 / ct=3 via PngMetadata::trns
+- round-trip the mDCV + cLLI HDR static-metadata chunks
+- round-trip the iCCP + iTXt remaining-gap ancillary chunks
+- round-trip the zTXt compressed-textual-data chunk
+- parametric APNG frame-scan decode-loop throughput target (r196)
+
 ### Changed
 
 - Replaced `miniz_oxide` with `compcol` (the workspace-wide pure-Rust
