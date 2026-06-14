@@ -330,7 +330,7 @@ change to existing decode / encode paths.
 
 ## Robustness
 
-The decoder is fuzzed with `cargo-fuzz`. Six targets live under `fuzz/`:
+The decoder is fuzzed with `cargo-fuzz`. Eight targets live under `fuzz/`:
 
 - `decode` — feeds arbitrary bytes straight at the standalone decode
   entry points (`decode_png`, `decode_png_to_rgba`, `parse_metadata`,
@@ -363,6 +363,17 @@ The decoder is fuzzed with `cargo-fuzz`. Six targets live under `fuzz/`:
   mismatch — impossible by construction here) and (2) the §6.1
   reversibility property `unfilter(filter(row)) == row` for every
   shape sampled.
+- `encode_options` — drives `encode_png_image_with_options` over the
+  option matrix the default round-trip never visits: Adam7 interlace
+  (the >=8-bit and the sub-byte 1/2/4-bit pass layouts), caller-supplied
+  sub-byte `bit_depth` packing (including the rejection arms — depth on
+  a non-Gray8 / non-Pal8 source, `bit_depth = 16`, non-power-of-two
+  depths), every `FilterStrategy` variant (Adaptive + `Fixed` ×5), and
+  the ancillary-metadata emission path (`tEXt` / `pHYs` / `tIME` /
+  `gAMA` chunk ordering). Accepted output is decoded through `decode_png`
+  + `decode_png_to_rgba`; asserts liveness on the option-bearing encode
+  path plus decode-liveness + dimension preservation on its bytes. A
+  rejected option bundle is a contract outcome, not a crash.
 - `libpng_encode_oxideav_decode` / `oxideav_encode_libpng_decode` —
   cross-decode against a `dlopen`ed system libpng (skipped when absent).
 

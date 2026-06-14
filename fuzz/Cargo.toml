@@ -80,6 +80,21 @@ path = "fuzz_targets/encode_decode_roundtrip.rs"
 test = false
 doc = false
 
+# Encode-options matrix target (r296). Drives
+# `encode_png_image_with_options` over the option space the default
+# round-trip target never visits: Adam7 interlace (>=8-bit + sub-byte
+# 1/2/4-bit passes), caller-supplied sub-byte `bit_depth` packing,
+# every `FilterStrategy` variant (Adaptive + Fixed x5), and the
+# ancillary-metadata emission path. Decodes accepted output through
+# `decode_png` + `decode_png_to_rgba`. Asserts liveness on the
+# option-bearing encode path and decode-liveness + dimension
+# preservation on its output.
+[[bin]]
+name = "encode_options"
+path = "fuzz_targets/encode_options.rs"
+test = false
+doc = false
+
 # Per-row-filter round-trip target (r234). Drives `filter_row` +
 # `unfilter_row` directly with fuzz-derived (FilterType, bpp, row_size,
 # prev_row, row) tuples — bypasses the chunk-CRC / IDAT-inflate / IHDR-

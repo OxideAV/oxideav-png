@@ -48,6 +48,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `encode_options` cargo-fuzz target exercising
+  `encode_png_image_with_options` over the option matrix the existing
+  `encode_decode_roundtrip` target (which only ever uses
+  `PngEncoderOptions::default()`) never reaches: Adam7 interlace (both
+  the >=8-bit and the sub-byte 1/2/4-bit pass layouts), caller-supplied
+  sub-byte `bit_depth` packing — including the rejection arms (depth on
+  a non-Gray8 / non-Pal8 source, `bit_depth = 16`, non-power-of-two
+  depths), every `FilterStrategy` variant (Adaptive plus `Fixed` ×5),
+  and the ancillary-metadata emission path (`tEXt` / `pHYs` / `tIME` /
+  `gAMA`). Accepted output is decoded through `decode_png` +
+  `decode_png_to_rgba`; the target asserts liveness of the
+  option-bearing encode path and decode-liveness + dimension
+  preservation on its bytes. Cleared a 180 s / ~557 k-exec local run
+  with no panic / abort / overflow.
 - Typed `ColourType` primitive wrapping the IHDR colour-type byte
   (W3C PNG3 §11.2.1 "Color type is a single-byte integer") with the
   §6.1 / Table 9 named encoding: `Greyscale` (0), `Truecolor` (2),
