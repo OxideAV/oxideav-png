@@ -13,6 +13,17 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
 - Colour type 6 (RGBA) at 8/16-bit
 - All five PNG row filters (None / Sub / Up / Average / Paeth)
 - Adam7 seven-pass interlacing
+- IHDR field validity is gated at the wire-decode boundary
+  (`Ihdr::parse` → `Ihdr::validate`, W3C PNG3 §11.2.1): zero width or
+  height is rejected ("Zero is an invalid value"); the (colour type, bit
+  depth) pair must be one of the §11.2.1 Table 12 allowed combinations
+  (greyscale 1/2/4/8/16, truecolor 8/16, indexed 1/2/4/8, both alpha
+  types 8/16), so a 1-bit truecolor row, a 16-bit indexed row, an
+  invented colour type (1/5/7/…) or a non-Table-12 depth (0/3/…) is an
+  `InvalidData` error rather than a late "not implemented" or a silently
+  empty decode; and the compression / filter / interlace method bytes
+  must be 0 / 0 / 0-or-1. The single gate is shared by `decode_png`,
+  `parse_metadata`, `parse_apng`, and the demuxer.
 - Sub-byte grayscale scaled up to 8-bit (PNG §13.12 ×255 / ×85 / ×17)
 - Sub-byte indexed expanded to one index-byte-per-pixel
 - APNG: `acTL` / `fcTL` / `fdAT` with None/Background/Previous disposal and

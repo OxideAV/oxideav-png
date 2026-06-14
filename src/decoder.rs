@@ -99,7 +99,7 @@ impl Ihdr {
         }
         let width = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         let height = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        Ok(Self {
+        let ihdr = Self {
             width,
             height,
             bit_depth: data[8],
@@ -107,7 +107,73 @@ impl Ihdr {
             compression: data[10],
             filter: data[11],
             interlace: data[12],
-        })
+        };
+        ihdr.validate()?;
+        Ok(ihdr)
+    }
+
+    /// Reject a structurally-malformed IHDR per W3C PNG3 §11.2.1
+    /// ("IHDR Image header"). Every field carries a wire constraint the
+    /// spec states outright; a value outside those bounds is *invalid
+    /// data*, not an unsupported feature, so each path returns
+    /// [`Error::invalid`]. Run once at the wire-decode boundary (from
+    /// [`Ihdr::parse`]) so `decode_png` / `parse_metadata` / `parse_apng`
+    /// and the demuxer all share one gate rather than re-deriving the
+    /// checks inline (or, worse, only catching some of them late in
+    /// [`Ihdr::output_pixel_format`]).
+    ///
+    /// * **Width / height.** "Width and height give the image dimensions
+    ///   in pixels. They are PNG four-byte unsigned integers. Zero is an
+    ///   invalid value." A zero in either dimension would otherwise yield
+    ///   a degenerate empty byte-plane rather than an error.
+    /// * **Colour type + bit depth.** §11.2.1 Table 12 ("Allowed
+    ///   combinations of color type and bit depth") is the single source
+    ///   of truth: greyscale (0) → 1/2/4/8/16; truecolor (2) → 8/16;
+    ///   indexed (3) → 1/2/4/8; greyscale-alpha (4) and truecolor-alpha
+    ///   (6) → 8/16. [`Ihdr::is_allowed_combination`] decodes the table;
+    ///   any other pairing (e.g. a 1-bit truecolor row, a 16-bit indexed
+    ///   row, an invented colour type 1/5/7, or bit depth 0/3/…) is
+    ///   rejected here. The colour-type byte itself is validated by
+    ///   `colour_type_typed` inside that call.
+    /// * **Compression method.** "Only compression method 0 (deflate
+    ///   compression …) is defined in this specification."
+    /// * **Filter method.** "Only filter method 0 is defined by this
+    ///   specification."
+    /// * **Interlace method.** §11.2.1 defines methods 0 (none) and 1
+    ///   (Adam7); every other value is invalid.
+    pub fn validate(&self) -> Result<()> {
+        if self.width == 0 || self.height == 0 {
+            return Err(Error::invalid(format!(
+                "PNG IHDR: zero is an invalid dimension (width {}, height {})",
+                self.width, self.height
+            )));
+        }
+        if !self.is_allowed_combination()? {
+            return Err(Error::invalid(format!(
+                "PNG IHDR: colour type {} with bit depth {} is not an allowed \
+                 combination (§11.2.1 Table 12)",
+                self.colour_type, self.bit_depth
+            )));
+        }
+        if self.compression != 0 {
+            return Err(Error::invalid(format!(
+                "PNG IHDR: unknown compression method {} (only 0 is defined)",
+                self.compression
+            )));
+        }
+        if self.filter != 0 {
+            return Err(Error::invalid(format!(
+                "PNG IHDR: unknown filter method {} (only 0 is defined)",
+                self.filter
+            )));
+        }
+        if self.interlace > 1 {
+            return Err(Error::invalid(format!(
+                "PNG IHDR: unknown interlace method {} (only 0 and 1 are defined)",
+                self.interlace
+            )));
+        }
+        Ok(())
     }
 
     pub fn to_bytes(&self) -> [u8; 13] {
@@ -480,19 +546,11 @@ pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
         .iter()
         .find(|c| c.is_type(b"IHDR"))
         .ok_or_else(|| Error::invalid("PNG: missing IHDR"))?;
+    // IHDR field validity (§11.2.1: non-zero dimensions, Table 12
+    // colour-type/bit-depth combination, compression / filter / interlace
+    // method) is enforced inside `Ihdr::parse` → `Ihdr::validate`, so the
+    // checks formerly duplicated here are no longer needed.
     let ihdr = Ihdr::parse(ihdr_chunk.data)?;
-    if ihdr.interlace != 0 && ihdr.interlace != 1 {
-        return Err(Error::invalid(format!(
-            "PNG: unknown interlace method {}",
-            ihdr.interlace
-        )));
-    }
-    if ihdr.compression != 0 {
-        return Err(Error::invalid("PNG: unknown compression method"));
-    }
-    if ihdr.filter != 0 {
-        return Err(Error::invalid("PNG: unknown filter method"));
-    }
 
     let mut plte: Option<&[u8]> = None;
     let mut trns: Option<&[u8]> = None;

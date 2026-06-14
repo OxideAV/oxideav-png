@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- gate IHDR field validity at the wire-decode boundary (W3C PNG3 §11.2.1):
+  reject zero width/height, non-Table-12 colour-type/bit-depth pairs, and
+  unknown compression/filter/interlace methods
+
 ## [0.1.8](https://github.com/OxideAV/oxideav-png/compare/v0.1.7...v0.1.8) - 2026-06-12
 
 ### Other
