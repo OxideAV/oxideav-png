@@ -144,11 +144,22 @@ impl Plan {
             None
         };
 
+        // compression_level selector packed into the high nibble of the
+        // flags byte: 0 => None (= encoder default 6); 1..=9 => that
+        // explicit level; 10..=15 exercise the out-of-range rejection
+        // path (encode error ahead of the wire, a contract outcome, not
+        // a crash).
+        let compression_level = match flags >> 4 {
+            0 => None,
+            n => Some(n),
+        };
+
         let opts = PngEncoderOptions {
             interlace: flags & 0b0000_0001 != 0,
             metadata,
             bit_depth,
             filter_strategy,
+            compression_level,
         };
 
         Some((image, opts))
