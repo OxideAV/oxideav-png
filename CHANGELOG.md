@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- fuzz: `metadata_chunk_splice` target — build a valid 8x8 base PNG
+  (grayscale / RGB / palette) with the standalone encoder, then splice
+  1..=8 fuzz-derived ancillary chunks (type drawn from the
+  `parse_metadata` dispatch set: `sBIT pHYs tIME bKGD hIST tRNS eXIf sRGB
+  cICP gAMA cHRM mDCV cLLI sPLT tEXt zTXt iCCP iTXt`, payload
+  fuzz-controlled) immediately before `IEND` with a correct length prefix
+  + CRC32. Funnels the mutation budget *inside* the per-chunk `::parse`
+  routines — keyword / `NUL` splitting, the compression-method byte, the
+  zlib inflate of the `zTXt` / `iTXt` / `iCCP` bodies, `sPLT` entry
+  strides, the `eXIf` TIFF probe, and `bKGD` / `hIST` PLTE-index bounds —
+  that the raw-bytes `decode` target rarely reaches past the signature /
+  framing / CRC gate. Drives `parse_metadata` + `decode_png` +
+  `decode_png_to_rgba`; asserts liveness only (no panic / abort / OOB /
+  OOM on any spliced input). 866k runs clean at ~7.2k exec/s
 - enforce the APNG shared `fcTL`/`fdAT` sequence-number rules (W3C PNG3
   §4.9.2): the first `fcTL` must carry sequence number 0, and every
   subsequent `fcTL`/`fdAT` must be contiguous-ascending with no gaps or

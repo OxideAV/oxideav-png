@@ -363,7 +363,7 @@ change to existing decode / encode paths.
 
 ## Robustness
 
-The decoder is fuzzed with `cargo-fuzz`. Eight targets live under `fuzz/`:
+The decoder is fuzzed with `cargo-fuzz`. Nine targets live under `fuzz/`:
 
 - `decode` — feeds arbitrary bytes straight at the standalone decode
   entry points (`decode_png`, `decode_png_to_rgba`, `parse_metadata`,
@@ -407,6 +407,21 @@ The decoder is fuzzed with `cargo-fuzz`. Eight targets live under `fuzz/`:
   + `decode_png_to_rgba`; asserts liveness on the option-bearing encode
   path plus decode-liveness + dimension preservation on its bytes. A
   rejected option bundle is a contract outcome, not a crash.
+- `metadata_chunk_splice` — builds a valid 8x8 base PNG (grayscale /
+  RGB / palette) with the standalone encoder, then splices 1..=8
+  fuzz-derived ancillary chunks immediately before `IEND`, each framed
+  with a correct length prefix + CRC32. The 4-byte type is drawn from
+  the `parse_metadata` dispatch set (`sBIT pHYs tIME bKGD hIST tRNS
+  eXIf sRGB cICP gAMA cHRM mDCV cLLI sPLT tEXt zTXt iCCP iTXt`) and the
+  payload is fuzz-controlled, so the mutation budget lands *inside* the
+  per-chunk `::parse` routines — keyword / `NUL` splitting, the
+  compression-method byte, the zlib inflate of the `zTXt` / `iTXt` /
+  `iCCP` bodies, `sPLT` entry strides, the `eXIf` TIFF probe, and the
+  `bKGD` / `hIST` PLTE-index bounds — rather than being rejected at the
+  signature / framing / CRC gate the raw-bytes `decode` target hits.
+  Drives `parse_metadata` + `decode_png` + `decode_png_to_rgba`;
+  liveness only (a truncated or bomb-shaped zlib body must surface as
+  `Err`, not a crash or unbounded allocation).
 - Two optional cross-decode targets validate against a `dlopen`ed
   system PNG library when one is present (skipped when absent).
 

@@ -107,3 +107,21 @@ name = "filter_roundtrip"
 path = "fuzz_targets/filter_roundtrip.rs"
 test = false
 doc = false
+
+# Metadata-chunk splice target (r319). Builds a valid 8x8 base PNG
+# (grayscale / RGB / palette) with the standalone encoder, then splices
+# 1..=8 fuzz-derived ancillary chunks — type drawn from the
+# `parse_metadata` dispatch set (sBIT pHYs tIME bKGD hIST tRNS eXIf sRGB
+# cICP gAMA cHRM mDCV cLLI sPLT tEXt zTXt iCCP iTXt), payload
+# fuzz-controlled — immediately before IEND with a real length prefix +
+# CRC32. Funnels the mutation budget *inside* the per-chunk `::parse`
+# routines (keyword / NUL splitting, the compression-method byte, the
+# zlib inflate of zTXt / iTXt / iCCP bodies, sPLT entry strides, the eXIf
+# TIFF probe, bKGD / hIST PLTE-index bounds) that the raw-bytes `decode`
+# target rarely reaches past the signature / framing / CRC gate. Drives
+# `parse_metadata` + `decode_png` + `decode_png_to_rgba`; liveness only.
+[[bin]]
+name = "metadata_chunk_splice"
+path = "fuzz_targets/metadata_chunk_splice.rs"
+test = false
+doc = false
