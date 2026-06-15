@@ -78,8 +78,8 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
 - Per-row filter heuristic (min-sum-abs-delta per §12.8) by default;
   caller-selectable filter strategy via `PngEncoderOptions::
   filter_strategy: FilterStrategy` (W3C PNG3 §12.7). `Adaptive` (the
-  default) keeps the §12.8 trial-all-five heuristic and matches the
-  pre-r245 byte stream. `Fixed(FilterType)` pins one filter for every
+  default) keeps the §12.8 trial-all-five heuristic. `Fixed(FilterType)`
+  pins one filter for every
   row and skips the per-row trial — about 5× cheaper to run, at the
   compression cost of giving up the per-row best pick. §12.7's spec
   guidance maps to: `Fixed(FilterType::Paeth)` is most likely the
@@ -103,9 +103,8 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   compression *method* — "compression method 0 (deflate/inflate)" per
   RFC 2083 §5 — and says nothing about the DEFLATE effort level, so the
   knob is spec-neutral and produces a conformant stream at every value.
-  `None` (the default) selects level `6` — zlib's default and the
-  historical encoder default — so an unset option reproduces the
-  pre-r312 byte stream exactly; an out-of-`1..=9` value is an encode
+  `None` (the default) selects level `6` — the conventional default
+  effort level; an out-of-`1..=9` value is an encode
   error ahead of the wire. Registry-side `CodecOptions` exposes a
   `compression_level` u32 key with `0` mapping to the default. The
   compressed metadata chunks (`zTXt` / `iTXt` / `iCCP`) keep their own
@@ -366,8 +365,8 @@ The decoder is fuzzed with `cargo-fuzz`. Eight targets live under `fuzz/`:
   `x_offset` / `y_offset` with fuzz-derived values (recomputing CRC32
   so the parser still accepts the stream), and drives `parse_apng` +
   `decode_apng_info` across 1-8-frame chains. Drives the composite
-  state machine — `Previous` snapshots, `Background` clears (the r124
-  out-of-canvas fix lives here), `Source` vs `Over` blend.
+  state machine — `Previous` snapshots, `Background` clears (including
+  the out-of-canvas guard), `Source` vs `Over` blend.
 - `encode_decode_roundtrip` — standalone encode → decode → re-encode
   for both static PNG and APNG entry points. Asserts the decoder is a
   right inverse of the encoder on encoder-emitted bitstreams, then
@@ -397,8 +396,8 @@ The decoder is fuzzed with `cargo-fuzz`. Eight targets live under `fuzz/`:
   + `decode_png_to_rgba`; asserts liveness on the option-bearing encode
   path plus decode-liveness + dimension preservation on its bytes. A
   rejected option bundle is a contract outcome, not a crash.
-- `libpng_encode_oxideav_decode` / `oxideav_encode_libpng_decode` —
-  cross-decode against a `dlopen`ed system libpng (skipped when absent).
+- Two optional cross-decode targets validate against a `dlopen`ed
+  system PNG library when one is present (skipped when absent).
 
 ```sh
 cargo +nightly fuzz run decode
@@ -406,15 +405,15 @@ cargo +nightly fuzz run decode
 
 ## Benchmarks
 
-Three criterion harnesses live under `benches/` so future optimisation
-rounds can A/B-test changes against the r154 baseline:
+Three criterion harnesses live under `benches/` for A/B-testing
+optimisation changes against a stable baseline:
 
 - `decode` — every supported pixel layout at "natural" sizes (1920×1080
   RGBA, 640×480 RGB, 512×512 Gray8 / Gray16Le / Rgb48Le, 320×240 Rgba64Le
   + Pal8 + `decode_png_to_rgba`), plus a `parse_metadata` scenario that
   isolates chunk-walk + CRC cost from the IDAT inflate, plus a 4-frame
   APNG decode covering the disposal / blend state machine, plus
-  `decode_apng_frame_scan` (added r196) which sweeps 2 / 8 / 32 frames
+  `decode_apng_frame_scan` which sweeps 2 / 8 / 32 frames
   at 128×128 RGBA so the timing curve isolates per-frame decode-loop
   overhead from per-pixel inflate work.
 - `encode` — symmetric encode harness with an extra Adam7 seven-pass
