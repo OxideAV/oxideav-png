@@ -214,6 +214,10 @@ fn build_apng_packets(
     // State accumulators for the currently-parsed frame.
     let mut pending_fctl: Option<Fctl> = None;
     let mut pending_data: Vec<u8> = Vec::new();
+    // Shared fcTL/fdAT sequence stream (W3C PNG3 §4.9.2), validated below so
+    // the demuxer rejects an out-of-order APNG to the same standard as the
+    // standalone parse_apng path.
+    let mut seq_stream: Vec<crate::apng::SeqChunk> = Vec::new();
 
     for c in chunks {
         match &c.chunk_type {
@@ -237,6 +241,10 @@ fn build_apng_packets(
                 pending_data.clear();
                 let fctl = Fctl::parse(c.data)?;
                 fctl.validate_within_canvas(canvas_width, canvas_height)?;
+                seq_stream.push(crate::apng::SeqChunk {
+                    kind: crate::apng::SeqKind::Fctl,
+                    sequence_number: fctl.sequence_number,
+                });
                 pending_fctl = Some(fctl);
             }
             // Only attach IDAT bytes to a frame when they're claimed by a
@@ -245,12 +253,20 @@ fn build_apng_packets(
                 pending_data.extend_from_slice(c.data);
             }
             b"fdAT" => {
-                let (_seq, payload) = parse_fdat(c.data)?;
+                let (seq, payload) = parse_fdat(c.data)?;
+                seq_stream.push(crate::apng::SeqChunk {
+                    kind: crate::apng::SeqKind::Fdat,
+                    sequence_number: seq,
+                });
                 pending_data.extend_from_slice(payload);
             }
             _ => {}
         }
     }
+
+    // §4.9.2 shared-sequence validation — first fcTL is seq 0, every
+    // subsequent fcTL/fdAT is contiguous-ascending with no gaps/duplicates.
+    crate::apng::validate_apng_sequence(&seq_stream)?;
     if let Some(fctl) = pending_fctl.take() {
         let pkt = build_still_png_packet(ihdr, plte, trns, &pending_data, time_base, pts, &fctl)?;
         let delay = fctl.delay_centiseconds().max(1) as i64;

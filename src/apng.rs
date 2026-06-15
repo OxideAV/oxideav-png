@@ -178,6 +178,84 @@ impl Fctl {
     }
 }
 
+/// Which APNG-sequenced chunk a [`SeqChunk`] entry came from. Both `fcTL` and
+/// `fdAT` draw from the single shared sequence per W3C PNG 3rd Edition §4.9.2
+/// ("Both chunk types share the sequence.").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeqKind {
+    /// An `fcTL` chunk.
+    Fctl,
+    /// An `fdAT` chunk.
+    Fdat,
+}
+
+/// One entry in the APNG sequence stream: which chunk it was and the 4-byte
+/// sequence number it carried, presented in file order.
+#[derive(Clone, Copy, Debug)]
+pub struct SeqChunk {
+    pub kind: SeqKind,
+    pub sequence_number: u32,
+}
+
+/// Validate the shared `fcTL` / `fdAT` sequence-number stream against the
+/// W3C PNG 3rd Edition §4.9.2 ("Sequence numbers") `shall` requirements.
+///
+/// `entries` is the ordered list of every `fcTL` and `fdAT` chunk in the file
+/// (in file order), each paired with the 4-byte sequence number it carried.
+/// Three rules are enforced:
+///
+/// * "The first `fcTL` chunk shall contain sequence number 0" — the very first
+///   sequenced chunk in the stream must be an `fcTL` *and* carry sequence
+///   number 0. (An `fdAT` cannot precede the first `fcTL`: §4.9.1 requires each
+///   frame to open with an `fcTL`, and the static-image `IDAT` is not part of
+///   the shared sequence.)
+/// * "the sequence numbers in the remaining `fcTL` and `fdAT` chunks shall be
+///   in ascending order, with no gaps or duplicates." Because the numbering is
+///   zero-based and contiguous, each successive entry must be exactly one
+///   greater than its predecessor — a gap, a duplicate, or any descending step
+///   is "out-of-order" and "Decoders shall treat out-of-order APNG chunks as
+///   an error" (§13.2-adjacent normative text in §4.9.1).
+///
+/// An empty stream (no `fcTL` at all) is *not* an APNG by this function's
+/// contract and is accepted here — the caller has already established animation
+/// via the presence of `acTL`, and the no-frame case is rejected upstream.
+pub fn validate_apng_sequence(entries: &[SeqChunk]) -> Result<()> {
+    let Some(first) = entries.first() else {
+        return Ok(());
+    };
+    if first.kind != SeqKind::Fctl {
+        return Err(Error::invalid(
+            "APNG sequence: the first sequenced chunk must be an fcTL \
+             (W3C PNG3 §4.9.2: \"The first fcTL chunk shall contain \
+             sequence number 0\")",
+        ));
+    }
+    if first.sequence_number != 0 {
+        return Err(Error::invalid(format!(
+            "APNG sequence: the first fcTL must carry sequence number 0, \
+             got {} (W3C PNG3 §4.9.2)",
+            first.sequence_number
+        )));
+    }
+    let mut expected: u32 = 1;
+    for e in &entries[1..] {
+        if e.sequence_number != expected {
+            return Err(Error::invalid(format!(
+                "APNG sequence: out-of-order chunk — expected sequence \
+                 number {expected}, got {} (W3C PNG3 §4.9.2: ascending order, \
+                 no gaps or duplicates)",
+                e.sequence_number
+            )));
+        }
+        // Contiguous numbering caps the stream at u32::MAX entries; the
+        // increment cannot overflow within a 2^31-1-byte file, but saturate
+        // defensively so a hostile count can't wrap `expected` back to a
+        // value that would re-accept a duplicate.
+        expected = expected.saturating_add(1);
+    }
+    Ok(())
+}
+
 /// Parse a single `fdAT` chunk. Returns `(sequence_number, compressed_bytes)`.
 /// The first 4 bytes are a sequence number; the rest is raw IDAT-equivalent
 /// compressed data.
@@ -287,6 +365,65 @@ mod tests {
         assert!(region_fctl(u32::MAX, 0, 2, 1)
             .validate_within_canvas(u32::MAX, 1)
             .is_err());
+    }
+
+    fn fc(seq: u32) -> SeqChunk {
+        SeqChunk {
+            kind: SeqKind::Fctl,
+            sequence_number: seq,
+        }
+    }
+    fn fd(seq: u32) -> SeqChunk {
+        SeqChunk {
+            kind: SeqKind::Fdat,
+            sequence_number: seq,
+        }
+    }
+
+    #[test]
+    fn sequence_accepts_contiguous_stream() {
+        // §4.9.2 Table 4: fcTL(0) fdAT(1) fdAT(2) fcTL(3) fdAT(4) …
+        assert!(validate_apng_sequence(&[fc(0), fd(1), fd(2), fc(3), fd(4)]).is_ok());
+        // Single-frame default-image animation: just fcTL(0), the IDAT is the
+        // frame data and is NOT part of the shared sequence.
+        assert!(validate_apng_sequence(&[fc(0)]).is_ok());
+        // Two frames where the first is the default image: fcTL(0) (claims
+        // IDAT) then fcTL(1) fdAT(2).
+        assert!(validate_apng_sequence(&[fc(0), fc(1), fd(2)]).is_ok());
+        // Empty stream is accepted here (the acTL-presence / frame-count gate
+        // lives upstream).
+        assert!(validate_apng_sequence(&[]).is_ok());
+    }
+
+    #[test]
+    fn sequence_rejects_nonzero_first() {
+        // "The first fcTL chunk shall contain sequence number 0."
+        assert!(validate_apng_sequence(&[fc(1), fd(2)]).is_err());
+        assert!(validate_apng_sequence(&[fc(7)]).is_err());
+    }
+
+    #[test]
+    fn sequence_rejects_fdat_before_first_fctl() {
+        // The first sequenced chunk must be an fcTL; an fdAT cannot lead.
+        assert!(validate_apng_sequence(&[fd(0), fc(1)]).is_err());
+    }
+
+    #[test]
+    fn sequence_rejects_gap() {
+        // "no gaps": fcTL(0) fdAT(1) fdAT(3) skips 2.
+        assert!(validate_apng_sequence(&[fc(0), fd(1), fd(3)]).is_err());
+    }
+
+    #[test]
+    fn sequence_rejects_duplicate() {
+        // "no duplicates": fcTL(0) fdAT(1) fdAT(1).
+        assert!(validate_apng_sequence(&[fc(0), fd(1), fd(1)]).is_err());
+    }
+
+    #[test]
+    fn sequence_rejects_descending() {
+        // Out-of-order (descending) step is rejected.
+        assert!(validate_apng_sequence(&[fc(0), fd(2), fd(1)]).is_err());
     }
 
     #[test]

@@ -34,7 +34,18 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   the two sums taken in `u64` so an offset/extent pair near `u32::MAX`
   cannot wrap past the bound). A hostile out-of-canvas frame is rejected
   with an error on both the standalone `decode_apng` path and the demuxer
-  frame-splitter rather than silently clipped.
+  frame-splitter rather than silently clipped. The shared `fcTL` / `fdAT`
+  sequence-number stream is validated per W3C PNG3 §4.9.2: the first
+  `fcTL` "shall contain sequence number 0" and the remaining `fcTL` /
+  `fdAT` chunks "shall be in ascending order, with no gaps or
+  duplicates" — a non-zero first sequence, a leading `fdAT`, or any gap /
+  duplicate / descending step is an error ("Decoders shall treat
+  out-of-order APNG chunks as an error", §4.9.1). `acTL.num_frames == 0`
+  is rejected (§4.9: "0 is not a valid value"); a `num_frames` value that
+  merely *disagrees* with the actual `fcTL` count stays advisory (the
+  authoritative chain is the walked `fcTL` / `fdAT` sequence). All checks
+  apply on both the standalone `parse_apng` / `decode_apng` path and the
+  demuxer.
 - `PLTE` + `tRNS` palettes — `PLTE` drives `Pal8` index resolution and the
   demuxer preserves both verbatim in `CodecParameters::extradata` so the
   encoder can faithfully rewrite them

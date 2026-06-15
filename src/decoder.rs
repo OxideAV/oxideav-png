@@ -1252,11 +1252,23 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
     let mut plte: Option<Vec<u8>> = None;
     let mut trns: Option<Vec<u8>> = None;
 
+    // W3C PNG3 §4.9: "num_frames ... 0 is not a valid value." Reject an
+    // acTL that announces zero frames before walking the chain. (A mismatch
+    // between num_frames and the actual fcTL count remains advisory — see the
+    // note below — but the literal-zero floor is unambiguous.)
+    if actl.num_frames == 0 {
+        return Err(Error::invalid(
+            "PNG acTL: num_frames is 0 (W3C PNG3 §4.9: \"0 is not a valid value\")",
+        ));
+    }
+
     let mut frames: Vec<ApngFrame> = Vec::new();
     let mut current_fctl: Option<Fctl> = None;
     let mut current_compressed: Vec<u8> = Vec::new();
     let mut saw_idat = false;
     let mut first_frame_is_default = false;
+    // Shared fcTL/fdAT sequence stream (W3C PNG3 §4.9.2), validated below.
+    let mut seq_stream: Vec<crate::apng::SeqChunk> = Vec::new();
 
     for c in &chunks {
         match &c.chunk_type {
@@ -1270,6 +1282,10 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
                     });
                 }
                 let f = Fctl::parse(c.data)?;
+                seq_stream.push(crate::apng::SeqChunk {
+                    kind: crate::apng::SeqKind::Fctl,
+                    sequence_number: f.sequence_number,
+                });
                 // An fcTL appearing before any IDAT means the default image
                 // doubles as the first animation frame.
                 if !saw_idat {
@@ -1287,12 +1303,22 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
                 }
             }
             b"fdAT" => {
-                let (_seq, payload) = parse_fdat(c.data)?;
+                let (seq, payload) = parse_fdat(c.data)?;
+                seq_stream.push(crate::apng::SeqChunk {
+                    kind: crate::apng::SeqKind::Fdat,
+                    sequence_number: seq,
+                });
                 current_compressed.extend_from_slice(payload);
             }
             _ => {}
         }
     }
+
+    // §4.9.2: the first fcTL carries sequence number 0 and every subsequent
+    // fcTL/fdAT is contiguous-ascending. An out-of-order, gapped, or duplicate
+    // sequence is an error ("Decoders shall treat out-of-order APNG chunks as
+    // an error").
+    crate::apng::validate_apng_sequence(&seq_stream)?;
     if let Some(f) = current_fctl.take() {
         frames.push(ApngFrame {
             fctl: f,

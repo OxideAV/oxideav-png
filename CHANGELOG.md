@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- enforce the APNG shared `fcTL`/`fdAT` sequence-number rules (W3C PNG3
+  §4.9.2): the first `fcTL` must carry sequence number 0, and every
+  subsequent `fcTL`/`fdAT` must be contiguous-ascending with no gaps or
+  duplicates ("Decoders shall treat out-of-order APNG chunks as an
+  error", §4.9.1); also reject `acTL.num_frames == 0` (§4.9: "0 is not a
+  valid value"). Applied on both the standalone `parse_apng` / `decode_apng`
+  path and the demuxer frame-splitter; `num_frames` *mismatch* with the
+  fcTL count stays advisory as before
 - caller-selectable IDAT/fdAT DEFLATE compression level (1..=9) via
   `PngEncoderOptions::compression_level` and the registry
   `compression_level` option; `None`/`0` keeps the historical level 6
