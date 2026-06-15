@@ -133,6 +133,15 @@ impl CodecOptionsStruct for PngEncoderOptions {
                    filter type for every row, skipping the per-row trial. \
                    An empty value is treated as `adaptive`.",
         },
+        OptionField {
+            name: "compression_level",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(0),
+            help: "DEFLATE level for the IDAT / fdAT pixel stream (1..=9). \
+                   1 is fastest / largest, 9 is slowest / smallest. \
+                   0 (the default) selects the encoder default level 6 — \
+                   zlib's own default — reproducing the pre-r312 byte stream.",
+        },
     ];
     fn apply(&mut self, key: &str, v: &OptionValue) -> oxideav_core::Result<()> {
         use crate::filter::{FilterStrategy, FilterType};
@@ -146,6 +155,16 @@ impl CodecOptionsStruct for PngEncoderOptions {
                 // so a bogus value here surfaces as a clear encode error
                 // rather than getting silently rewritten.
                 self.bit_depth = if raw == 0 { None } else { Some(raw as u8) };
+            }
+            "compression_level" => {
+                let raw = v.as_u32()?;
+                // `0` is the sentinel for "use the encoder default (6)" —
+                // matches `compression_level: None`. Range validation
+                // (1..=9) happens at encode time in
+                // `resolve_compression_level`, so a bogus value surfaces
+                // as a clear encode error rather than getting silently
+                // clamped here.
+                self.compression_level = if raw == 0 { None } else { Some(raw as u8) };
             }
             "filter" => {
                 let raw = v.as_str()?;

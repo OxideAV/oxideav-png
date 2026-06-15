@@ -10,9 +10,13 @@
 //! `send_frame` calls before the first drain), the trailing frames are
 //! buffered and an APNG is produced on `flush`.
 //!
-//! Compression level is fixed at 6 (the zlib default). All rows use the
-//! PNG §12.8 "minimum sum of absolute differences" heuristic (i.e. try all
-//! 5 filters, pick the one with the smallest absolute byte sum).
+//! The IDAT / fdAT pixel stream is zlib-compressed at the level set by
+//! [`PngEncoderOptions::compression_level`] (`1..=9`); `None` selects 6
+//! — the zlib default and the historical encoder default. All rows use
+//! the PNG §12.8 "minimum sum of absolute differences" heuristic by
+//! default (i.e. try all 5 filters, pick the one with the smallest
+//! absolute byte sum) unless [`PngEncoderOptions::filter_strategy`]
+//! pins a fixed filter.
 
 use crate::error::{PngError as Error, Result};
 use crate::image::{PngImage, PngPixelFormat};
@@ -134,6 +138,36 @@ pub struct PngEncoderOptions {
     /// is; the spec mapping is left for the caller so a benchmarking
     /// or worst-case-compression study can pin any combination.
     pub filter_strategy: FilterStrategy,
+    /// DEFLATE compression level for the IDAT / fdAT pixel stream,
+    /// `1..=9`. PNG carries its pixel data in a zlib (RFC 1950) stream;
+    /// RFC 2083 §5 fixes only the compression *method* ("compression
+    /// method 0 (deflate/inflate)") and says nothing about the DEFLATE
+    /// effort level, so every value here produces a conformant stream.
+    /// `1` is fastest / largest, `9` is slowest / smallest.
+    ///
+    /// `None` (the default) uses level `6`, the historical encoder
+    /// default and zlib's own default — so an unset option reproduces
+    /// the pre-r312 byte stream exactly. Any value outside `1..=9` is
+    /// an encode error ahead of the wire.
+    ///
+    /// The level applies to the pixel stream only; the compressed
+    /// metadata chunks (`zTXt` / `iTXt` / `iCCP`) keep their own fixed
+    /// level since their payloads are small and their byte layout is
+    /// pinned by round-trip tests.
+    pub compression_level: Option<u8>,
+}
+
+/// Resolve and validate the DEFLATE level for the pixel stream:
+/// `None` → the encoder default (6); `Some(n)` must be `1..=9`.
+fn resolve_compression_level(opts: &PngEncoderOptions) -> Result<u8> {
+    match opts.compression_level {
+        None => Ok(6),
+        Some(level @ 1..=9) => Ok(level),
+        Some(other) => Err(Error::invalid(format!(
+            "PNG encoder: compression_level {other} out of range — \
+             DEFLATE levels are 1..=9 (RFC 1951); None selects the default (6)"
+        ))),
+    }
 }
 
 // ---- Single-image encode -----------------------------------------------
@@ -164,6 +198,7 @@ pub fn encode_png_image_with_options(
     // errors if both are populated and otherwise picks whichever is
     // present.
     let trns_bytes = resolve_trns_bytes(&ihdr, trns_bytes.as_deref(), opts.metadata.as_ref())?;
+    let level = resolve_compression_level(opts)?;
     let idat = if opts.interlace && ihdr.bit_depth < 8 {
         // Sub-byte (ct=0 / ct=3, depth 1/2/4) Adam7: each pass is laid
         // out as an independent sub-image (RFC 2083 §A.8 / §2.6
@@ -174,7 +209,7 @@ pub fn encode_png_image_with_options(
         // `Pal8` plane, pack its rows MSB-first into the pass's own
         // wire row_bytes, then filter + concatenate exactly like the
         // ≥8-bit Adam7 path.
-        deflate_encode_pixels_adam7_subbyte(image, &ihdr, opts.filter_strategy)?
+        deflate_encode_pixels_adam7_subbyte(image, &ihdr, opts.filter_strategy, level)?
     } else {
         let raw_pixels = flatten_and_normalise_pixels(image, &ihdr, row_bytes)?;
         if opts.interlace {
@@ -184,6 +219,7 @@ pub fn encode_png_image_with_options(
                 image.height as usize,
                 &ihdr,
                 opts.filter_strategy,
+                level,
             )?
         } else {
             deflate_encode_pixels(
@@ -192,6 +228,7 @@ pub fn encode_png_image_with_options(
                 image.height as usize,
                 &ihdr,
                 opts.filter_strategy,
+                level,
             )?
         }
     };
@@ -628,6 +665,7 @@ pub(crate) fn deflate_encode_pixels(
     height: usize,
     ihdr: &Ihdr,
     strategy: FilterStrategy,
+    level: u8,
 ) -> Result<Vec<u8>> {
     let bpp = ihdr.bpp_for_filter()?;
     // 1 filter byte + row_bytes per row.
@@ -649,7 +687,7 @@ pub(crate) fn deflate_encode_pixels(
         // last, not necessarily the winner — re-filter into the output slot.
         filter_row(ft, row, prev, bpp, data_slot);
     }
-    compress_to_vec_zlib(&filtered, 6)
+    compress_to_vec_zlib(&filtered, level)
 }
 
 /// Adam7 counterpart to [`deflate_encode_pixels`]: gather each of the
@@ -663,6 +701,7 @@ pub(crate) fn deflate_encode_pixels_adam7(
     height: usize,
     ihdr: &Ihdr,
     strategy: FilterStrategy,
+    level: u8,
 ) -> Result<Vec<u8>> {
     let bpp = ihdr.bpp_for_filter()?;
     let bytes_per_pixel = ihdr.decoded_bytes_per_pixel()?;
@@ -711,7 +750,7 @@ pub(crate) fn deflate_encode_pixels_adam7(
             filter_row(ft, row, prev, bpp, data_slot);
         }
     }
-    compress_to_vec_zlib(&filtered_all, 6)
+    compress_to_vec_zlib(&filtered_all, level)
 }
 
 /// Sub-byte (ct=0 / ct=3, depth 1/2/4) counterpart to
@@ -741,6 +780,7 @@ fn deflate_encode_pixels_adam7_subbyte(
     image: &PngImage,
     ihdr: &Ihdr,
     strategy: FilterStrategy,
+    level: u8,
 ) -> Result<Vec<u8>> {
     debug_assert!(ihdr.bit_depth == 1 || ihdr.bit_depth == 2 || ihdr.bit_depth == 4);
     debug_assert!(ihdr.colour_type == 0 || ihdr.colour_type == 3);
@@ -812,7 +852,7 @@ fn deflate_encode_pixels_adam7_subbyte(
             filter_row(ft, row, prev, bpp, data_slot);
         }
     }
-    compress_to_vec_zlib(&filtered_all, 6)
+    compress_to_vec_zlib(&filtered_all, level)
 }
 
 // ---- APNG encode --------------------------------------------------------
@@ -868,6 +908,7 @@ pub fn encode_apng_with_options(
     // fixed across the whole APNG so a single resolve on the first-
     // frame palette + opts.metadata covers every frame.
     let trns = resolve_trns_bytes(&ihdr, trns.as_deref(), opts.metadata.as_ref())?;
+    let level = resolve_compression_level(opts)?;
 
     let actl = Actl {
         num_frames: frames.len() as u32,
@@ -910,7 +951,7 @@ pub fn encode_apng_with_options(
             // Sub-byte (ct=0/ct=3) interlaced: same per-pass pack +
             // filter path the standalone encoder uses (RFC 2083 §A.8
             // sub-image-per-pass rule).
-            deflate_encode_pixels_adam7_subbyte(frame, &ihdr, opts.filter_strategy)?
+            deflate_encode_pixels_adam7_subbyte(frame, &ihdr, opts.filter_strategy, level)?
         } else {
             let raw = flatten_and_normalise_pixels(frame, &ihdr, row_bytes)?;
             if opts.interlace {
@@ -920,6 +961,7 @@ pub fn encode_apng_with_options(
                     ihdr.height as usize,
                     &ihdr,
                     opts.filter_strategy,
+                    level,
                 )?
             } else {
                 deflate_encode_pixels(
@@ -928,6 +970,7 @@ pub fn encode_apng_with_options(
                     ihdr.height as usize,
                     &ihdr,
                     opts.filter_strategy,
+                    level,
                 )?
             }
         };

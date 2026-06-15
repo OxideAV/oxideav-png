@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- caller-selectable IDAT/fdAT DEFLATE compression level (1..=9) via
+  `PngEncoderOptions::compression_level` and the registry
+  `compression_level` option; `None`/`0` keeps the historical level 6
+  (RFC 2083 §5 fixes only the deflate/inflate *method*, not the level)
 - gate IHDR field validity at the wire-decode boundary (W3C PNG3 §11.2.1):
   reject zero width/height, non-Table-12 colour-type/bit-depth pairs, and
   unknown compression/filter/interlace methods

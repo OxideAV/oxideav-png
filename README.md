@@ -96,8 +96,20 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
 - DEFLATE/zlib (RFC 1950/1951) framing for IDAT / fdAT and the
   `zTXt` / `iTXt` / `iCCP` chunk bodies is provided by
   [`compcol`](https://crates.io/crates/compcol) (the workspace-wide
-  pure-Rust compression collection), compression level fixed at 6
-  (the zlib default)
+  pure-Rust compression collection). The IDAT / fdAT pixel stream's
+  DEFLATE level is caller-selectable via
+  `PngEncoderOptions::compression_level: Option<u8>` (`1..=9`; `1`
+  fastest/largest, `9` slowest/smallest). PNG fixes only the
+  compression *method* — "compression method 0 (deflate/inflate)" per
+  RFC 2083 §5 — and says nothing about the DEFLATE effort level, so the
+  knob is spec-neutral and produces a conformant stream at every value.
+  `None` (the default) selects level `6` — zlib's default and the
+  historical encoder default — so an unset option reproduces the
+  pre-r312 byte stream exactly; an out-of-`1..=9` value is an encode
+  error ahead of the wire. Registry-side `CodecOptions` exposes a
+  `compression_level` u32 key with `0` mapping to the default. The
+  compressed metadata chunks (`zTXt` / `iTXt` / `iCCP`) keep their own
+  fixed level since their payloads are small and byte-layout-pinned.
 
 ## Metadata round-trip
 
