@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- decoder gamma handling (W3C PNG3 §13.13 / RFC 2083 §10.5) — opt-in
+  colour transform that undoes a file's `gAMA`-encoded samples and
+  re-applies a target display's gamma. New `gamma` module exposes
+  `GammaParams { file_gamma, display_exponent, user_exponent }` with the
+  spec's merged decoding exponent `user_exponent / (file_gamma *
+  display_exponent)`, a 256-entry 8-bit correction LUT
+  (`GammaParams::build_lut`, `floor((s/255)^e * 255 + 0.5)`), and
+  in-place `RgbaBitmap` appliers (`apply_to_rgba` / `apply_gama_to_rgba`).
+  Defaults follow the spec: `display_exponent = 2.2` ("A display exponent
+  of 2.2 should be used unless detailed calibration measurements are
+  available", §13.13), `user_exponent = 1.0`, and `file_gamma = 1/2.2`
+  for the unknown-gamma case. Alpha is never gamma-corrected ("alpha is
+  always represented linearly", §13.16) — only R/G/B bytes pass through
+  the LUT. A zero `gAMA` is treated as "no usable file gamma" and ignored
+  (§13.13 "Decoders should ignore it"), as are non-positive
+  display/file-gamma factors. The codec proper still round-trips the raw
+  `gAMA` integer verbatim; this is a separate caller-invoked stage. 10
+  unit tests cover identity exponents, endpoint fixing (0→0, 255→255),
+  the spec rounding, alpha preservation, the darken/lighten user-exponent
+  behaviour, and the zero/degenerate guards.
+
 ### Other
 
 - fuzz: `metadata_chunk_splice` target — build a valid 8x8 base PNG

@@ -316,6 +316,35 @@ repeated (the "Multiple OK? No" rule in RFC 2083 §4.3 / W3C PNG3
 instances are explicitly permitted (§4.2.7 ¶3 / §4.2.10 ¶6 /
 §11.3.3.4).
 
+## Colour management
+
+- Decoder gamma handling (W3C PNG3 §13.13 / RFC 2083 §10.5) — an opt-in
+  transform a caller invokes when it wants gamma-corrected pixels for a
+  known display. The codec itself round-trips the raw `gAMA` integer
+  verbatim and leaves samples untouched (the README "leaves any actual
+  colour transform to the caller" promise); the `gamma` module is the
+  separate stage that performs the §13.13 maths. `GammaParams` carries
+  the three spec exponents — `file_gamma` (the `gAMA` value),
+  `display_exponent`, and `user_exponent` — and exposes the merged
+  decoding exponent `user_exponent / (file_gamma * display_exponent)`.
+  `build_lut()` precomputes the 256-entry 8-bit correction table
+  `floor((s / 255) ^ decoding_exponent × 255 + 0.5)` (§13.13: "only 256
+  calculations per image … not one or three calculations per pixel"), and
+  `apply_to_rgba` / `apply_gama_to_rgba` run it across an `RgbaBitmap`'s
+  R/G/B bytes in place. Defaults are the spec's recommendations:
+  `display_exponent = 2.2` ("A display exponent of 2.2 should be used
+  unless detailed calibration measurements are available"),
+  `user_exponent = 1.0`, and `file_gamma = 1/2.2` for the
+  unknown-gamma fallback (§13.13). The alpha byte is never gamma-corrected
+  ("alpha is always represented linearly", §13.16). A zero `gAMA` is
+  "meaningless … Decoders should ignore it" (§13.13), so `from_gama`
+  returns `None` and the appliers leave the bitmap unchanged; the same
+  no-op guard fires for any non-positive `file_gamma` / `display_exponent`
+  (which would divide by zero or raise to a meaningless power). A
+  `user_exponent > 1` darkens mid-tones, `< 1` lightens them (§13.13). The
+  endpoints are fixed for any positive exponent: `0 → 0` ("Zero raised to
+  any positive power is zero") and `255 → 255`.
+
 ## Chunk naming property bits
 
 `ChunkType` wraps a four-byte chunk name and exposes the W3C PNG 3rd
