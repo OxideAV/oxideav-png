@@ -344,6 +344,19 @@ instances are explicitly permitted (§4.2.7 ¶3 / §4.2.10 ¶6 /
   `user_exponent > 1` darkens mid-tones, `< 1` lightens them (§13.13). The
   endpoints are fixed for any positive exponent: `0 → 0` ("Zero raised to
   any positive power is zero") and `255 → 255`.
+- Indexed-image palette gamma correction (W3C PNG3 §13.13) — the spec's
+  explicit "one-time correction of the palette is sufficient"
+  optimisation for colour type 3. `apply_to_palette` / `apply_gama_to_palette`
+  run the same `build_lut()` table over a `Pal8` image's
+  `PngImage::palette` (the `PLTE` `R/G/B` triples) once, so a viewer
+  resolving indices reads already-corrected entries instead of
+  gamma-correcting every output pixel. The `plte_len` argument names the
+  byte length of the `PLTE` portion; any `tRNS` alpha tail at/after that
+  offset is left untouched ("alpha is always represented linearly",
+  §13.16). A `plte_len` that is not a multiple of 3 or runs past the
+  buffer is clamped to the largest whole-triple prefix that fits, so a
+  malformed length is defensive rather than a panic. Same zero-`gAMA` /
+  non-positive-exponent no-op guards as the full-colour path.
 
 ## Chunk naming property bits
 

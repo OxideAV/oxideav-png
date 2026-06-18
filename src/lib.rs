@@ -115,7 +115,10 @@ pub use encoder::{
 };
 pub use error::{PngError, Result};
 pub use filter::{FilterStrategy, FilterType};
-pub use gamma::{apply_gama_to_rgba, apply_to_rgba as apply_gamma_to_rgba, GammaParams};
+pub use gamma::{
+    apply_gama_to_palette, apply_gama_to_rgba, apply_to_palette as apply_gamma_to_palette,
+    apply_to_rgba as apply_gamma_to_rgba, GammaParams,
+};
 pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
 pub use metadata::{
     Bkgd, Chrm, Cicp, Clli, Exif, Gama, Hist, Iccp, Itxt, Mdcv, Phys, PhysUnit, PngMetadata,

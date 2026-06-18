@@ -29,6 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unit tests cover identity exponents, endpoint fixing (0→0, 255→255),
   the spec rounding, alpha preservation, the darken/lighten user-exponent
   behaviour, and the zero/degenerate guards.
+- indexed-image palette gamma correction (W3C PNG3 §13.13) — the spec's
+  explicit "one-time correction of the palette is sufficient"
+  optimisation for colour type 3. `apply_to_palette` /
+  `apply_gama_to_palette` run the same `build_lut()` table over a `Pal8`
+  image's `PngImage::palette` `PLTE` `R/G/B` triples once (rather than
+  gamma-correcting every output pixel); `plte_len` bounds the `PLTE`
+  portion and any `tRNS` alpha tail at/after that offset is left
+  untouched (§13.16). A malformed `plte_len` (not a multiple of 3, or
+  past the buffer) is clamped to the largest whole-triple prefix that
+  fits. 5 unit tests cover LUT parity with the full-colour path, the
+  `tRNS` alpha-tail preservation, the clamp, and the zero-`gAMA` /
+  identity-exponent no-ops.
 
 ### Other
 

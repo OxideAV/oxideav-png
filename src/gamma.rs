@@ -195,6 +195,61 @@ pub fn apply_gama_to_rgba(bitmap: &mut RgbaBitmap, gama: Gama) -> bool {
     }
 }
 
+/// Apply §13.13 decoder gamma correction to an indexed image's palette
+/// in place — the spec's explicit "one-time correction of the palette"
+/// optimisation.
+///
+/// "For an indexed-color image, a one-time correction of the palette is
+/// sufficient, unless the image uses transparency and is being displayed
+/// against a nonuniform background" (W3C PNG3 §13.13). Rather than gamma-
+/// correcting every output pixel, a viewer corrects the (typically much
+/// smaller) palette once and then resolves indices into the already-
+/// corrected entries.
+///
+/// `palette` is the [`crate::image::PngImage::palette`] layout for a
+/// `Pal8` image: a run of `PLTE` `R, G, B` triples optionally followed by
+/// a `tRNS` alpha tail. `plte_len` is the byte length of the `PLTE`
+/// portion (a multiple of 3); bytes at and beyond `plte_len` are the
+/// linear `tRNS` alpha values and are left untouched ("alpha is always
+/// represented linearly", §13.16). A `plte_len` that is not a multiple of
+/// 3, or that runs past the buffer, is clamped to the largest whole-
+/// triple prefix that fits so a malformed length can never index out of
+/// bounds.
+///
+/// Returns `false` (and leaves the palette untouched) when `params` does
+/// not yield a usable transform (zero / non-finite file gamma); `true`
+/// when the correction was applied.
+pub fn apply_to_palette(palette: &mut [u8], plte_len: usize, params: GammaParams) -> bool {
+    let Some(lut) = params.build_lut() else {
+        return false;
+    };
+    // Clamp to the largest whole-triple prefix that actually fits, so a
+    // malformed plte_len (not a multiple of 3, or past the buffer) is
+    // defensive rather than a panic. tRNS alpha bytes live at/after
+    // plte_len and are §13.16-linear: never gamma-corrected.
+    let rgb_bytes = plte_len.min(palette.len());
+    let triples_end = rgb_bytes - (rgb_bytes % 3);
+    for entry in palette[..triples_end].chunks_exact_mut(3) {
+        entry[0] = lut[entry[0] as usize];
+        entry[1] = lut[entry[1] as usize];
+        entry[2] = lut[entry[2] as usize];
+    }
+    true
+}
+
+/// Apply §13.13 palette correction using the file gamma from a `gAMA`
+/// chunk and the default display (2.2) / user (1.0) exponents.
+///
+/// Convenience wrapper around [`GammaParams::from_gama`] +
+/// [`apply_to_palette`]. Returns `false` (no change) for a zero / absent
+/// usable file gamma.
+pub fn apply_gama_to_palette(palette: &mut [u8], plte_len: usize, gama: Gama) -> bool {
+    match GammaParams::from_gama(gama) {
+        Some(params) => apply_to_palette(palette, plte_len, params),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +402,89 @@ mod tests {
             "zero gAMA: no transform"
         );
         assert_eq!(bm.data, before, "samples unchanged for zero gAMA");
+    }
+
+    #[test]
+    fn palette_correction_matches_the_rgba_lut() {
+        // §13.13: "a one-time correction of the palette is sufficient".
+        // Every PLTE triple must map through the same LUT the full-colour
+        // path uses, channel by channel.
+        let params = GammaParams {
+            file_gamma: 0.45455,
+            display_exponent: 2.2,
+            user_exponent: 1.0,
+        };
+        let lut = params.build_lut().unwrap();
+        // Three PLTE entries, no tRNS tail.
+        let mut palette = vec![0, 50, 128, 200, 255, 10, 64, 192, 7];
+        assert!(apply_to_palette(&mut palette, 9, params));
+        let expected: Vec<u8> = [0, 50, 128, 200, 255, 10, 64, 192, 7]
+            .iter()
+            .map(|&b| lut[b as usize])
+            .collect();
+        assert_eq!(palette, expected);
+    }
+
+    #[test]
+    fn palette_trns_alpha_tail_is_never_corrected() {
+        // §13.16: alpha is always linear. The tRNS bytes at/after plte_len
+        // must survive a palette gamma pass byte-for-byte.
+        let params = GammaParams {
+            file_gamma: 0.45455,
+            display_exponent: 2.2,
+            user_exponent: 1.0,
+        };
+        let lut = params.build_lut().unwrap();
+        // 2 PLTE triples (6 bytes) + a 2-byte tRNS alpha tail.
+        let mut palette = vec![10, 20, 30, 40, 50, 60, 128, 200];
+        assert!(apply_to_palette(&mut palette, 6, params));
+        // RGB corrected …
+        assert_eq!(
+            &palette[..6],
+            &[lut[10], lut[20], lut[30], lut[40], lut[50], lut[60]]
+        );
+        // … alpha tail verbatim.
+        assert_eq!(&palette[6..], &[128, 200]);
+    }
+
+    #[test]
+    fn palette_malformed_len_is_clamped_not_panicked() {
+        let params = GammaParams::default();
+        // plte_len past the buffer + not a multiple of 3: must clamp to the
+        // largest whole-triple prefix (3 bytes here) without panicking.
+        let mut palette = vec![1, 2, 3, 4, 5];
+        assert!(apply_to_palette(&mut palette, 100, params));
+        let lut = params.build_lut().unwrap();
+        // First triple corrected; the trailing partial pair (4,5) left as-is.
+        assert_eq!(&palette[..3], &[lut[1], lut[2], lut[3]]);
+        assert_eq!(&palette[3..], &[4, 5]);
+    }
+
+    #[test]
+    fn palette_zero_gama_leaves_palette_unchanged() {
+        let gama = Gama {
+            gamma_times_100000: 0,
+        };
+        let mut palette = vec![10, 128, 250, 7];
+        let before = palette.clone();
+        assert!(!apply_gama_to_palette(&mut palette, 3, gama));
+        assert_eq!(palette, before);
+    }
+
+    #[test]
+    fn palette_identity_exponent_is_a_no_op() {
+        let params = GammaParams {
+            file_gamma: 0.5,
+            display_exponent: 2.0,
+            user_exponent: 1.0,
+        };
+        let mut palette = vec![0, 50, 128, 200, 255, 17];
+        let before = palette.clone();
+        assert!(apply_to_palette(&mut palette, 6, params));
+        assert_eq!(
+            palette, before,
+            "identity exponent must not alter the palette"
+        );
     }
 
     #[test]
