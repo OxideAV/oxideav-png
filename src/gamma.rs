@@ -38,6 +38,21 @@
 //! calculations per image (for 8-bit accuracy), not one or three
 //! calculations per pixel", §13.13) and then applied per channel.
 //!
+//! ## Bit-depth-general formula and the 16-bit path
+//!
+//! The §13.13 formula is written in terms of the sample depth, not a
+//! fixed 8-bit width: `sample = integer_sample / (2^sampledepth - 1.0)`
+//! and `framebuf_sample = floor(display_input * MAX_FRAMEBUF_SAMPLE +
+//! 0.5)`, where `MAX_FRAMEBUF_SAMPLE` is "the maximum value of a frame
+//! buffer sample (255 for 8-bit, 31 for 5-bit, etc)". The 8-bit
+//! [`GammaParams::build_lut`] specialises `MAX = 255`; [`GammaParams::
+//! build_lut16`] specialises `MAX = 65535` for 16-bit samples and
+//! [`apply_to_png16`] runs it across the colour channels of a
+//! [`PngImage`]'s `Gray16Le` / `Rgb48Le` / `Rgba64Le` little-endian
+//! buffer. The same merged decoding exponent drives both widths — the
+//! transform is per-sample, so only the normalisation and frame-buffer
+//! denominators change with the depth.
+//!
 //! ## Alpha is never gamma-corrected
 //!
 //! "Gamma correction is not applied to the alpha channel … alpha is
@@ -53,7 +68,7 @@
 //! by zero; the caller then keeps the samples unchanged (or supplies a
 //! default file gamma of its own choosing).
 
-use crate::image::RgbaBitmap;
+use crate::image::{PngImage, PngPixelFormat, RgbaBitmap};
 use crate::metadata::Gama;
 
 /// Parameters for the §13.13 decoder gamma transform.
@@ -155,6 +170,43 @@ impl GammaParams {
         }
         Some(lut)
     }
+
+    /// Build the 65536-entry 16-bit gamma-correction lookup table — the
+    /// §13.13 transform specialised to a 16-bit sample depth.
+    ///
+    /// The §13.13 formula is written for an arbitrary sample depth:
+    /// `sample = integer_sample / (2^sampledepth - 1.0)` and
+    /// `framebuf_sample = floor(display_input * MAX_FRAMEBUF_SAMPLE +
+    /// 0.5)`. For 16-bit samples `MAX_FRAMEBUF_SAMPLE = 65535`, so:
+    ///
+    /// ```text
+    /// table[s] = floor((s / 65535) ^ decoding_exponent * 65535 + 0.5)
+    /// ```
+    ///
+    /// As with the 8-bit table the endpoints are fixed for any positive
+    /// exponent: `table[0] == 0` ("Zero raised to any positive power is
+    /// zero", §13.13) and `table[65535] == 65535`. The table is boxed to
+    /// the heap (128 KiB) so it is never materialised on the stack.
+    ///
+    /// Returns `None` when [`Self::decoding_exponent`] is undefined; the
+    /// caller then performs no transform.
+    pub fn build_lut16(&self) -> Option<Box<[u16; 65536]>> {
+        let exp = self.decoding_exponent()?;
+        let mut lut = vec![0u16; 65536].into_boxed_slice();
+        for (s, slot) in lut.iter_mut().enumerate() {
+            // §13.13 line 1: normalize to 0.0..=1.0 over the 16-bit range.
+            let sample = s as f64 / 65535.0;
+            // Merged lines 2/3: sample ^ decoding_exponent.
+            let display_input = sample.powf(exp);
+            // Line 4: floor(display_input * MAX_FRAMEBUF_SAMPLE + 0.5).
+            let fb = (display_input * 65535.0 + 0.5).floor();
+            // Defensive clamp; for a valid exponent fb is already 0..=65535.
+            *slot = fb.clamp(0.0, 65535.0) as u16;
+        }
+        // The boxed slice is exactly 65536 long, so the conversion to the
+        // fixed-size array type is infallible by construction.
+        lut.try_into().ok()
+    }
 }
 
 /// Apply §13.13 decoder gamma correction to an [`RgbaBitmap`] in place.
@@ -191,6 +243,89 @@ pub fn apply_to_rgba(bitmap: &mut RgbaBitmap, params: GammaParams) -> bool {
 pub fn apply_gama_to_rgba(bitmap: &mut RgbaBitmap, gama: Gama) -> bool {
     match GammaParams::from_gama(gama) {
         Some(params) => apply_to_rgba(bitmap, params),
+        None => false,
+    }
+}
+
+/// Apply §13.13 decoder gamma correction to a 16-bit [`PngImage`] in
+/// place — the bit-depth-general transform specialised to a 16-bit
+/// sample depth.
+///
+/// Operates on the three little-endian 16-bit pixel formats:
+/// * [`PngPixelFormat::Gray16Le`] — one colour sample per pixel.
+/// * [`PngPixelFormat::Rgb48Le`] — three colour samples (R, G, B).
+/// * [`PngPixelFormat::Rgba64Le`] — three colour samples plus a linear
+///   alpha sample that is left untouched ("alpha is always represented
+///   linearly", W3C PNG3 §13.16).
+///
+/// Each 16-bit colour sample is read from its two little-endian wire
+/// bytes, replaced by `lut[old]`, and written back little-endian. "For
+/// color images, the entire calculation is performed separately for R, G,
+/// and B values" (§13.13) — the same single LUT drives every colour
+/// channel because the transform is per-sample.
+///
+/// Any non-16-bit format ([`PngPixelFormat::Gray8`] / `Rgb24` / `Pal8` /
+/// `Ya8` / `Rgba`) is left untouched and the function returns `false`:
+/// the 8-bit appliers ([`apply_to_rgba`] / [`apply_to_palette`]) cover
+/// those widths. A `stride` wider than `width * bytes_per_pixel` (the
+/// caller-supplied-input case [`PngImage::stride`] documents) is honoured
+/// — only the live `width` samples of each row are corrected and any
+/// trailing padding bytes are skipped.
+///
+/// Returns `false` (and leaves the image untouched) when `params` does
+/// not yield a usable transform (zero / non-finite file gamma) or when
+/// the pixel format is not one of the 16-bit layouts; `true` when the
+/// correction was applied.
+pub fn apply_to_png16(image: &mut PngImage, params: GammaParams) -> bool {
+    // Colour samples per pixel; the alpha sample (if any) is excluded so
+    // it stays §13.16-linear.
+    let colour_samples = match image.pixel_format {
+        PngPixelFormat::Gray16Le => 1usize,
+        PngPixelFormat::Rgb48Le => 3,
+        PngPixelFormat::Rgba64Le => 3,
+        // 8-bit / palette / sub-16-bit formats are not this path's job.
+        PngPixelFormat::Gray8
+        | PngPixelFormat::Rgb24
+        | PngPixelFormat::Pal8
+        | PngPixelFormat::Ya8
+        | PngPixelFormat::Rgba => return false,
+    };
+    let Some(lut) = params.build_lut16() else {
+        return false;
+    };
+    let bpp = image.bytes_per_pixel();
+    let width = image.width as usize;
+    let row_colour_bytes = width * colour_samples * 2;
+    let stride = image.stride;
+    for row in image.data.chunks_mut(stride) {
+        // Only the live colour bytes of the row are corrected; the alpha
+        // tail of each pixel and any stride padding are skipped.
+        if row.len() < row_colour_bytes {
+            break;
+        }
+        for pixel in row[..width * bpp].chunks_exact_mut(bpp) {
+            for sample in pixel[..colour_samples * 2].chunks_exact_mut(2) {
+                let v = u16::from_le_bytes([sample[0], sample[1]]);
+                let corrected = lut[v as usize].to_le_bytes();
+                sample[0] = corrected[0];
+                sample[1] = corrected[1];
+            }
+            // The Rgba64Le alpha sample (last 2 bytes) is deliberately
+            // left untouched — §13.16.
+        }
+    }
+    true
+}
+
+/// Apply §13.13 16-bit correction using the file gamma from a `gAMA`
+/// chunk and the default display (2.2) / user (1.0) exponents.
+///
+/// Convenience wrapper around [`GammaParams::from_gama`] +
+/// [`apply_to_png16`]. Returns `false` (no change) for a zero / absent
+/// usable file gamma or a non-16-bit pixel format.
+pub fn apply_gama_to_png16(image: &mut PngImage, gama: Gama) -> bool {
+    match GammaParams::from_gama(gama) {
+        Some(params) => apply_to_png16(image, params),
         None => false,
     }
 }
@@ -497,6 +632,235 @@ mod tests {
         assert!((params.file_gamma - 0.45455).abs() < 1e-9);
         assert_eq!(params.display_exponent, 2.2);
         assert_eq!(params.user_exponent, 1.0);
+    }
+
+    fn png16(format: PngPixelFormat, width: u32, samples_le: &[u16]) -> PngImage {
+        let mut data = Vec::with_capacity(samples_le.len() * 2);
+        for &s in samples_le {
+            data.extend_from_slice(&s.to_le_bytes());
+        }
+        let bpp = format.bytes_per_pixel();
+        PngImage {
+            width,
+            height: (data.len() / (width as usize * bpp)) as u32,
+            pixel_format: format,
+            stride: width as usize * bpp,
+            data,
+            palette: Vec::new(),
+        }
+    }
+
+    fn samples_le(image: &PngImage) -> Vec<u16> {
+        image
+            .data
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect()
+    }
+
+    #[test]
+    fn lut16_endpoints_and_identity() {
+        // Identity exponent (file*display == user) maps every value to
+        // itself; endpoints fixed for any positive exponent.
+        let identity = GammaParams {
+            file_gamma: 0.5,
+            display_exponent: 2.0,
+            user_exponent: 1.0,
+        };
+        let lut = identity.build_lut16().unwrap();
+        for s in [0usize, 1, 255, 256, 12345, 40000, 65534, 65535] {
+            assert_eq!(lut[s] as usize, s, "identity LUT16 should map s -> s");
+        }
+        // Non-identity exponent: endpoints still pinned.
+        let other = GammaParams {
+            file_gamma: 0.45455,
+            display_exponent: 2.2,
+            user_exponent: 1.0,
+        };
+        let lut = other.build_lut16().unwrap();
+        assert_eq!(lut[0], 0, "0 maps to 0");
+        assert_eq!(lut[65535], 65535, "65535 maps to 65535");
+    }
+
+    #[test]
+    fn lut16_matches_spec_rounding() {
+        // floor((s/65535)^e * 65535 + 0.5) hand-computed at sample points.
+        let params = GammaParams {
+            file_gamma: 0.45455,
+            display_exponent: 2.2,
+            user_exponent: 1.0,
+        };
+        let e = params.decoding_exponent().unwrap();
+        let lut = params.build_lut16().unwrap();
+        for s in [1usize, 257, 32768, 50000, 65534] {
+            let expected = (((s as f64 / 65535.0).powf(e)) * 65535.0 + 0.5).floor() as u16;
+            assert_eq!(lut[s], expected, "mismatch at s={s}");
+        }
+    }
+
+    #[test]
+    fn lut16_consistent_with_8bit_endpoints() {
+        // The two widths share the merged decoding exponent; the 16-bit
+        // table's full-scale value matches the 8-bit table's at the same
+        // *normalised* position (both fix their own MAX -> MAX).
+        let params = GammaParams::from_gama(Gama {
+            gamma_times_100000: 45455,
+        })
+        .unwrap();
+        let lut8 = params.build_lut().unwrap();
+        let lut16 = params.build_lut16().unwrap();
+        // 0 and full-scale agree under each width's own MAX.
+        assert_eq!(lut8[0], 0);
+        assert_eq!(lut16[0], 0);
+        assert_eq!(lut8[255], 255);
+        assert_eq!(lut16[65535], 65535);
+    }
+
+    #[test]
+    fn png16_gray_corrected_per_lut() {
+        let params = GammaParams {
+            file_gamma: 0.45455,
+            display_exponent: 2.2,
+            user_exponent: 1.0,
+        };
+        let lut = params.build_lut16().unwrap();
+        let mut img = png16(PngPixelFormat::Gray16Le, 3, &[0, 32768, 65535]);
+        assert!(apply_to_png16(&mut img, params));
+        assert_eq!(
+            samples_le(&img),
+            vec![lut[0], lut[32768], lut[65535]],
+            "every Gray16 sample maps through the LUT"
+        );
+    }
+
+    #[test]
+    fn png16_rgb48_all_channels_corrected() {
+        let params = GammaParams {
+            file_gamma: 0.45455,
+            display_exponent: 2.2,
+            user_exponent: 1.0,
+        };
+        let lut = params.build_lut16().unwrap();
+        // 2 RGB pixels: (R,G,B) samples.
+        let src = [100u16, 20000, 65535, 1, 40000, 32768];
+        let mut img = png16(PngPixelFormat::Rgb48Le, 2, &src);
+        assert!(apply_to_png16(&mut img, params));
+        let expected: Vec<u16> = src.iter().map(|&s| lut[s as usize]).collect();
+        assert_eq!(samples_le(&img), expected);
+    }
+
+    #[test]
+    fn png16_rgba64_alpha_is_never_corrected() {
+        // §13.16: alpha is linear. The 4th sample of each RGBA64 pixel
+        // must survive verbatim while R/G/B map through the LUT.
+        let params = GammaParams {
+            file_gamma: 0.45455,
+            display_exponent: 2.2,
+            user_exponent: 1.0,
+        };
+        let lut = params.build_lut16().unwrap();
+        // 2 pixels: R,G,B,A each.
+        let src = [10u16, 20000, 65535, 12345, 7, 40000, 100, 54321];
+        let mut img = png16(PngPixelFormat::Rgba64Le, 2, &src);
+        assert!(apply_to_png16(&mut img, params));
+        let got = samples_le(&img);
+        // RGB corrected …
+        assert_eq!(got[0], lut[10]);
+        assert_eq!(got[1], lut[20000]);
+        assert_eq!(got[2], lut[65535]);
+        assert_eq!(got[4], lut[7]);
+        assert_eq!(got[5], lut[40000]);
+        assert_eq!(got[6], lut[100]);
+        // … alpha verbatim.
+        assert_eq!(got[3], 12345, "pixel 0 alpha untouched");
+        assert_eq!(got[7], 54321, "pixel 1 alpha untouched");
+    }
+
+    #[test]
+    fn png16_rejects_non_16bit_formats() {
+        let params = GammaParams::default();
+        for fmt in [
+            PngPixelFormat::Gray8,
+            PngPixelFormat::Rgb24,
+            PngPixelFormat::Pal8,
+            PngPixelFormat::Ya8,
+            PngPixelFormat::Rgba,
+        ] {
+            let bpp = fmt.bytes_per_pixel();
+            let mut img = PngImage {
+                width: 2,
+                height: 1,
+                pixel_format: fmt,
+                stride: 2 * bpp,
+                data: vec![1u8; 2 * bpp],
+                palette: Vec::new(),
+            };
+            let before = img.data.clone();
+            assert!(
+                !apply_to_png16(&mut img, params),
+                "{fmt:?} is not the 16-bit path's job"
+            );
+            assert_eq!(img.data, before, "{fmt:?} bytes unchanged");
+        }
+    }
+
+    #[test]
+    fn png16_honours_wider_stride_padding() {
+        // A caller-supplied stride wider than width*bpp must leave the
+        // trailing padding bytes untouched while still correcting the
+        // live samples.
+        let params = GammaParams {
+            file_gamma: 0.45455,
+            display_exponent: 2.2,
+            user_exponent: 1.0,
+        };
+        let lut = params.build_lut16().unwrap();
+        // 1 Gray16 sample per row (2 bytes) + 4 padding bytes; 2 rows.
+        let mut data = Vec::new();
+        data.extend_from_slice(&20000u16.to_le_bytes());
+        data.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        data.extend_from_slice(&40000u16.to_le_bytes());
+        data.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        let mut img = PngImage {
+            width: 1,
+            height: 2,
+            pixel_format: PngPixelFormat::Gray16Le,
+            stride: 6,
+            data,
+            palette: Vec::new(),
+        };
+        assert!(apply_to_png16(&mut img, params));
+        // Row 0 sample corrected; its padding intact.
+        assert_eq!(&img.data[0..2], &lut[20000].to_le_bytes());
+        assert_eq!(&img.data[2..6], &[0xAA, 0xBB, 0xCC, 0xDD]);
+        // Row 1 sample corrected; its padding intact.
+        assert_eq!(&img.data[6..8], &lut[40000].to_le_bytes());
+        assert_eq!(&img.data[8..12], &[0x11, 0x22, 0x33, 0x44]);
+    }
+
+    #[test]
+    fn png16_zero_gama_is_a_no_op() {
+        let gama = Gama {
+            gamma_times_100000: 0,
+        };
+        let mut img = png16(PngPixelFormat::Rgb48Le, 1, &[10, 20000, 65535]);
+        let before = img.data.clone();
+        assert!(!apply_gama_to_png16(&mut img, gama));
+        assert_eq!(img.data, before, "zero gAMA leaves 16-bit image unchanged");
+    }
+
+    #[test]
+    fn png16_non_positive_factors_yield_no_transform() {
+        let bad = GammaParams {
+            file_gamma: 0.0,
+            display_exponent: 2.2,
+            user_exponent: 1.0,
+        };
+        assert!(bad.build_lut16().is_none());
+        let mut img = png16(PngPixelFormat::Gray16Le, 2, &[1234, 56789]);
+        let before = img.data.clone();
+        assert!(!apply_to_png16(&mut img, bad));
+        assert_eq!(img.data, before);
     }
 
     #[test]

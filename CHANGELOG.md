@@ -41,6 +41,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fits. 5 unit tests cover LUT parity with the full-colour path, the
   `tRNS` alpha-tail preservation, the clamp, and the zero-`gAMA` /
   identity-exponent no-ops.
+- 16-bit decoder gamma correction (W3C PNG3 §13.13) — the §13.13 transform
+  is bit-depth-general (`sample = integer_sample / (2^sampledepth - 1.0)`;
+  `framebuf_sample = floor(display_input × MAX_FRAMEBUF_SAMPLE + 0.5)`,
+  "MAX_FRAMEBUF_SAMPLE … 255 for 8-bit, 31 for 5-bit, etc"), so the 8-bit
+  LUT is the `MAX = 255` specialisation and the new
+  `GammaParams::build_lut16` is the `MAX = 65535` one — a 65536-entry
+  `u16` table (`floor((s/65535)^e × 65535 + 0.5)`), heap-boxed (128 KiB)
+  so it never materialises on the stack. `apply_to_png16` /
+  `apply_gama_to_png16` run it across the little-endian colour samples of
+  a `PngImage` in the three 16-bit layouts (`Gray16Le` = 1 colour sample,
+  `Rgb48Le` = 3, `Rgba64Le` = 3 + a §13.16-linear alpha sample left
+  untouched). The same merged decoding exponent drives both widths, so the
+  endpoints stay pinned (`0 → 0`, `65535 → 65535`). Non-16-bit formats
+  (`Gray8` / `Rgb24` / `Pal8` / `Ya8` / `Rgba`) are a no-op `false` (the
+  8-bit appliers own those widths); a `stride` wider than `width × bpp`
+  corrects only the live samples and skips trailing padding. Re-exported
+  as `apply_gamma_to_png16` / `apply_gama_to_png16`. 10 unit tests cover
+  LUT16 endpoints / identity, the spec rounding, 8-bit/16-bit endpoint
+  parity, per-channel correction on all three layouts, alpha preservation
+  on `Rgba64Le`, the non-16-bit rejection, wider-stride padding
+  preservation, and the zero-`gAMA` / non-positive-factor no-ops.
 
 ### Other
 

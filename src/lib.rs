@@ -116,7 +116,8 @@ pub use encoder::{
 pub use error::{PngError, Result};
 pub use filter::{FilterStrategy, FilterType};
 pub use gamma::{
-    apply_gama_to_palette, apply_gama_to_rgba, apply_to_palette as apply_gamma_to_palette,
+    apply_gama_to_palette, apply_gama_to_png16, apply_gama_to_rgba,
+    apply_to_palette as apply_gamma_to_palette, apply_to_png16 as apply_gamma_to_png16,
     apply_to_rgba as apply_gamma_to_rgba, GammaParams,
 };
 pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};

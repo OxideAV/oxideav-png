@@ -357,6 +357,24 @@ instances are explicitly permitted (§4.2.7 ¶3 / §4.2.10 ¶6 /
   buffer is clamped to the largest whole-triple prefix that fits, so a
   malformed length is defensive rather than a panic. Same zero-`gAMA` /
   non-positive-exponent no-op guards as the full-colour path.
+- 16-bit decoder gamma correction (W3C PNG3 §13.13) — the §13.13 formula
+  is written for an arbitrary sample depth (`sample = integer_sample /
+  (2^sampledepth - 1.0)`; `framebuf_sample = floor(display_input ×
+  MAX_FRAMEBUF_SAMPLE + 0.5)`, "MAX_FRAMEBUF_SAMPLE … 255 for 8-bit, 31
+  for 5-bit, etc"), so the 8-bit LUT is the `MAX = 255` specialisation and
+  `build_lut16()` is the `MAX = 65535` one — a 65536-entry `u16` table
+  (`floor((s / 65535) ^ decoding_exponent × 65535 + 0.5)`, heap-boxed at
+  128 KiB so it never lands on the stack). `apply_to_png16` /
+  `apply_gama_to_png16` run it across the little-endian colour samples of a
+  `PngImage` in the three 16-bit layouts (`Gray16Le` = 1 colour sample,
+  `Rgb48Le` = 3, `Rgba64Le` = 3 + a linear alpha sample left untouched per
+  §13.16). The same merged decoding exponent drives both widths — only the
+  normalisation / frame-buffer denominators change with the depth — so the
+  endpoints stay pinned (`0 → 0`, `65535 → 65535`). Non-16-bit formats
+  (`Gray8` / `Rgb24` / `Pal8` / `Ya8` / `Rgba`) are a no-op `false` (the
+  8-bit appliers own those widths); a `stride` wider than `width × bpp`
+  corrects only the live samples and skips the trailing padding. Same
+  zero-`gAMA` / non-positive-exponent no-op guards as the 8-bit path.
 
 ## Chunk naming property bits
 
