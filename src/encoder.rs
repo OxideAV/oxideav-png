@@ -31,6 +31,7 @@ pub use crate::registry::make_encoder;
 
 use crate::zlibvec::compress_to_vec_zlib;
 
+use crate::apng::{Blend, Disposal};
 use crate::chunk::{write_chunk, PNG_MAGIC};
 use crate::decoder::{adam7_pass_dims, Ihdr, ADAM7};
 use crate::filter::{filter_row, FilterStrategy};
@@ -885,7 +886,7 @@ pub fn encode_apng_with_options(
     num_plays: u32,
     opts: &PngEncoderOptions,
 ) -> Result<Vec<u8>> {
-    use crate::apng::{build_fdat, Actl, Blend, Disposal, Fctl};
+    use crate::apng::{build_fdat, Actl, Fctl};
 
     if frames.is_empty() {
         return Err(Error::invalid("PNG encoder: no frames for APNG"));
@@ -987,4 +988,335 @@ pub fn encode_apng_with_options(
 
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
+}
+
+// ---- Region-aware APNG encode ------------------------------------------
+
+/// One animation step for the region-aware APNG encoder
+/// ([`encode_apng_frames`] / [`encode_apng_frames_with_options`]).
+///
+/// Unlike [`encode_apng`] — which paints every frame across the whole
+/// canvas with `Disposal::None` / `Blend::Source` and one shared delay —
+/// each [`ApngFrameSpec`] carries its own sub-region (`x_offset` /
+/// `y_offset` plus the embedded `image`'s `width` / `height`), its own
+/// `delay_num` / `delay_den` rational duration, and its own
+/// `dispose_op` / `blend_op` so the emitted `fcTL` carries the full
+/// W3C PNG 3rd Edition §11.3.6.1 frame-control surface the decoder
+/// already composites.
+///
+/// The embedded `image` holds only the pixels of the sub-region — its
+/// `width` / `height` are the `fcTL` frame dimensions, NOT the canvas
+/// dimensions. `x_offset` / `y_offset` place that region on the canvas;
+/// `x_offset + image.width` must not exceed the canvas width and
+/// likewise for height (§11.3.6.1: the region "may not fall outside of
+/// the default image"). Every frame's `image.pixel_format` must equal
+/// the canvas pixel format because a PNG file carries one IHDR.
+#[derive(Clone, Debug)]
+pub struct ApngFrameSpec {
+    /// Sub-region pixels for this frame. `image.width` / `image.height`
+    /// are the `fcTL` frame extent; `image.pixel_format` must match the
+    /// canvas format; `image.palette` (for `Pal8`) is ignored here — the
+    /// file's PLTE / tRNS come from the canvas-level palette.
+    pub image: PngImage,
+    /// Frame-region left edge on the canvas, in pixels.
+    pub x_offset: u32,
+    /// Frame-region top edge on the canvas, in pixels.
+    pub y_offset: u32,
+    /// `fcTL` `delay_num`: numerator of the frame-display rational
+    /// duration (seconds).
+    pub delay_num: u16,
+    /// `fcTL` `delay_den`: denominator of the rational duration. `0` is
+    /// interpreted as `100` by the spec; the encoder rewrites a supplied
+    /// `0` to `100` so the on-wire value is unambiguous.
+    pub delay_den: u16,
+    /// Disposal applied to the frame region *after* this frame is shown.
+    pub dispose_op: Disposal,
+    /// How this frame's pixels combine with the canvas underneath.
+    pub blend_op: Blend,
+}
+
+impl ApngFrameSpec {
+    /// Convenience constructor for a full-canvas frame at the given
+    /// integer-centisecond delay with `Disposal::None` / `Blend::Source`
+    /// — the same defaults [`encode_apng`] applies, but reachable from a
+    /// per-frame `Vec<ApngFrameSpec>`.
+    pub fn full_canvas(image: PngImage, delay_centiseconds: u16) -> Self {
+        Self {
+            image,
+            x_offset: 0,
+            y_offset: 0,
+            delay_num: delay_centiseconds,
+            delay_den: 100,
+            dispose_op: Disposal::None,
+            blend_op: Blend::Source,
+        }
+    }
+}
+
+/// Encode a region-aware APNG from per-frame [`ApngFrameSpec`]s using
+/// default encoder options.
+///
+/// `canvas_width` / `canvas_height` are the IHDR (default-image)
+/// dimensions. `default_image`, when `Some`, is a still image painted
+/// into the `IDAT` and shown by non-APNG-aware viewers; it is NOT part
+/// of the animation (the first `fcTL` does not claim it), so `acTL`'s
+/// `num_frames` equals `frames.len()`. When `default_image` is `None`,
+/// the first frame's pixels become the `IDAT` default image *and* the
+/// first animation frame (the `fcTL` precedes `IDAT`), matching the
+/// `first_frame_is_default` path the decoder recognises.
+///
+/// See [`encode_apng_frames_with_options`] for the option-bearing form
+/// and the full list of validation rules.
+pub fn encode_apng_frames(
+    canvas_width: u32,
+    canvas_height: u32,
+    default_image: Option<&PngImage>,
+    frames: &[ApngFrameSpec],
+    num_plays: u32,
+) -> Result<Vec<u8>> {
+    encode_apng_frames_with_options(
+        canvas_width,
+        canvas_height,
+        default_image,
+        frames,
+        num_plays,
+        &PngEncoderOptions::default(),
+    )
+}
+
+/// Encode a region-aware APNG, honouring [`PngEncoderOptions`].
+///
+/// Layout produced (W3C PNG 3rd Edition §4.9 / §11.3.6):
+///
+/// * `IHDR` (canvas dimensions) → `acTL` → before-PLTE metadata →
+///   optional `PLTE` / `tRNS` → before-IDAT metadata.
+/// * When `default_image` is `Some`, its full-canvas pixels go in an
+///   `IDAT` *before* the first `fcTL`; that still image is excluded from
+///   the animation. When `default_image` is `None`, the first `fcTL`
+///   precedes the `IDAT` so the first animation frame doubles as the
+///   default image (`first_frame_is_default`).
+/// * Each frame emits an `fcTL` carrying the frame's region, rational
+///   delay, and dispose / blend ops. The very first `fcTL` carries
+///   sequence number 0; every subsequent `fcTL` / `fdAT` sequence number
+///   is contiguous-ascending (§4.9.2). Non-default frame pixels ride in
+///   `fdAT`.
+/// * `IEND`.
+///
+/// Validation (all errors before any wire bytes are committed):
+///
+/// * `frames` must be non-empty and the canvas dimensions non-zero.
+/// * The canvas format / bit-depth is taken from `default_image` (if
+///   present) else the first frame; every frame's `image.pixel_format`
+///   must equal it.
+/// * Each frame's region must satisfy §11.3.6.1: non-zero extent and
+///   `x_offset + width ≤ canvas_width`, `y_offset + height ≤
+///   canvas_height`.
+/// * A `default_image`, when present, must span the full canvas. With no
+///   separate default image the *first* frame must span the full canvas
+///   (the IDAT is a complete default image).
+pub fn encode_apng_frames_with_options(
+    canvas_width: u32,
+    canvas_height: u32,
+    default_image: Option<&PngImage>,
+    frames: &[ApngFrameSpec],
+    num_plays: u32,
+    opts: &PngEncoderOptions,
+) -> Result<Vec<u8>> {
+    use crate::apng::{build_fdat, Actl, Fctl};
+
+    if frames.is_empty() {
+        return Err(Error::invalid("PNG encoder: no frames for APNG"));
+    }
+    if canvas_width == 0 || canvas_height == 0 {
+        return Err(Error::invalid(
+            "PNG encoder: APNG canvas width / height must be greater than zero",
+        ));
+    }
+
+    // The canvas pixel format / palette come from the default image when
+    // one is supplied (it fills the IDAT and fixes the IHDR), otherwise
+    // from the first animation frame (which doubles as the default image).
+    let canvas_fmt = match default_image {
+        Some(d) => d.pixel_format,
+        None => frames[0].image.pixel_format,
+    };
+    for (i, f) in frames.iter().enumerate() {
+        if f.image.pixel_format != canvas_fmt {
+            return Err(Error::invalid(format!(
+                "PNG encoder: APNG frame {i} pixel_format differs from the canvas \
+                 format — a PNG file carries a single IHDR"
+            )));
+        }
+    }
+    if let Some(d) = default_image {
+        if d.width != canvas_width || d.height != canvas_height {
+            return Err(Error::invalid(format!(
+                "PNG encoder: APNG default image {}x{} must span the full canvas {canvas_width}x{canvas_height}",
+                d.width, d.height
+            )));
+        }
+    }
+    if default_image.is_none() {
+        let f0 = &frames[0];
+        if f0.image.width != canvas_width || f0.image.height != canvas_height {
+            return Err(Error::invalid(format!(
+                "PNG encoder: with no separate default image the first APNG frame must \
+                 span the full canvas (got {}x{} for a {canvas_width}x{canvas_height} canvas); \
+                 supply a full-canvas default image to use a partial first frame",
+                f0.image.width, f0.image.height
+            )));
+        }
+    }
+
+    // Validate every frame region against the canvas up front so a bad
+    // offset is reported before any compression work happens.
+    for (i, f) in frames.iter().enumerate() {
+        let fctl = Fctl {
+            sequence_number: 0,
+            width: f.image.width,
+            height: f.image.height,
+            x_offset: f.x_offset,
+            y_offset: f.y_offset,
+            delay_num: f.delay_num,
+            delay_den: f.delay_den,
+            dispose_op: f.dispose_op,
+            blend_op: f.blend_op,
+        };
+        fctl.validate_within_canvas(canvas_width, canvas_height)
+            .map_err(|e| Error::invalid(format!("PNG encoder: APNG frame {i}: {e}")))?;
+    }
+
+    // Synthesise a full-canvas probe image so colour-type / bit-depth /
+    // palette resolution reuse the standalone IHDR path.
+    let palette_src = match default_image {
+        Some(d) => d,
+        None => &frames[0].image,
+    };
+    let canvas_probe = PngImage {
+        width: canvas_width,
+        height: canvas_height,
+        pixel_format: canvas_fmt,
+        stride: canvas_width as usize * canvas_fmt.bytes_per_pixel(),
+        data: Vec::new(),
+        palette: palette_src.palette.clone(),
+    };
+    let (mut ihdr, _canvas_row_bytes, plte, trns) = ihdr_and_row_bytes(&canvas_probe, opts)?;
+    if opts.interlace {
+        ihdr.interlace = 1;
+    }
+    let trns = resolve_trns_bytes(&ihdr, trns.as_deref(), opts.metadata.as_ref())?;
+    let level = resolve_compression_level(opts)?;
+
+    let actl = Actl {
+        num_frames: frames.len() as u32,
+        num_plays,
+    };
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&PNG_MAGIC);
+    write_chunk(&mut out, b"IHDR", &ihdr.to_bytes());
+    write_chunk(&mut out, b"acTL", &actl.to_bytes());
+    write_metadata_before_plte(&mut out, opts.metadata.as_ref())?;
+    if let Some(p) = plte.as_deref() {
+        write_chunk(&mut out, b"PLTE", p);
+    }
+    if let Some(t) = trns.as_deref() {
+        write_chunk(&mut out, b"tRNS", t);
+    }
+    write_metadata_before_idat(&mut out, opts.metadata.as_ref())?;
+
+    // Compress one frame's sub-region pixels into a zlib stream using the
+    // frame's own dimensions (the fcTL extent) as a synthetic IHDR.
+    let compress_region = |img: &PngImage| -> Result<Vec<u8>> {
+        let sub_ihdr = Ihdr {
+            width: img.width,
+            height: img.height,
+            ..ihdr
+        };
+        let row_bytes = region_row_bytes(&sub_ihdr, img.width);
+        if opts.interlace && sub_ihdr.bit_depth < 8 {
+            deflate_encode_pixels_adam7_subbyte(img, &sub_ihdr, opts.filter_strategy, level)
+        } else {
+            let raw = flatten_and_normalise_pixels(img, &sub_ihdr, row_bytes)?;
+            if opts.interlace {
+                deflate_encode_pixels_adam7(
+                    &raw,
+                    sub_ihdr.width as usize,
+                    sub_ihdr.height as usize,
+                    &sub_ihdr,
+                    opts.filter_strategy,
+                    level,
+                )
+            } else {
+                deflate_encode_pixels(
+                    &raw,
+                    row_bytes,
+                    sub_ihdr.height as usize,
+                    &sub_ihdr,
+                    opts.filter_strategy,
+                    level,
+                )
+            }
+        }
+    };
+
+    // When a separate default image is supplied, its full-canvas pixels
+    // fill the IDAT *before* the first fcTL — it is the still image
+    // non-APNG viewers show and is not part of the animation.
+    if let Some(d) = default_image {
+        let idat = compress_region(d)?;
+        write_chunk(&mut out, b"IDAT", &idat);
+    }
+
+    let mut seq: u32 = 0;
+    for (idx, f) in frames.iter().enumerate() {
+        let fctl = Fctl {
+            sequence_number: seq,
+            width: f.image.width,
+            height: f.image.height,
+            x_offset: f.x_offset,
+            y_offset: f.y_offset,
+            delay_num: f.delay_num,
+            delay_den: if f.delay_den == 0 { 100 } else { f.delay_den },
+            dispose_op: f.dispose_op,
+            blend_op: f.blend_op,
+        };
+        write_chunk(&mut out, b"fcTL", &fctl.to_bytes());
+        seq += 1;
+
+        let compressed = compress_region(&f.image)?;
+        if idx == 0 && default_image.is_none() {
+            // No separate default image: the first frame *is* the default
+            // image, so its full-canvas pixels ride in IDAT (after its
+            // fcTL → first_frame_is_default).
+            write_chunk(&mut out, b"IDAT", &compressed);
+        } else {
+            let payload = build_fdat(seq, &compressed);
+            write_chunk(&mut out, b"fdAT", &payload);
+            seq += 1;
+        }
+    }
+
+    write_chunk(&mut out, b"IEND", &[]);
+    Ok(out)
+}
+
+/// Wire row-byte count for a frame sub-region: `ceil(width * bit_depth /
+/// 8)` for sub-byte (ct=0 / ct=3 at depth 1/2/4), else
+/// `channels * (bit_depth / 8) * width`. Mirrors the per-row layout
+/// [`ihdr_and_row_bytes`] computes for a whole image but for an arbitrary
+/// region width.
+fn region_row_bytes(ihdr: &Ihdr, width: u32) -> usize {
+    let channels = match ihdr.colour_type {
+        0 | 3 => 1,
+        2 => 3,
+        4 => 2,
+        6 => 4,
+        _ => 1,
+    };
+    if ihdr.bit_depth < 8 {
+        ((width as usize) * (ihdr.bit_depth as usize)).div_ceil(8)
+    } else {
+        channels * (ihdr.bit_depth as usize / 8) * width as usize
+    }
 }

@@ -25,7 +25,18 @@
 //! * Single IDAT, DEFLATE via `compcol`, per-row heuristic filter
 //!   selection (PNG §12.8 min-sum-abs-delta).
 //! * APNG: `acTL` + per-frame `fcTL`/`fdAT` when `frame_rate` is set or
-//!   more than one frame is submitted.
+//!   more than one frame is submitted. [`encode_apng`] paints every
+//!   frame full-canvas with `Disposal::None` / `Blend::Source` and one
+//!   shared delay; the region-aware [`encode_apng_frames`] /
+//!   [`encode_apng_frames_with_options`] take per-frame
+//!   [`ApngFrameSpec`]s carrying a sub-canvas region (`x_offset` /
+//!   `y_offset` + a smaller frame extent), a per-frame `delay_num` /
+//!   `delay_den` rational duration, and the
+//!   `Disposal::{None,Background,Previous}` /
+//!   `Blend::{Source,Over}` operators, plus an optional separate
+//!   full-canvas default (still) image excluded from the animation
+//!   (W3C PNG3 §11.3.6.1 frame-control surface; round-trips through the
+//!   decoder's compositor).
 //! * Adam7 seven-pass interlaced encode, opt-in via
 //!   [`encoder::PngEncoderOptions`]`::interlace` (or
 //!   `CodecParameters::options` key `"interlace"`).
@@ -103,6 +114,7 @@ pub mod registry;
 mod zlibvec;
 
 // Public unconditional API — works whether or not `registry` is enabled.
+pub use apng::{Blend as ApngBlend, Disposal as ApngDisposal};
 pub use chunk::{ChunkType, ColourType};
 pub use decoder::CODEC_ID_STR;
 pub use decoder::{
@@ -110,8 +122,8 @@ pub use decoder::{
     ApngInfo, Ihdr,
 };
 pub use encoder::{
-    encode_apng, encode_apng_with_options, encode_png_image, encode_png_image_with_options,
-    PngEncoderOptions,
+    encode_apng, encode_apng_frames, encode_apng_frames_with_options, encode_apng_with_options,
+    encode_png_image, encode_png_image_with_options, ApngFrameSpec, PngEncoderOptions,
 };
 pub use error::{PngError, Result};
 pub use filter::{FilterStrategy, FilterType};

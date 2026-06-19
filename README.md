@@ -103,7 +103,32 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   `adaptive` / `none` / `sub` / `up` / `average` / `paeth`
   (case-insensitive); the empty string maps to `adaptive` so callers
   that set the key without picking a value get the default.
-- APNG output when multiple frames submitted or `frame_rate` is set
+- APNG output when multiple frames submitted or `frame_rate` is set.
+  `encode_apng` paints every frame full-canvas with `Disposal::None` /
+  `Blend::Source` and a single shared delay. The region-aware
+  `encode_apng_frames` / `encode_apng_frames_with_options` take a
+  `&[ApngFrameSpec]` where each frame carries its own sub-canvas region
+  (`x_offset` / `y_offset` plus a smaller frame extent that becomes the
+  `fcTL` width/height), its own `delay_num` / `delay_den` rational
+  duration, and its own `Disposal::{None,Background,Previous}` /
+  `Blend::{Source,Over}` operators — the full W3C PNG 3rd Edition
+  §11.3.6.1 frame-control surface the decoder's compositor already
+  reads back. An optional separate full-canvas default (still) image is
+  emitted in the `IDAT` *before* the first `fcTL` and excluded from
+  `acTL.num_frames` (the image non-APNG viewers show); with no separate
+  default the first frame's full-canvas pixels become the `IDAT` *and*
+  the first animation frame (`fcTL` precedes `IDAT`). Frame regions are
+  policed against the canvas (§11.3.6.1: non-zero extent,
+  `x_offset + width ≤ canvas_width`, `y_offset + height ≤
+  canvas_height`) before any compression work, and the first `fcTL`
+  carries sequence number 0 with every subsequent `fcTL` / `fdAT`
+  sequence number contiguous-ascending (§4.9.2). Each frame's
+  sub-region is compressed against a synthetic per-frame IHDR so it
+  rides in its own `fdAT` (or the `IDAT` for the default image). The
+  emitted streams round-trip through `decode_apng` byte-for-byte across
+  the dispose / blend / offset matrix, and the `apng_region_encode`
+  fuzz target drives the encoder directly with fuzz-derived regions /
+  offsets / delays / operators (215k+ executions, zero crashes).
 - DEFLATE/zlib (RFC 1950/1951) framing for IDAT / fdAT and the
   `zTXt` / `iTXt` / `iCCP` chunk bodies is provided by
   [`compcol`](https://crates.io/crates/compcol) (the workspace-wide
@@ -438,6 +463,18 @@ The decoder is fuzzed with `cargo-fuzz`. Nine targets live under `fuzz/`:
   `decode_apng_info` across 1-8-frame chains. Drives the composite
   state machine — `Previous` snapshots, `Background` clears (including
   the out-of-canvas guard), `Source` vs `Over` blend.
+- `apng_region_encode` — drives the region-aware encoder
+  (`encode_apng_frames_with_options`) *directly* with fuzz-derived
+  per-frame sub-regions (width/height + `x_offset` / `y_offset`
+  spanning the in-canvas / on-edge / out-of-canvas bands), rational
+  delays, every dispose+blend operator, the separate-default-image vs
+  first-frame-is-default branch, and Adam7 interlace. Asserts encode
+  liveness and — on the happy path — that any accepted encode
+  re-decodes through `decode_apng` to exactly the submitted frame count
+  at the submitted canvas dimensions. Funnels the budget into the
+  encoder's `fcTL`-emission / `fdAT`-framing / synthetic-per-frame-IHDR
+  compression path that `apng_frame_walk` (which mutates a pre-built
+  stream) never reaches.
 - `encode_decode_roundtrip` — standalone encode → decode → re-encode
   for both static PNG and APNG entry points. Asserts the decoder is a
   right inverse of the encoder on encoder-emitted bitstreams, then

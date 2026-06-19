@@ -125,3 +125,20 @@ name = "metadata_chunk_splice"
 path = "fuzz_targets/metadata_chunk_splice.rs"
 test = false
 doc = false
+
+# Region-aware APNG encode target (r341). Drives
+# `encode_apng_frames_with_options` directly with fuzz-derived per-frame
+# sub-regions (width/height + x_offset/y_offset spanning the in-canvas /
+# on-edge / out-of-canvas bands), rational delays, every dispose+blend
+# operator, the separate-default-image vs first-frame-is-default branch,
+# and Adam7 interlace. Asserts encode liveness and — on the happy path —
+# that any accepted encode re-decodes through `decode_apng` to exactly
+# the submitted frame count at the submitted canvas dimensions. Funnels
+# the budget into the encoder's fcTL-emission / fdAT-framing / synthetic-
+# per-frame-IHDR compression path that `apng_frame_walk` (which mutates a
+# pre-built stream) never reaches.
+[[bin]]
+name = "apng_region_encode"
+path = "fuzz_targets/apng_region_encode.rs"
+test = false
+doc = false

@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- region-aware APNG encoder (W3C PNG 3rd Edition §11.3.6 / §4.9) — new
+  `encode_apng_frames` / `encode_apng_frames_with_options` plus the
+  `ApngFrameSpec` struct and `ApngBlend` / `ApngDisposal` re-exports.
+  Where the existing `encode_apng` paints every frame full-canvas with
+  `Disposal::None` / `Blend::Source` and one shared delay, the new
+  entry points take a `&[ApngFrameSpec]` where each frame carries its
+  own sub-canvas region (`x_offset` / `y_offset` + a smaller frame
+  extent that becomes the `fcTL` width/height), its own `delay_num` /
+  `delay_den` rational duration, and its own
+  `Disposal::{None,Background,Previous}` / `Blend::{Source,Over}`
+  operators. An optional separate full-canvas default (still) image is
+  written into the `IDAT` before the first `fcTL` and excluded from
+  `acTL.num_frames`; with no separate default the first frame's
+  full-canvas pixels become the `IDAT` *and* the first animation frame
+  (`fcTL` precedes `IDAT`, the `first_frame_is_default` path). Frame
+  regions are policed against §11.3.6.1 (non-zero extent,
+  `x_offset + width ≤ canvas_width`, `y_offset + height ≤
+  canvas_height`) before any compression work; the first `fcTL` carries
+  sequence number 0 with every subsequent `fcTL` / `fdAT` sequence
+  number contiguous-ascending (§4.9.2); each frame's sub-region is
+  compressed against a synthetic per-frame IHDR (Adam7 interlace
+  included). 9 round-trip tests (`tests/apng_region_encode.rs`) encode
+  hand-built animations and decode them back through the crate's own
+  compositor, covering the separate-default-image case, partial-region
+  frames, `Background` disposal clearing, `Over` alpha blending,
+  rational-delay preservation, and the geometry / format rejection
+  paths. A new `apng_region_encode` fuzz target drives the encoder
+  directly with fuzz-derived regions / offsets / delays / operators
+  (215k+ executions, zero crashes) and asserts encode→decode frame-count
+  consistency.
 - decoder gamma handling (W3C PNG3 §13.13 / RFC 2083 §10.5) — opt-in
   colour transform that undoes a file's `gAMA`-encoded samples and
   re-applies a target display's gamma. New `gamma` module exposes
