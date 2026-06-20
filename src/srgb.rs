@@ -170,7 +170,7 @@ mod tests {
         assert_eq!(to_linear8(0), 0);
         assert_eq!(to_linear8(255), 65535);
         // First two steps follow the linear segment slope (1/12.92): the
-        // libpng Q16 table records 20 and 40 (IEC 61966-2-1 §F).
+        // Q16 EOTF table records 20 and 40 (IEC 61966-2-1 §F).
         assert_eq!(to_linear8(1), 20);
         assert_eq!(to_linear8(2), 40);
     }
