@@ -83,6 +83,16 @@
 //!   per §4.2.9 (both bytes of a 16-bit sample compared before the
 //!   8-bit truncation).
 //!
+//! ## Colour management
+//!
+//! Two opt-in colour transforms sit beside the codec proper (which always
+//! leaves wire samples verbatim): the [`gamma`] module performs §13.13
+//! decoder gamma handling from a `gAMA` exponent, and the [`srgb`] module
+//! implements the IEC 61966-2-1 sRGB transfer function ([`srgb_to_linear8`]
+//! / [`srgb_from_linear`]) plus linear-light alpha compositing
+//! ([`composite_over_background`]) — the §13-correct path for blending an
+//! sRGB image over a background.
+//!
 //! ## Standalone (no `oxideav-core`) mode
 //!
 //! `oxideav-core` is gated behind the default-on `registry` feature. With

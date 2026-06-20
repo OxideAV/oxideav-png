@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- sRGB linear-light conversion (`srgb` module) — the IEC 61966-2-1 sRGB
+  electro-optical transfer function and its exact inverse, referenced by
+  W3C PNG 3rd Edition / ISO 15948 §11.3.2 for the sRGB-default colour
+  space and §13 as the prerequisite for correct compositing. Driven by
+  three committed bit-exact numeric tables (`png_sRGB_table` /
+  `png_sRGB_base` / `png_sRGB_delta` under `docs/image/png/tables/`):
+  `srgb_to_linear8(u8) → u16` (8-bit sRGB → 16-bit Q16 linear, one
+  lookup), `srgb_from_linear(u32) → u8` (8-bit-scaled linear → sRGB byte
+  via base/delta, exact inverse for all 256 values), `srgb_to_scaled_linear8`,
+  `linearize_rgba` (alpha passed through linearly per §13.16), and
+  `composite_over_background` performing source-over alpha compositing in
+  linear light (a 50%-white pixel over black re-encodes to ~188 sRGB, not
+  the gamma-space 128). 8 unit tests + a 4-test integration suite
+  (`tests/srgb_compositing.rs`) round-trip an `sRGB`-chunked PNG through
+  the decoder and composite it.
+
 - region-aware APNG encoder (W3C PNG 3rd Edition §11.3.6 / §4.9) — new
   `encode_apng_frames` / `encode_apng_frames_with_options` plus the
   `ApngFrameSpec` struct and `ApngBlend` / `ApngDisposal` re-exports.

@@ -25,12 +25,11 @@
 //!
 //! The forward direction (sRGB byte → linear) is the standard piecewise
 //! EOTF of IEC 61966-2-1 evaluated for all 256 possible 8-bit inputs and
-//! stored as a 256-entry Q16 table ([`crate::srgb_tables::SRGB_TO_LINEAR`],
-//! `0..=65535` linear per 8-bit sRGB input). [`to_linear8`] is a single
-//! table lookup.
+//! stored as a 256-entry Q16 table (`SRGB_TO_LINEAR`, `0..=65535` linear
+//! per 8-bit sRGB input). [`to_linear8`] is a single table lookup.
 //!
 //! The inverse (linear → sRGB byte) uses the paired base / delta tables
-//! ([`crate::srgb_tables::SRGB_BASE`] / [`SRGB_DELTA`]). The input is a
+//! (`SRGB_BASE` / `SRGB_DELTA`). The input is a
 //! linear value in the range `0..=255*65535` (8-bit-scaled linear light);
 //! the top 9 bits select a `(base, delta)` pair and the low 15 bits scale
 //! the delta:
@@ -59,8 +58,8 @@ pub const MAX_SCALED_LINEAR: u32 = 255 * 65535;
 
 /// Convert an 8-bit sRGB sample to a 16-bit linear value (Q16, `0..=65535`).
 ///
-/// A single lookup into the IEC 61966-2-1 EOTF table
-/// ([`crate::srgb_tables::SRGB_TO_LINEAR`]). `0u8 -> 0`, `255u8 -> 65535`.
+/// A single lookup into the IEC 61966-2-1 EOTF table (`SRGB_TO_LINEAR`).
+/// `0u8 -> 0`, `255u8 -> 65535`.
 #[inline]
 pub fn to_linear8(srgb: u8) -> u16 {
     SRGB_TO_LINEAR[srgb as usize]

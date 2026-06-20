@@ -401,6 +401,30 @@ instances are explicitly permitted (§4.2.7 ¶3 / §4.2.10 ¶6 /
   corrects only the live samples and skips the trailing padding. Same
   zero-`gAMA` / non-positive-exponent no-op guards as the 8-bit path.
 
+- sRGB linear-light conversion (IEC 61966-2-1, referenced by W3C PNG3 /
+  ISO 15948 §11.3.2 for the sRGB-default colour space and §13 as the
+  prerequisite for correct compositing) — the `srgb` module implements
+  the standard sRGB electro-optical transfer function and its exact
+  inverse, driven entirely by three committed bit-exact numeric tables
+  (`png_sRGB_table` / `png_sRGB_base` / `png_sRGB_delta` under
+  `docs/image/png/tables/`). `srgb_to_linear8(u8) → u16` is one lookup
+  into the 256-entry Q16 EOTF table (`0 → 0`, `255 → 65535`, first steps
+  `1 → 20` / `2 → 40` matching the `1/12.92` linear-segment slope);
+  `srgb_from_linear(u32) → u8` inverts it from an 8-bit-scaled linear
+  value (`0..=255·65535`) via the paired 512-entry base/delta tables
+  (top 9 bits select the pair, low 15 bits scale the delta), saturating
+  out-of-range input to white. The two tables are exact inverses at
+  8-bit precision, so `srgb_from_linear(srgb_to_scaled_linear8(s)) == s`
+  for all 256 values. `linearize_rgba` widens a decoded `RgbaBitmap`'s
+  R/G/B to 16-bit linear (alpha passed through linearly per §13.16), and
+  `composite_over_background` performs source-over alpha compositing in
+  linear light — the §13-correct path, where a 50%-alpha white pixel
+  over black re-encodes to ~188 sRGB rather than the gamma-space 128
+  average. An integration suite (`tests/srgb_compositing.rs`) drives the
+  whole chain against the real decode path: encode → decode an
+  `sRGB`-chunked PNG, confirm the colour-space marker survives, then
+  linearize and composite.
+
 ## Chunk naming property bits
 
 `ChunkType` wraps a four-byte chunk name and exposes the W3C PNG 3rd
