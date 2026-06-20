@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/OxideAV/oxideav-png/compare/v0.1.8...v0.2.0) - 2026-06-20
+
+### Other
+
+- fuzz decode_png_over_background + document bKGD compositing in README
+- decode_png_over_background — §13.15/§13.16 bKGD background compositing
+- Bkgd::resolve_rgb8 — resolve bKGD chunk to 8-bit sRGB background (§13.15/§13.12)
+- neutralize reference-library mention in srgb test comment
+- document sRGB linear-light conversion (README/CHANGELOG/crate docs)
+- integration test — sRGB chunk roundtrip + linear-light compositing
+- sRGB EOTF linear-light conversion module (§11.3.2 / §13)
+- region-aware APNG encoder (fcTL/fdAT with per-frame region + delay + dispose/blend)
+- 16-bit decoder gamma correction (W3C PNG3 §13.13)
+- indexed-image palette gamma correction (W3C PNG3 §13.13)
+- decoder gamma handling (W3C PNG3 §13.13 / RFC 2083 §10.5)
+- metadata_chunk_splice target over the ancillary-chunk parsers
+- enforce W3C PNG3 §4.9.2 fcTL/fdAT sequence-number rules
+- refresh to current status, drop per-round changelog cruft
+- drive compression_level in encode_options target
+- caller-selectable IDAT/fdAT DEFLATE compression level (1..=9)
+- gate IHDR field validity at wire-decode boundary (W3C PNG3 §11.2.1)
+- add encode_options target over encode_png_image_with_options matrix
+
 ### Added
 
 - `decode_png_over_background` — decode a PNG and composite it over a
