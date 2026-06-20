@@ -26,7 +26,10 @@
 //! well-formed input yields `Ok`, and neither path may crash.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_png::{decode_apng, decode_png, decode_png_to_rgba, parse_apng, parse_metadata};
+use oxideav_png::{
+    decode_apng, decode_png, decode_png_over_background, decode_png_to_rgba, parse_apng,
+    parse_metadata,
+};
 
 fuzz_target!(|data: &[u8]| {
     // Static single-image decode (any colour type / bit depth / interlace).
@@ -36,6 +39,13 @@ fuzz_target!(|data: &[u8]| {
     // grayscale widening, 16->8 truncation and alpha fill on top of the
     // raw decode.
     let _ = decode_png_to_rgba(data);
+
+    // §13.15/§13.16 background composite: resolves the bKGD chunk (or the
+    // medium-grey default) and blends straight alpha over it in linear
+    // light. Drives both the chunk-resolution arm (None override) and the
+    // caller-override arm on top of the same decode surface.
+    let _ = decode_png_over_background(data, None);
+    let _ = decode_png_over_background(data, Some([0, 128, 255]));
 
     // Ancillary-chunk metadata parser (sBIT / pHYs / tIME / bKGD / hIST /
     // eXIf / sRGB / cICP / sPLT) — its own bounds-checking surface.

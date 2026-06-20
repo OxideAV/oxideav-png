@@ -248,7 +248,7 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   alongside `sPLT` (Table 1's "Multiple OK? Yes / Ordering
   constraints: None" bucket). Keyword validation is shared verbatim
   with `sPLT`'s palette-name predicate. International (`iTXt`) text
-  remains on the "not preserved" list.
+  is round-tripped too (see the `iTXt` entry below).
 - `zTXt` (compressed textual data, RFC 2083 §4.2.10 / W3C PNG3
   §11.3.3.3) — `tEXt` semantics with the body zlib-compressed on the
   wire. The on-wire payload is a 1-79-byte Latin-1 keyword + `NUL`
@@ -424,6 +424,36 @@ instances are explicitly permitted (§4.2.7 ¶3 / §4.2.10 ¶6 /
   whole chain against the real decode path: encode → decode an
   `sRGB`-chunked PNG, confirm the colour-space marker survives, then
   linearize and composite.
+
+- `bKGD` background compositing (W3C PNG3 §13.15 "Background color" /
+  §13.16 "Alpha channel processing" / §13.12 "Sample depth rescaling") —
+  the §13.15 "display the image against a background" path for viewers
+  that cannot present real transparency. `Bkgd::resolve_rgb8` turns any
+  `bKGD` variant into a concrete 8-bit sRGB `[R, G, B]`: a grayscale
+  sample is rescaled from the IHDR `bit_depth` to 8 bits with the §13.12
+  linear equation `floor(input × 255 / (2^bit_depth − 1) + 0.5)` (a
+  4-bit grey `15` → `255`, a 16-bit `0x8000` → `128` rather than a
+  low-byte discard) and replicated into R = G = B; an `Rgb` variant
+  rescales each channel the same way; a `Palette` index looks up the
+  `R G B` triple in the `PLTE` body (a missing / too-short palette or an
+  out-of-range index is an error). `decode_png_over_background(buf,
+  override_bg)` then decodes to RGBA exactly as `decode_png_to_rgba` and
+  composites every pixel's straight alpha over the background **in linear
+  light** (§13.16 "should be performed with intensity samples, not
+  gamma-encoded samples"; `out = α·foreground + (1−α)·background` per
+  channel) via `composite_over_background`, returning an opaque bitmap.
+  The background source follows §13.15 precedence: caller `override_bg`
+  (a browser "should ignore the bKGD chunk … overriding bKGD with their
+  preferred background color") > the datastream's `bKGD` chunk >
+  `DEFAULT_BACKGROUND_GREY` (the §13.15 "medium grey such as 153 in the
+  8-bit sRGB color space" fallback when no other information is
+  available). A 6-test integration suite (`tests/bkgd_compositing.rs`)
+  drives the chain through the real encode → decode path across the
+  default-grey fallback, the override-beats-chunk precedence, the
+  RGB-chunk half-alpha blend, the indexed `tRNS` + `bKGD`-index
+  transparent-entry case, and the opaque-no-op / packed-opaque-output
+  invariants. The new entry point is also folded into the `decode` fuzz
+  target (both the chunk-resolution and override arms).
 
 ## Chunk naming property bits
 
