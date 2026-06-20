@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Bkgd::resolve_rgb8` — resolve a `bKGD` chunk into a concrete 8-bit
+  sRGB background colour `[R, G, B]`, the §13.15 form a viewer needs to
+  fill transparent pixels and screen space. Grayscale and RGB samples are
+  rescaled from the IHDR `bit_depth` to 8 bits with the §13.12 linear
+  equation `floor(input * 255 / (2^bit_depth - 1) + 0.5)` (sub-byte grey
+  `15`@4-bit → `255`, not `15`; 16-bit `0x8000` → `128` rather than a
+  low-byte discard) and grey replicated into R = G = B; a `Palette` index
+  selects an `R G B` triple from the `PLTE` body (missing / too-short
+  palette or an out-of-range index is an error). 8 unit tests.
 - sRGB linear-light conversion (`srgb` module) — the IEC 61966-2-1 sRGB
   electro-optical transfer function and its exact inverse, referenced by
   W3C PNG 3rd Edition / ISO 15948 §11.3.2 for the sRGB-default colour

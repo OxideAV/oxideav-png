@@ -583,6 +583,71 @@ impl Bkgd {
         })
     }
 
+    /// Resolve this `bKGD` chunk into a concrete 8-bit-per-channel sRGB
+    /// background colour `[R, G, B]`, the form a viewer needs to fill
+    /// transparent pixels and the screen space around the image
+    /// (W3C PNG3 §13.15 "Background color").
+    ///
+    /// The variant is interpreted against the IHDR colour depth and, for
+    /// indexed images, the `PLTE` chunk:
+    ///
+    /// - [`Bkgd::Grayscale`] — the single grey sample is rescaled from the
+    ///   image's `bit_depth` to 8 bits with the §13.12 linear equation
+    ///   `floor(input * 255 / (2^bit_depth - 1) + 0.5)` (so a 4-bit grey of
+    ///   `15` maps to `255`, not `15`) and replicated into R = G = B. At
+    ///   `bit_depth == 8` this is the identity; at `16` it is the
+    ///   most-accurate down-scale rather than a low-byte discard.
+    /// - [`Bkgd::Rgb`] — the three samples are rescaled the same way. For
+    ///   truecolour the only defined depths are 8 and 16 (§11.2.1
+    ///   Table 12), so this is identity at 8 and the §13.12 down-scale at
+    ///   16; the rescale is still applied uniformly so a non-Table-12
+    ///   `bit_depth` cannot silently leak high bits.
+    /// - [`Bkgd::Palette`] — the index selects an `R G B` triple from the
+    ///   `plte` slice (3 bytes per entry, already 8-bit per §11.2.2). A
+    ///   missing or too-short palette is an error, as is an index past the
+    ///   palette length.
+    ///
+    /// `bit_depth` is the IHDR bit depth; `plte` is the `PLTE` chunk body
+    /// (`None` for non-indexed images, where it is ignored).
+    pub fn resolve_rgb8(&self, bit_depth: u8, plte: Option<&[u8]>) -> Result<[u8; 3]> {
+        // §13.12 most-accurate up/down scale of a sample from `bit_depth`
+        // to 8 bits: floor(input * 255 / max_in + 0.5).
+        let rescale = |sample: u16| -> u8 {
+            let max_in: u32 = if bit_depth >= 16 {
+                u16::MAX as u32
+            } else {
+                (1u32 << bit_depth) - 1
+            };
+            if max_in == 0 {
+                return 0;
+            }
+            let s = sample as u32;
+            (((s * 255 + max_in / 2) / max_in).min(255)) as u8
+        };
+        Ok(match *self {
+            Self::Grayscale(g) => {
+                let v = rescale(g);
+                [v, v, v]
+            }
+            Self::Rgb(r, g, b) => [rescale(r), rescale(g), rescale(b)],
+            Self::Palette(idx) => {
+                let Some(p) = plte else {
+                    return Err(Error::invalid(
+                        "PNG bKGD: indexed background needs a PLTE chunk to resolve",
+                    ));
+                };
+                let off = idx as usize * 3;
+                if off + 3 > p.len() {
+                    return Err(Error::invalid(format!(
+                        "PNG bKGD: palette index {idx} is past the {}-entry PLTE",
+                        p.len() / 3
+                    )));
+                }
+                [p[off], p[off + 1], p[off + 2]]
+            }
+        })
+    }
+
     /// Emit the on-wire payload (1 / 2 / 6 bytes depending on variant).
     pub fn to_bytes(&self) -> Vec<u8> {
         match *self {
@@ -2552,6 +2617,99 @@ mod tests {
     #[test]
     fn bkgd_rejects_unknown_colour_type() {
         let err = Bkgd::parse(&[0; 2], 5, 8).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn bkgd_resolve_grayscale_8bit_identity() {
+        // 8-bit grey 200 ⇒ R = G = B = 200 (§13.12 identity at depth 8).
+        let rgb = Bkgd::Grayscale(200).resolve_rgb8(8, None).unwrap();
+        assert_eq!(rgb, [200, 200, 200]);
+    }
+
+    #[test]
+    fn bkgd_resolve_grayscale_subbyte_rescales() {
+        // §13.12: floor(input * 255 / (2^bd - 1) + 0.5).
+        // 1-bit: 0 -> 0, 1 -> 255.
+        assert_eq!(Bkgd::Grayscale(0).resolve_rgb8(1, None).unwrap(), [0, 0, 0]);
+        assert_eq!(
+            Bkgd::Grayscale(1).resolve_rgb8(1, None).unwrap(),
+            [255, 255, 255]
+        );
+        // 4-bit: max 15 -> 255; midpoint 8 -> floor(8*255/15 + 0.5) = 136.
+        assert_eq!(
+            Bkgd::Grayscale(15).resolve_rgb8(4, None).unwrap(),
+            [255, 255, 255]
+        );
+        assert_eq!(
+            Bkgd::Grayscale(8).resolve_rgb8(4, None).unwrap(),
+            [136, 136, 136]
+        );
+        // 2-bit: 1 -> floor(1*255/3 + 0.5) = 85; 2 -> 170.
+        assert_eq!(
+            Bkgd::Grayscale(1).resolve_rgb8(2, None).unwrap(),
+            [85, 85, 85]
+        );
+        assert_eq!(
+            Bkgd::Grayscale(2).resolve_rgb8(2, None).unwrap(),
+            [170, 170, 170]
+        );
+    }
+
+    #[test]
+    fn bkgd_resolve_grayscale_16bit_downscale() {
+        // §13.12 most-accurate down-scale, not low-byte discard:
+        // 0xFFFF -> 255, 0x8000 -> floor(0x8000 * 255 / 0xFFFF + 0.5) = 128.
+        assert_eq!(
+            Bkgd::Grayscale(0xFFFF).resolve_rgb8(16, None).unwrap(),
+            [255, 255, 255]
+        );
+        assert_eq!(
+            Bkgd::Grayscale(0x8000).resolve_rgb8(16, None).unwrap(),
+            [128, 128, 128]
+        );
+        // Low-byte-discard would give 0x0180 >> 8 == 1, but the linear
+        // rescale rounds 0x0180 (384) * 255 / 65535 + 0.5 to 1 as well here;
+        // pick a value where they differ: 0x01FF (511) -> round(511*255/65535)
+        // = round(1.988) = 2, whereas a low-byte discard gives 1.
+        assert_eq!(
+            Bkgd::Grayscale(0x01FF).resolve_rgb8(16, None).unwrap(),
+            [2, 2, 2]
+        );
+    }
+
+    #[test]
+    fn bkgd_resolve_rgb_8bit_identity() {
+        let rgb = Bkgd::Rgb(0x80, 0x40, 0x10).resolve_rgb8(8, None).unwrap();
+        assert_eq!(rgb, [0x80, 0x40, 0x10]);
+    }
+
+    #[test]
+    fn bkgd_resolve_rgb_16bit_downscale() {
+        let rgb = Bkgd::Rgb(0xFFFF, 0x8000, 0x0000)
+            .resolve_rgb8(16, None)
+            .unwrap();
+        assert_eq!(rgb, [255, 128, 0]);
+    }
+
+    #[test]
+    fn bkgd_resolve_palette_lookup() {
+        // PLTE: idx0 = (10,20,30), idx1 = (40,50,60), idx2 = (70,80,90).
+        let plte = [10, 20, 30, 40, 50, 60, 70, 80, 90];
+        let rgb = Bkgd::Palette(2).resolve_rgb8(8, Some(&plte)).unwrap();
+        assert_eq!(rgb, [70, 80, 90]);
+    }
+
+    #[test]
+    fn bkgd_resolve_palette_index_out_of_range() {
+        let plte = [10, 20, 30, 40, 50, 60];
+        let err = Bkgd::Palette(2).resolve_rgb8(8, Some(&plte)).unwrap_err();
+        assert!(matches!(err, Error::InvalidData(_)));
+    }
+
+    #[test]
+    fn bkgd_resolve_palette_without_plte_errors() {
+        let err = Bkgd::Palette(0).resolve_rgb8(8, None).unwrap_err();
         assert!(matches!(err, Error::InvalidData(_)));
     }
 
