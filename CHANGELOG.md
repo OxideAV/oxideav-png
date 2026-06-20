@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `decode_png_over_background` — decode a PNG and composite it over a
+  solid background, returning an opaque 8-bit `RgbaBitmap` (the §13.15 /
+  §13.16 "display the image against a background" path). Decoding runs as
+  `decode_png_to_rgba`, then every pixel's straight alpha is composited
+  over the background in **linear light** (§13.16 "should be performed
+  with intensity samples, not gamma-encoded samples") via
+  `composite_over_background`. Background source precedence (§13.15):
+  caller `override_bg` > the datastream's `bKGD` chunk (resolved through
+  `Bkgd::resolve_rgb8`) > `DEFAULT_BACKGROUND_GREY` (the §13.15
+  medium-grey `153`). New public const `DEFAULT_BACKGROUND_GREY`. A
+  6-test integration suite (`tests/bkgd_compositing.rs`) covers the
+  default-grey fallback, override precedence, RGB-chunk half-alpha blend,
+  the indexed `tRNS`/`bKGD`-index transparent-entry path, the opaque
+  no-op, and the packed-opaque-output invariant.
 - `Bkgd::resolve_rgb8` — resolve a `bKGD` chunk into a concrete 8-bit
   sRGB background colour `[R, G, B]`, the §13.15 form a viewer needs to
   fill transparent pixels and screen space. Grayscale and RGB samples are

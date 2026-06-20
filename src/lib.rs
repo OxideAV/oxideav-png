@@ -130,8 +130,8 @@ pub use apng::{Blend as ApngBlend, Disposal as ApngDisposal};
 pub use chunk::{ChunkType, ColourType};
 pub use decoder::CODEC_ID_STR;
 pub use decoder::{
-    decode_apng, decode_apng_info, decode_png, decode_png_to_rgba, parse_apng, parse_metadata,
-    ApngInfo, Ihdr,
+    decode_apng, decode_apng_info, decode_png, decode_png_over_background, decode_png_to_rgba,
+    parse_apng, parse_metadata, ApngInfo, Ihdr, DEFAULT_BACKGROUND_GREY,
 };
 pub use encoder::{
     encode_apng, encode_apng_frames, encode_apng_frames_with_options, encode_apng_with_options,

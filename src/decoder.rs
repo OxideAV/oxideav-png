@@ -722,6 +722,84 @@ pub fn decode_png_to_rgba(buf: &[u8]) -> Result<RgbaBitmap> {
     png_image_to_rgba(&img, plte, trns)
 }
 
+/// The §13.15 "reasonable choice" of background when a datastream carries
+/// no `bKGD` chunk and the caller has no preferred background of its own:
+/// a medium grey of `153` in the 8-bit sRGB colour space (W3C PNG3
+/// §13.15 "When no other information is available, a medium grey such as
+/// 153 in the 8-bit sRGB color space would be a reasonable choice").
+pub const DEFAULT_BACKGROUND_GREY: [u8; 3] = [153, 153, 153];
+
+/// Decode a PNG and composite it over a solid background colour, returning
+/// an opaque 8-bit [`RgbaBitmap`] (every pixel `α = 255`).
+///
+/// This is the §13.15 / §13.16 "display the image against a background"
+/// operation, the path a viewer that cannot show real transparency
+/// (alpha-over-page) takes. Decoding proceeds exactly as
+/// [`decode_png_to_rgba`] — palette / `tRNS` / grayscale-widening / 16→8
+/// promotion all happen first — then every pixel's straight alpha is
+/// composited over the background in **linear light** (§13.16 "This
+/// computation should be performed with intensity samples, not
+/// gamma-encoded samples"): `out = α·foreground + (1−α)·background`,
+/// per channel, via [`crate::srgb::composite_over_background`].
+///
+/// The background colour is chosen, in order:
+///
+/// 1. `override_bg`, when the caller supplies one (a web browser
+///    "should ignore the bKGD chunk … overriding bKGD with their
+///    preferred background color", §13.15);
+/// 2. otherwise the datastream's `bKGD` chunk, resolved to 8-bit sRGB via
+///    [`Bkgd::resolve_rgb8`] (grayscale replicated, sub/super-8-bit
+///    rescaled per §13.12, palette index looked up in `PLTE`);
+/// 3. otherwise [`DEFAULT_BACKGROUND_GREY`] (the §13.15 medium-grey 153).
+///
+/// A fully-opaque image (no transparency anywhere) is returned unchanged
+/// except that its already-`255` alpha is confirmed; a fully-transparent
+/// pixel becomes the background colour exactly.
+///
+/// Standalone (no `oxideav-core`) entry point: works whether or not the
+/// `registry` feature is enabled.
+pub fn decode_png_over_background(buf: &[u8], override_bg: Option<[u8; 3]>) -> Result<RgbaBitmap> {
+    let chunks = parse_all_chunks(buf)?;
+    let ihdr_chunk = chunks
+        .iter()
+        .find(|c| c.is_type(b"IHDR"))
+        .ok_or_else(|| Error::invalid("PNG: missing IHDR"))?;
+    let ihdr = Ihdr::parse(ihdr_chunk.data)?;
+
+    let mut plte: Option<&[u8]> = None;
+    let mut trns: Option<&[u8]> = None;
+    let mut bkgd_raw: Option<&[u8]> = None;
+    for c in &chunks {
+        if c.is_type(b"PLTE") {
+            plte = Some(c.data);
+        } else if c.is_type(b"tRNS") {
+            trns = Some(c.data);
+        } else if c.is_type(b"bKGD") {
+            bkgd_raw = Some(c.data);
+        }
+    }
+
+    let mut bitmap = {
+        let img = decode_png(buf)?;
+        png_image_to_rgba(&img, plte, trns)?
+    };
+
+    // §13.15: caller override > bKGD chunk > medium-grey default.
+    let bg = match override_bg {
+        Some(rgb) => rgb,
+        None => match bkgd_raw {
+            Some(raw) => {
+                let bk = Bkgd::parse(raw, ihdr.colour_type, ihdr.bit_depth)?;
+                bk.resolve_rgb8(ihdr.bit_depth, plte)?
+            }
+            None => DEFAULT_BACKGROUND_GREY,
+        },
+    };
+
+    crate::srgb::composite_over_background(&mut bitmap, bg);
+    Ok(bitmap)
+}
+
 /// Promote an arbitrary [`PngImage`] (any supported pixel format) into
 /// an 8-bit-per-channel [`RgbaBitmap`]. `plte` / `trns` are used only
 /// for `Pal8` source images.
