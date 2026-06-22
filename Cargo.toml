@@ -62,3 +62,7 @@ harness = false
 [[bench]]
 name = "roundtrip"
 harness = false
+
+[[bench]]
+name = "filter"
+harness = false

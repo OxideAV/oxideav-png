@@ -41,38 +41,64 @@ pub fn unfilter_row(filter: FilterType, row: &mut [u8], prev_row: &[u8], bpp: us
             "PNG unfilter: prev_row length must match row length",
         ));
     }
+    let len = row.len();
+    // `bpp` is clamped to the row length so the head/body split below is
+    // always valid even on degenerate sub-`bpp` rows (interlaced passes
+    // can produce rows shorter than `bpp`).
+    let bpp = bpp.min(len);
     match filter {
         FilterType::None => {}
         FilterType::Sub => {
-            for i in bpp..row.len() {
+            // First `bpp` bytes have no left neighbour (left == 0), so they
+            // are unchanged. The body reconstructs each byte from the
+            // already-reconstructed byte `bpp` positions earlier. Splitting
+            // off the head lets the loop run with no per-iteration
+            // `i >= bpp` branch.
+            for i in bpp..len {
                 row[i] = row[i].wrapping_add(row[i - bpp]);
             }
         }
         FilterType::Up => {
-            for i in 0..row.len() {
-                row[i] = row[i].wrapping_add(prev_row[i]);
+            // Pure vertical add — no left dependency at all. Iterating in
+            // lockstep over equal-length slices lets the optimiser drop the
+            // bounds checks and vectorise.
+            for (r, &p) in row.iter_mut().zip(prev_row.iter()) {
+                *r = r.wrapping_add(p);
             }
         }
         FilterType::Average => {
-            for i in 0..row.len() {
-                let left = if i >= bpp { row[i - bpp] as u16 } else { 0 };
-                let up = prev_row[i] as u16;
-                let avg = ((left + up) / 2) as u8;
-                row[i] = row[i].wrapping_add(avg);
+            // Head: left == 0, so avg = up / 2.
+            for (r, &up) in row[..bpp].iter_mut().zip(prev_row[..bpp].iter()) {
+                *r = r.wrapping_add(up >> 1);
             }
+            // Body: `left` is the byte `bpp` back (already reconstructed),
+            // `up` is the byte directly above. Splitting `row` at `bpp`
+            // gives `done` (the already-reconstructed bytes, where the
+            // `left` neighbour lives) and `rest`, paired in lockstep so
+            // index `j` of `rest` reads `done[j]` as its left — a single
+            // forward-walking window with no `i - bpp` recomputation and
+            // bounds the optimiser can hoist. `(left + up) / 2` widened to
+            // u16, per RFC 2083 §6.5.
+            let up_tail = &prev_row[bpp..];
+            let (done, rest) = row.split_at_mut(bpp);
+            // First `bpp` lefts come from `done`; subsequent lefts come
+            // from `rest` itself `bpp` positions back. Process in chunks
+            // so each source slice is a clean borrow.
+            average_body(done, rest, up_tail, bpp);
         }
         FilterType::Paeth => {
-            for i in 0..row.len() {
-                let left = if i >= bpp { row[i - bpp] as i16 } else { 0 };
-                let up = prev_row[i] as i16;
-                let up_left = if i >= bpp {
-                    prev_row[i - bpp] as i16
-                } else {
-                    0
-                };
-                let p = paeth_predictor(left, up, up_left) as u8;
-                row[i] = row[i].wrapping_add(p);
+            // Head: left == up_left == 0, so the predictor reduces to `up`
+            // (paeth_predictor(0, b, 0) == b).
+            for (r, &up) in row[..bpp].iter_mut().zip(prev_row[..bpp].iter()) {
+                *r = r.wrapping_add(up);
             }
+            // Body: all three neighbours present; same split-window trick
+            // as Average. `up` and `up_left` come from `prev_row`
+            // tails zipped in lockstep; `left` walks `done` then `rest`.
+            let up_tail = &prev_row[bpp..];
+            let up_left_tail = &prev_row[..len - bpp];
+            let (done, rest) = row.split_at_mut(bpp);
+            paeth_body(done, rest, up_tail, up_left_tail, bpp);
         }
     }
     Ok(())
@@ -84,42 +110,103 @@ pub fn unfilter_row(filter: FilterType, row: &mut [u8], prev_row: &[u8], bpp: us
 pub fn filter_row(filter: FilterType, row: &[u8], prev_row: &[u8], bpp: usize, out: &mut [u8]) {
     debug_assert_eq!(row.len(), out.len());
     debug_assert_eq!(row.len(), prev_row.len());
+    let len = row.len();
+    let bpp = bpp.min(len);
     match filter {
         FilterType::None => {
             out.copy_from_slice(row);
         }
         FilterType::Sub => {
-            for i in 0..row.len() {
-                let left = if i >= bpp { row[i - bpp] } else { 0 };
-                out[i] = row[i].wrapping_sub(left);
+            // Head: no left neighbour, so the output equals the raw byte.
+            out[..bpp].copy_from_slice(&row[..bpp]);
+            for i in bpp..len {
+                out[i] = row[i].wrapping_sub(row[i - bpp]);
             }
         }
         FilterType::Up => {
-            for i in 0..row.len() {
-                out[i] = row[i].wrapping_sub(prev_row[i]);
+            for ((o, &r), &p) in out.iter_mut().zip(row.iter()).zip(prev_row.iter()) {
+                *o = r.wrapping_sub(p);
             }
         }
         FilterType::Average => {
-            for i in 0..row.len() {
-                let left = if i >= bpp { row[i - bpp] as u16 } else { 0 };
+            // Head: left == 0, so avg = up / 2.
+            for ((o, &r), &up) in out[..bpp]
+                .iter_mut()
+                .zip(row[..bpp].iter())
+                .zip(prev_row[..bpp].iter())
+            {
+                *o = r.wrapping_sub(up >> 1);
+            }
+            for i in bpp..len {
+                let left = row[i - bpp] as u16;
                 let up = prev_row[i] as u16;
-                let avg = ((left + up) / 2) as u8;
-                out[i] = row[i].wrapping_sub(avg);
+                out[i] = row[i].wrapping_sub(((left + up) >> 1) as u8);
             }
         }
         FilterType::Paeth => {
-            for i in 0..row.len() {
-                let left = if i >= bpp { row[i - bpp] as i16 } else { 0 };
+            // Head: left == up_left == 0 → predictor == up.
+            for ((o, &r), &up) in out[..bpp]
+                .iter_mut()
+                .zip(row[..bpp].iter())
+                .zip(prev_row[..bpp].iter())
+            {
+                *o = r.wrapping_sub(up);
+            }
+            for i in bpp..len {
+                let left = row[i - bpp] as i16;
                 let up = prev_row[i] as i16;
-                let up_left = if i >= bpp {
-                    prev_row[i - bpp] as i16
-                } else {
-                    0
-                };
+                let up_left = prev_row[i - bpp] as i16;
                 let p = paeth_predictor(left, up, up_left) as u8;
                 out[i] = row[i].wrapping_sub(p);
             }
         }
+    }
+}
+
+/// Reconstruct the Average-filter body in place. `done` holds the first
+/// `bpp` already-reconstructed bytes; `rest` is the remainder of the row
+/// (modified in place); `up_tail` is `prev_row[bpp..]`. For body index
+/// `j`, the `left` neighbour is `done[j]` while `j < bpp`, then
+/// `rest[j - bpp]` afterwards.
+#[inline]
+fn average_body(done: &[u8], rest: &mut [u8], up_tail: &[u8], bpp: usize) {
+    let n = rest.len();
+    // First `bpp` body bytes: left from `done`, no self-dependency.
+    let split = bpp.min(n);
+    for j in 0..split {
+        let left = done[j] as u16;
+        let up = up_tail[j] as u16;
+        rest[j] = rest[j].wrapping_add(((left + up) >> 1) as u8);
+    }
+    // Remainder: left is `rest[j - bpp]` (already written this pass).
+    for j in bpp..n {
+        let left = rest[j - bpp] as u16;
+        let up = up_tail[j] as u16;
+        rest[j] = rest[j].wrapping_add(((left + up) >> 1) as u8);
+    }
+}
+
+/// Reconstruct the Paeth-filter body in place. See [`average_body`] for
+/// the `done` / `rest` split; `up_tail` is `prev_row[bpp..]` and
+/// `up_left_tail` is `prev_row[..len - bpp]` so `up_left_tail[j]` is the
+/// upper-left neighbour for body index `j`.
+#[inline]
+fn paeth_body(done: &[u8], rest: &mut [u8], up_tail: &[u8], up_left_tail: &[u8], bpp: usize) {
+    let n = rest.len();
+    let split = bpp.min(n);
+    for j in 0..split {
+        let left = done[j] as i16;
+        let up = up_tail[j] as i16;
+        let up_left = up_left_tail[j] as i16;
+        let p = paeth_predictor(left, up, up_left) as u8;
+        rest[j] = rest[j].wrapping_add(p);
+    }
+    for j in bpp..n {
+        let left = rest[j - bpp] as i16;
+        let up = up_tail[j] as i16;
+        let up_left = up_left_tail[j] as i16;
+        let p = paeth_predictor(left, up, up_left) as u8;
+        rest[j] = rest[j].wrapping_add(p);
     }
 }
 
@@ -157,11 +244,14 @@ pub fn choose_filter_heuristic(
         FilterType::Paeth,
     ] {
         filter_row(f, row, prev_row, bpp, scratch);
-        // Sum of absolute signed bytes.
+        // Sum of absolute signed bytes (§12.8 min-sum-abs heuristic). The
+        // per-byte term is at most 128 and a PNG scanline fits in a u32
+        // length, so the running total stays far below u64::MAX — no
+        // saturating add needed, which keeps the inner loop a plain
+        // auto-vectorisable accumulate.
         let mut sum: u64 = 0;
         for &b in scratch.iter() {
-            let s = b as i8;
-            sum = sum.saturating_add(s.unsigned_abs() as u64);
+            sum += (b as i8).unsigned_abs() as u64;
         }
         if sum < best_sum {
             best_sum = sum;
