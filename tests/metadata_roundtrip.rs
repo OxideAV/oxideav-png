@@ -235,6 +235,7 @@ fn all_three_chunks_roundtrip() {
         texts: Vec::new(),
         ztxts: Vec::new(),
         itxts: Vec::new(),
+        unknowns: Vec::new(),
     };
     let opts = PngEncoderOptions {
         metadata: Some(meta_in.clone()),

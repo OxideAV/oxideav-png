@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Unrecognised-ancillary-chunk preservation for the PNG *editor*
+  round-trip (W3C PNG3 §14.2). `parse_metadata` now captures any
+  ancillary chunk type the codec does not parse into a new
+  `PngMetadata::unknowns: Vec<UnknownChunk>`, recording the chunk's
+  4-byte type, payload bytes, and an `after_idat` flag (which side of the
+  `IDAT` run it sat on). The encoder replays each captured chunk on the
+  same side of `IDAT` — §14.2's one positional rule for the editor case.
+  `UnknownChunk::is_safe_to_copy()` / `is_private()` surface the §5.4
+  property bits. An unrecognised *critical* chunk is now a hard decode
+  error on both `parse_metadata` and `decode_png` (§5.4 / §14.2:
+  decoders/editors must terminate rather than silently produce a
+  possibly-wrong image); a §13.1-malformed name (non-letter byte) is
+  dropped rather than captured. New `tests/unknown_chunk_preservation.rs`
+  (9 cases) covers before/after-IDAT capture, round-trip side
+  preservation, critical rejection on both decode paths, malformed-name
+  dropping, and file-order preservation. The `metadata_chunk_splice`
+  fuzz target's splice set gains `prVt` / `prVT` / `PrIv` / `pH1s` so the
+  budget reaches the new unknown-chunk paths.
+
 - `decode_png_over_background` — decode a PNG and composite it over a
   solid background, returning an opaque 8-bit `RgbaBitmap` (the §13.15 /
   §13.16 "display the image against a background" path). Decoding runs as

@@ -147,7 +147,7 @@ pub use gamma::{
 pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
 pub use metadata::{
     Bkgd, Chrm, Cicp, Clli, Exif, Gama, Hist, Iccp, Itxt, Mdcv, Phys, PhysUnit, PngMetadata,
-    RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time, Trns, Ztxt,
+    RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time, Trns, UnknownChunk, Ztxt,
 };
 pub use srgb::{
     composite_over_background, from_linear as srgb_from_linear, linearize_rgba,

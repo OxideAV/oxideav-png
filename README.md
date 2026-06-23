@@ -324,6 +324,27 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   that only need byte-exact metadata) lead the internationalised
   UTF-8 chunks in the stream.
 
+- Unrecognised ancillary chunks (`PngMetadata::unknowns`, W3C PNG3 §14.2
+  "Behavior of PNG editors") — the PNG-*editor* round-trip. Any ancillary
+  chunk type the codec does not parse (a private third-party extension, a
+  future public chunk, …) is captured verbatim as an [`UnknownChunk`]
+  carrying its 4-byte type, payload bytes, and an `after_idat` flag
+  recording which side of the `IDAT` run it sat on. The encoder replays
+  each one on the same side of `IDAT` — §14.2's one positional rule for
+  the editor case ("a PNG editor shall not move the chunk from before
+  IDAT to after IDAT or vice versa"); `is_safe_to_copy()` /
+  `is_private()` surface the §5.4 property bits without a re-decode so a
+  caller can decide whether to keep a chunk after editing critical
+  chunks. An unrecognised *critical* chunk (§5.4 ancillary bit clear) is
+  a hard decode error on both `parse_metadata` and the pixel `decode_png`
+  path — "PNG editors shall terminate on encountering an unrecognized
+  critical chunk type … there is no way to be certain that a valid
+  datastream will result" (§14.2) / "indicate to the user that the image
+  contains information it cannot safely interpret" (§5.4). A chunk whose
+  name carries a non-letter byte (§13.1-malformed) is dropped rather than
+  captured, since re-emitting it would propagate a non-conformant name.
+  File order is preserved on decode and replayed on encode.
+
 Decode: [`parse_metadata`] returns a [`PngMetadata`] with each
 supported field populated for any chunks present. Encode:
 [`PngEncoderOptions`]`::metadata` holds the same struct; populated

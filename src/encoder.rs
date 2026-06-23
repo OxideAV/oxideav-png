@@ -250,6 +250,7 @@ pub fn encode_png_image_with_options(
     // bucket it here for determinism). sPLT also rides here.
     write_metadata_before_idat(&mut out, opts.metadata.as_ref())?;
     write_chunk(&mut out, b"IDAT", &idat);
+    write_metadata_after_idat(&mut out, opts.metadata.as_ref());
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
 }
@@ -361,7 +362,28 @@ fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
     for itxt in &meta.itxts {
         write_chunk(out, b"iTXt", &itxt.to_bytes()?);
     }
+    // Unrecognised ancillary chunks captured on decode that lived
+    // *before* the first `IDAT` are replayed here, after the recognised
+    // before-IDAT chunks. §14.2 places no ordering constraint between two
+    // ancillary chunks beyond the before/after-IDAT side, so file order
+    // (as captured) is preserved.
+    for u in meta.unknowns.iter().filter(|u| !u.after_idat) {
+        write_chunk(out, &u.chunk_type, &u.data);
+    }
     Ok(())
+}
+
+/// Re-emit unrecognised ancillary chunks (W3C PNG3 §14.2) that were
+/// captured *after* the `IDAT` run on decode. Emitted between the last
+/// `IDAT` / `fdAT` and `IEND`, preserving the before/after-IDAT side the
+/// §14.2 round-trip pins; a no-op when no such chunks were captured.
+fn write_metadata_after_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
+    let Some(meta) = meta else {
+        return;
+    };
+    for u in meta.unknowns.iter().filter(|u| u.after_idat) {
+        write_chunk(out, &u.chunk_type, &u.data);
+    }
 }
 
 /// Pick the on-wire `tRNS` payload bytes given the IHDR + the two
@@ -986,6 +1008,7 @@ pub fn encode_apng_with_options(
         }
     }
 
+    write_metadata_after_idat(&mut out, opts.metadata.as_ref());
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
 }
@@ -1297,6 +1320,7 @@ pub fn encode_apng_frames_with_options(
         }
     }
 
+    write_metadata_after_idat(&mut out, opts.metadata.as_ref());
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
 }

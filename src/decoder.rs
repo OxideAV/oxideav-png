@@ -361,6 +361,11 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
         .transpose()?;
 
     let mut out = PngMetadata::default();
+    // Tracks whether the chunk walk has passed the first `IDAT` chunk
+    // yet, so an unrecognised ancillary chunk can be recorded on the
+    // correct side of `IDAT` (W3C PNG3 §14.2: a safe-to-copy chunk
+    // "shall not be moved from before IDAT to after IDAT or vice versa").
+    let mut after_idat = false;
     for c in &chunks {
         match &c.chunk_type {
             b"sBIT" => {
@@ -531,7 +536,40 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                 // verbatim.
                 out.itxts.push(Itxt::parse(c.data)?);
             }
-            _ => {}
+            // Critical chunks + the APNG control chunks are understood by
+            // the codec elsewhere (decode / parse_apng); they are not
+            // metadata and never become an `UnknownChunk`. `IDAT` also
+            // flips the before/after-IDAT tracker for any later unknown
+            // ancillary chunk.
+            b"IHDR" | b"PLTE" | b"IEND" | b"acTL" | b"fcTL" | b"fdAT" => {}
+            b"IDAT" => after_idat = true,
+            // Any remaining 4-byte type is one the codec does not parse.
+            // W3C PNG3 §14.2: an unrecognised *critical* chunk (§5.4
+            // ancillary bit clear) is a hard error — "PNG editors shall
+            // terminate on encountering an unrecognized critical chunk
+            // type, because there is no way to be certain that a valid
+            // datastream will result". An unrecognised *ancillary* chunk
+            // with a §13.1 well-formed all-letter name is captured
+            // verbatim for the editor round-trip; a name carrying a
+            // non-letter byte is malformed and dropped (it is not a
+            // conformant extension and re-emitting it would propagate the
+            // malformation).
+            other => {
+                let ty = crate::chunk::ChunkType::new(*other);
+                if ty.is_critical() {
+                    return Err(Error::invalid(format!(
+                        "PNG: unrecognised critical chunk {:?} (W3C PNG3 §14.2)",
+                        ty.as_str()
+                    )));
+                }
+                if ty.is_well_formed_name() {
+                    out.unknowns.push(crate::metadata::UnknownChunk {
+                        chunk_type: *other,
+                        data: c.data.to_vec(),
+                        after_idat,
+                    });
+                }
+            }
         }
     }
     Ok(out)
@@ -551,6 +589,26 @@ pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
     // method) is enforced inside `Ihdr::parse` → `Ihdr::validate`, so the
     // checks formerly duplicated here are no longer needed.
     let ihdr = Ihdr::parse(ihdr_chunk.data)?;
+
+    // W3C PNG3 §5.4 / §13.1: a decoder "encountering an unknown chunk in
+    // which the ancillary bit is 0" — a critical chunk it cannot
+    // interpret — "shall indicate to the user that the image contains
+    // information it cannot safely interpret". We surface that as a hard
+    // error rather than silently producing a possibly-wrong image. Every
+    // critical chunk this codec understands (IHDR / PLTE / IDAT / IEND)
+    // is in the allow-set; an unrecognised critical chunk type is
+    // rejected. Unknown *ancillary* chunks are ignored here (the
+    // standalone decode path produces pixels only); a PNG editor that
+    // wants to carry them forward uses `parse_metadata`'s `unknowns`.
+    for c in &chunks {
+        let ty = c.type_code();
+        if ty.is_critical() && !matches!(&c.chunk_type, b"IHDR" | b"PLTE" | b"IDAT" | b"IEND") {
+            return Err(Error::invalid(format!(
+                "PNG: unrecognised critical chunk {:?} (W3C PNG3 §5.4)",
+                ty.as_str()
+            )));
+        }
+    }
 
     let mut plte: Option<&[u8]> = None;
     let mut trns: Option<&[u8]> = None;
@@ -1321,6 +1379,20 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
             .ok_or_else(|| Error::invalid("PNG: missing IHDR"))?
             .data,
     )?;
+    // W3C PNG3 §5.4 / §14.2: refuse an unrecognised critical chunk on the
+    // APNG path too, matching `decode_png`. The APNG control chunks
+    // (acTL / fcTL / fdAT) carry the ancillary bit, so the critical
+    // allow-set is the same four core chunks.
+    for c in &chunks {
+        let ty = c.type_code();
+        if ty.is_critical() && !matches!(&c.chunk_type, b"IHDR" | b"PLTE" | b"IDAT" | b"IEND") {
+            return Err(Error::invalid(format!(
+                "PNG: unrecognised critical chunk {:?} (W3C PNG3 §5.4)",
+                ty.as_str()
+            )));
+        }
+    }
+
     let actl = chunks
         .iter()
         .find(|c| c.is_type(b"acTL"))

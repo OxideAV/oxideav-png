@@ -43,10 +43,15 @@ use oxideav_png::{
 /// Ancillary chunk types `parse_metadata` dispatches on (decoder.rs
 /// `parse_metadata` match arms). Keeping the splice type-set aligned
 /// with the dispatch is what funnels the mutation budget into a real
-/// `::parse` rather than the unknown-chunk skip path.
+/// `::parse`. The trailing entries are *unrecognised* chunk names so the
+/// budget also reaches the W3C PNG3 §14.2 unknown-chunk paths: `prVt`
+/// (safe-to-copy ancillary → captured into `unknowns`), `prVT`
+/// (unsafe-to-copy ancillary), `PrIv` (critical → hard decode error),
+/// and `pH1s` (§13.1-malformed name → dropped).
 const META_TYPES: &[&[u8; 4]] = &[
     b"sBIT", b"pHYs", b"tIME", b"bKGD", b"hIST", b"tRNS", b"eXIf", b"sRGB", b"cICP", b"gAMA",
-    b"cHRM", b"mDCV", b"cLLI", b"sPLT", b"tEXt", b"zTXt", b"iCCP", b"iTXt",
+    b"cHRM", b"mDCV", b"cLLI", b"sPLT", b"tEXt", b"zTXt", b"iCCP", b"iTXt", b"prVt", b"prVT",
+    b"PrIv", b"pH1s",
 ];
 
 /// Cap on spliced chunks per input — each one is an independent

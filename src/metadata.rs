@@ -2226,12 +2226,62 @@ impl Itxt {
     }
 }
 
+/// An ancillary chunk whose 4-byte type the decoder does not recognise,
+/// captured verbatim so a PNG *editor* can carry it forward (W3C PNG3
+/// §14.2 "Behavior of PNG editors").
+///
+/// Only **ancillary** (§5.4 ancillary bit set) chunks with §5.4 / §13.1
+/// well-formed all-letter names land here — an unrecognised *critical*
+/// chunk is a hard decode error ("PNG editors shall terminate on
+/// encountering an unrecognized critical chunk type", §14.2), and a
+/// chunk whose name carries a non-letter byte is malformed rather than
+/// an extension. The recognised chunks (`sBIT`, `pHYs`, … and the
+/// critical `IHDR` / `PLTE` / `IDAT` / `IEND` plus the APNG control
+/// chunks) are parsed into their own typed fields and never appear here.
+///
+/// §14.2's safe-to-copy mechanism lives on the chunk name itself
+/// ([`crate::chunk::ChunkType::is_safe_to_copy`], the §5.4 fourth-letter
+/// property bit); [`Self::is_safe_to_copy`] surfaces it without a
+/// re-decode. The [`Self::after_idat`] flag records whether the chunk
+/// was found before or after the `IDAT` run so the encoder can honour
+/// the one positional rule §14.2 places on safe-to-copy chunks ("a PNG
+/// editor shall not move the chunk from before IDAT to after IDAT or
+/// vice versa").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnknownChunk {
+    /// The raw 4-byte chunk type (e.g. `b"prVt"`). Always an ancillary,
+    /// well-formed all-letter name by construction.
+    pub chunk_type: [u8; 4],
+    /// The chunk's payload bytes, verbatim (CRC already validated by the
+    /// chunk walker and not stored — it is recomputed on re-emit).
+    pub data: Vec<u8>,
+    /// `true` when the chunk was positioned after the first `IDAT`
+    /// chunk in the input stream, `false` when before. The encoder keeps
+    /// the chunk on the same side of `IDAT` per §14.2.
+    pub after_idat: bool,
+}
+
+impl UnknownChunk {
+    /// §5.4 fourth-letter property bit: `true` when a PNG editor may
+    /// copy this chunk forward even after critical-chunk edits (§14.2).
+    pub fn is_safe_to_copy(&self) -> bool {
+        crate::chunk::ChunkType::new(self.chunk_type).is_safe_to_copy()
+    }
+
+    /// §5.4 second-letter property bit: `true` for a private (third-party
+    /// extension) chunk type, `false` for a public type reserved for
+    /// W3C definition.
+    pub fn is_private(&self) -> bool {
+        crate::chunk::ChunkType::new(self.chunk_type).is_private()
+    }
+}
+
 /// Bundle of metadata chunks that round-trip through the encoder.
 ///
 /// Populated by [`crate::parse_metadata`] on decode and consumed by
 /// [`crate::PngEncoderOptions::metadata`] on encode. Any `None` field is
-/// simply omitted from the output PNG; the `splt`, `texts`, `ztxts`, and
-/// `itxts` `Vec`s are omitted when empty.
+/// simply omitted from the output PNG; the `splt`, `texts`, `ztxts`,
+/// `itxts`, and `unknowns` `Vec`s are omitted when empty.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PngMetadata {
     pub sbit: Option<Sbit>,
@@ -2298,6 +2348,14 @@ pub struct PngMetadata {
     /// repeated-keyword rules as `tEXt` and `zTXt`; file order is
     /// preserved on decode and replayed on encode.
     pub itxts: Vec<Itxt>,
+    /// Unrecognised **ancillary** chunks captured verbatim for the PNG
+    /// editor round-trip (W3C PNG3 §14.2). Each [`UnknownChunk`] carries
+    /// its 4-byte type, payload bytes, and an `after_idat` flag recording
+    /// which side of the `IDAT` run it was found on. File order is
+    /// preserved on decode; the encoder replays each chunk on the same
+    /// side of `IDAT`. An unrecognised *critical* chunk is a decode
+    /// error rather than an entry here (§14.2).
+    pub unknowns: Vec<UnknownChunk>,
 }
 
 impl PngMetadata {
@@ -2322,6 +2380,7 @@ impl PngMetadata {
             && self.texts.is_empty()
             && self.ztxts.is_empty()
             && self.itxts.is_empty()
+            && self.unknowns.is_empty()
     }
 }
 
