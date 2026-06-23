@@ -237,3 +237,119 @@ fn no_unknowns_when_stream_has_none() {
     assert!(meta.unknowns.is_empty());
     assert!(meta.is_empty(), "a bare image has no metadata at all");
 }
+
+/// Deterministic pseudo-random sweep over the unknown-chunk
+/// capture → re-emit → re-capture round-trip. For each of many seeds we
+/// build a fresh batch of unknown ancillary chunks (varied type bytes,
+/// payload lengths, before/after-IDAT sides), splice them into a base
+/// PNG, then assert the `unknowns` survive an encode → decode cycle
+/// byte-for-byte and land on the same side of `IDAT`.
+#[test]
+fn unknown_round_trip_property_sweep() {
+    // xorshift32 — a tiny deterministic PRNG so the sweep is reproducible
+    // across machines (no rand dependency).
+    let mut state: u32 = 0x1234_5678;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state
+    };
+
+    // Ancillary letter for the first/second/third byte: any A..Z / a..z.
+    // We keep byte 1 lowercase (ancillary) and byte 3 uppercase
+    // (reserved-clear) so the name is always a conformant unrecognised
+    // ancillary chunk; bytes 2 and 4 vary freely (private/public,
+    // safe/unsafe).
+    let letter = |r: u32, lower: bool| -> u8 {
+        let base = if lower { b'a' } else { b'A' };
+        base + (r % 26) as u8
+    };
+
+    for _ in 0..200 {
+        // 0..=4 unknown chunks per iteration. Build a batch with distinct
+        // 4-byte names so a positional search by full name is unambiguous.
+        let n = (next() % 5) as usize;
+        let mut specs: Vec<([u8; 4], Vec<u8>, bool)> = Vec::new();
+        for _ in 0..n {
+            let r = next();
+            let ty = [
+                letter(r, true),                     // byte 1 lowercase → ancillary
+                letter(r >> 5, (r >> 28) & 1 == 0),  // byte 2 case varies → private/public
+                letter(r >> 10, false),              // byte 3 uppercase → reserved clear
+                letter(r >> 15, (r >> 29) & 1 == 0), // byte 4 case varies → safe/unsafe
+            ];
+            // Skip any name that collides with a recognised chunk type
+            // (vanishingly unlikely given byte-1 lowercase, but cheap to
+            // guard) or a duplicate within this batch.
+            if specs.iter().any(|s| s.0 == ty) {
+                continue;
+            }
+            let plen = (next() % 40) as usize;
+            let payload: Vec<u8> = (0..plen).map(|j| (next() >> (j % 24)) as u8).collect();
+            let after = (next() & 1) == 1;
+            specs.push((ty, payload, after));
+        }
+
+        let base = encode_png_image(&rgba_2x2()).expect("encode");
+        let before: Vec<(&[u8; 4], &[u8])> = specs
+            .iter()
+            .filter(|s| !s.2)
+            .map(|s| (&s.0, s.1.as_slice()))
+            .collect();
+        let after: Vec<(&[u8; 4], &[u8])> = specs
+            .iter()
+            .filter(|s| s.2)
+            .map(|s| (&s.0, s.1.as_slice()))
+            .collect();
+        let mut stream = splice_before_idat(&base, &before);
+        stream = splice_before_iend(&stream, &after);
+
+        let meta = parse_metadata(&stream).expect("parse swept stream");
+        // Build the expected unknowns (decode preserves file order: all
+        // before-IDAT chunks first in their splice order, then all
+        // after-IDAT chunks in theirs).
+        let mut expected: Vec<UnknownChunk> = Vec::new();
+        for s in specs.iter().filter(|s| !s.2) {
+            expected.push(UnknownChunk {
+                chunk_type: s.0,
+                data: s.1.clone(),
+                after_idat: false,
+            });
+        }
+        for s in specs.iter().filter(|s| s.2) {
+            expected.push(UnknownChunk {
+                chunk_type: s.0,
+                data: s.1.clone(),
+                after_idat: true,
+            });
+        }
+        assert_eq!(meta.unknowns, expected, "captured unknowns mismatch");
+
+        // Re-encode carrying them forward and re-capture.
+        let opts = PngEncoderOptions {
+            metadata: Some(meta.clone()),
+            ..Default::default()
+        };
+        let reencoded = encode_png_image_with_options(&rgba_2x2(), &opts).expect("re-encode");
+        let meta2 = parse_metadata(&reencoded).expect("re-parse");
+        assert_eq!(meta2.unknowns, meta.unknowns, "round-trip drift");
+
+        // Every chunk lands on its recorded side of IDAT.
+        let idat = reencoded
+            .windows(4)
+            .position(|w| w == b"IDAT")
+            .expect("IDAT");
+        for u in &meta2.unknowns {
+            let p = reencoded
+                .windows(4)
+                .position(|w| w == u.chunk_type)
+                .expect("chunk present after re-encode");
+            if u.after_idat {
+                assert!(p > idat, "after-IDAT chunk landed before IDAT");
+            } else {
+                assert!(p < idat, "before-IDAT chunk landed after IDAT");
+            }
+        }
+    }
+}
