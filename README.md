@@ -96,11 +96,21 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   guidance maps to: `Fixed(FilterType::Paeth)` is most likely the
   best fixed choice on truecolour and grayscale; `Fixed(FilterType::
   None)` is recommended for colour type 3 (indexed) and for bit
-  depths below 8. The encoder applies whatever strategy the caller
-  picks at all three filter sites — the non-interlaced ≥ 8-bit path,
-  the Adam7 ≥ 8-bit path, and the Adam7 sub-byte path. Registry-side
+  depths below 8. `Brute` is the §12.7 "try every combination … find
+  what compresses best" exhaustive search, reduced to the tractable
+  per-image-fixed form: the encoder filters the whole image under each
+  of the six candidate row-strategies (`Adaptive` + the five `Fixed`
+  types), deflates every candidate, and emits the smallest. Where
+  `Adaptive` minimises a *proxy* for compressed size (the signed-byte
+  absolute sum), `Brute` measures the real DEFLATE size, so its output
+  is always at least as small as `Adaptive` and never larger than any
+  `Fixed` choice — at the cost of six full-image deflate passes
+  (slowest; opt-in). The encoder applies whatever strategy the caller
+  picks at all four filter sites — the non-interlaced ≥ 8-bit path,
+  the non-interlaced sub-byte path, the Adam7 ≥ 8-bit path, and the
+  Adam7 sub-byte path. Registry-side
   `CodecOptions` exposes a `filter` string key with the values
-  `adaptive` / `none` / `sub` / `up` / `average` / `paeth`
+  `adaptive` / `none` / `sub` / `up` / `average` / `paeth` / `brute`
   (case-insensitive); the empty string maps to `adaptive` so callers
   that set the key without picking a value get the default.
 - APNG output when multiple frames submitted or `frame_rate` is set.

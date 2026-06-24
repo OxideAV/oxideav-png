@@ -296,3 +296,139 @@ fn fixed_filter_skips_empty_adam7_passes() {
     assert_eq!(stream.len(), 4);
     assert_eq!(stream[0], FilterType::Sub as u8);
 }
+
+// ---- Brute (whole-image exhaustive) -------------------------------------
+
+/// The encoded length of `img` under `strat`. The IDAT byte count is the
+/// only part of the file the filter strategy moves, so the whole-file
+/// length is a faithful comparator across strategies.
+fn encoded_len(
+    img: &PngImage,
+    strat: FilterStrategy,
+    interlace: bool,
+    bit_depth: Option<u8>,
+) -> usize {
+    let opts = PngEncoderOptions {
+        interlace,
+        bit_depth,
+        filter_strategy: strat,
+        ..Default::default()
+    };
+    encode_png_image_with_options(img, &opts)
+        .expect("encode")
+        .len()
+}
+
+/// `Brute` re-decodes bit-exact and is never larger than `Adaptive` or
+/// any `Fixed` choice on the non-interlaced ≥ 8-bit path (W3C PNG3
+/// §12.7 "find what compresses best"). It measures real compressed size,
+/// so by construction it picks the smallest of the six candidate streams.
+#[test]
+fn brute_is_smallest_noninterlaced() {
+    let img = make_rgb_image(64, 48);
+    let brute = encoded_len(&img, FilterStrategy::Brute, false, None);
+
+    for cand in [
+        FilterStrategy::Adaptive,
+        FilterStrategy::Fixed(FilterType::None),
+        FilterStrategy::Fixed(FilterType::Sub),
+        FilterStrategy::Fixed(FilterType::Up),
+        FilterStrategy::Fixed(FilterType::Average),
+        FilterStrategy::Fixed(FilterType::Paeth),
+    ] {
+        let len = encoded_len(&img, cand, false, None);
+        assert!(
+            brute <= len,
+            "Brute ({brute}) must not exceed candidate {cand:?} ({len})"
+        );
+    }
+
+    // Bit-exact round-trip.
+    let opts = PngEncoderOptions {
+        filter_strategy: FilterStrategy::Brute,
+        ..Default::default()
+    };
+    let png = encode_png_image_with_options(&img, &opts).expect("encode");
+    let decoded = decode_png(&png).expect("decode");
+    assert_eq!(decoded.data, img.data, "Brute round-trip mismatch");
+}
+
+/// `Brute` works through the Adam7 ≥ 8-bit path too: bit-exact
+/// round-trip and no larger than the per-image candidates.
+#[test]
+fn brute_is_smallest_adam7() {
+    let img = make_rgb_image(48, 32);
+    let brute = encoded_len(&img, FilterStrategy::Brute, true, None);
+    for cand in [
+        FilterStrategy::Adaptive,
+        FilterStrategy::Fixed(FilterType::Paeth),
+        FilterStrategy::Fixed(FilterType::Up),
+        FilterStrategy::Fixed(FilterType::None),
+    ] {
+        assert!(brute <= encoded_len(&img, cand, true, None));
+    }
+    let opts = PngEncoderOptions {
+        interlace: true,
+        filter_strategy: FilterStrategy::Brute,
+        ..Default::default()
+    };
+    let png = encode_png_image_with_options(&img, &opts).expect("encode");
+    assert_eq!(decode_png(&png).expect("decode").data, img.data);
+}
+
+/// `Brute` runs the per-sample bit-depth validation exactly once even
+/// though it filters the image six times — an over-range sub-byte sample
+/// is still a single clean encode error, not a panic or six errors.
+#[test]
+fn brute_subbyte_roundtrip_and_validation() {
+    let w = 16u32;
+    let h = 12u32;
+    // 4-bit indexed (`Pal8`) ramp, all indices in 0..16. Indexed decode
+    // returns the indices one-byte-per-pixel unchanged (unlike `Gray8`
+    // sub-byte, which the decoder ×17-scales up per §13.12), so the
+    // round-trip comparison is against the raw `data` directly.
+    let mut data = Vec::with_capacity((w * h) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            data.push(((x + y) & 0x0F) as u8);
+        }
+    }
+    // 16-entry palette so a depth-4 IHDR fits with no `tRNS` tail.
+    let palette: Vec<u8> = (0u8..16).flat_map(|i| [i * 16, 0, 255 - i * 16]).collect();
+    let img = PngImage {
+        width: w,
+        height: h,
+        pixel_format: PngPixelFormat::Pal8,
+        stride: w as usize,
+        data: data.clone(),
+        palette,
+    };
+
+    // Non-interlaced sub-byte Brute: round-trip bit-exact.
+    let opts = PngEncoderOptions {
+        bit_depth: Some(4),
+        filter_strategy: FilterStrategy::Brute,
+        ..Default::default()
+    };
+    let png = encode_png_image_with_options(&img, &opts).expect("encode");
+    assert_eq!(decode_png(&png).expect("decode").data, data);
+
+    // Adam7 sub-byte Brute: round-trip bit-exact.
+    let opts_i = PngEncoderOptions {
+        interlace: true,
+        bit_depth: Some(4),
+        filter_strategy: FilterStrategy::Brute,
+        ..Default::default()
+    };
+    let png_i = encode_png_image_with_options(&img, &opts_i).expect("encode");
+    assert_eq!(decode_png(&png_i).expect("decode").data, data);
+
+    // Over-range sample → exactly one encode error under Brute.
+    let mut bad = img.clone();
+    bad.data[0] = 0xFF; // > 15
+    let err = encode_png_image_with_options(&bad, &opts).unwrap_err();
+    assert!(
+        err.to_string().contains("exceeds"),
+        "expected over-range error, got {err}"
+    );
+}

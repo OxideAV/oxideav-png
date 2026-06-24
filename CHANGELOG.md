@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `FilterStrategy::Brute` — whole-image exhaustive filter search (W3C
+  PNG3 §12.7: "An encoder could try every combination of filters to find
+  what compresses best for a given image … if compression efficiency is
+  valued over speed of compression"). Rather than the intractable
+  `5^rows` per-row combinatorial search, `Brute` builds the whole-image
+  filtered byte stream under each of the six candidate row-strategies —
+  the §12.8 `Adaptive` min-sum-abs-delta heuristic plus each of the five
+  `Fixed` filter types — deflates every candidate, and emits the one
+  whose DEFLATE output is smallest. `Adaptive` minimises a *proxy* for
+  compressed size (signed-byte absolute sum); `Brute` measures the real
+  compressed size, so its output is always at least as small as
+  `Adaptive` and never larger than any `Fixed` choice (verified by the
+  new size-optimality tests). It is the slowest strategy (six full-image
+  deflate passes) and is opt-in. Wired through all four encode paths —
+  the non-interlaced ≥ 8-bit path, the non-interlaced sub-byte path, the
+  Adam7 ≥ 8-bit path, and the Adam7 sub-byte path — by factoring the
+  per-row/per-pass filter loop out of each `deflate_encode_pixels*`
+  function into a strategy-parametric stream builder, then dispatching to
+  a shared `brute_compress` compare loop over
+  `FilterStrategy::BRUTE_CANDIDATES`. The sub-byte per-sample bit-depth
+  validation (`v > (1 << bit_depth) - 1`) runs exactly once before the
+  six filter trials, so an over-range sample is still a single clean
+  encode error, not a panic or six errors. Registry-side the `filter`
+  option gains a `brute` value (case-insensitive); the rejection message
+  now lists it. 4 new tests (3 in `tests/filter_strategy.rs` covering the
+  size-optimality property + bit-exact round-trip on the non-interlaced,
+  Adam7, and sub-byte paths; 1 in `registry.rs` covering `filter=brute`
+  parsing + the updated unknown-value error). Default-options and
+  `Adaptive` / `Fixed` callers are byte-for-byte unchanged.
+
 - Unrecognised-ancillary-chunk preservation for the PNG *editor*
   round-trip (W3C PNG3 §14.2). `parse_metadata` now captures any
   ancillary chunk type the codec does not parse into a new

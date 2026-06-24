@@ -691,7 +691,32 @@ pub(crate) fn deflate_encode_pixels(
     level: u8,
 ) -> Result<Vec<u8>> {
     let bpp = ihdr.bpp_for_filter()?;
-    // 1 filter byte + row_bytes per row.
+    if strategy == FilterStrategy::Brute {
+        // Build + compress the filtered stream once per candidate
+        // row-strategy and keep the smallest DEFLATE output (W3C PNG3
+        // §12.7 "try every combination … find what compresses best",
+        // reduced to the tractable per-image-fixed search).
+        return brute_compress(level, |cand| {
+            Ok(filter_image_stream(raw, row_bytes, height, bpp, cand))
+        });
+    }
+    let filtered = filter_image_stream(raw, row_bytes, height, bpp, strategy);
+    compress_to_vec_zlib(&filtered, level)
+}
+
+/// Filter every row of a contiguous `height × row_bytes` raw pixel plane
+/// under `strategy`, returning the `(1 + row_bytes) * height` filtered
+/// byte stream (each row prefixed with its filter-type byte). The shared
+/// core of [`deflate_encode_pixels`]; factored out so the
+/// [`FilterStrategy::Brute`] search can build one stream per candidate
+/// strategy without duplicating the per-row loop.
+fn filter_image_stream(
+    raw: &[u8],
+    row_bytes: usize,
+    height: usize,
+    bpp: usize,
+    strategy: FilterStrategy,
+) -> Vec<u8> {
     let mut filtered = vec![0u8; (1 + row_bytes) * height];
     let mut scratch = vec![0u8; row_bytes];
     let zero_row = vec![0u8; row_bytes];
@@ -710,7 +735,31 @@ pub(crate) fn deflate_encode_pixels(
         // last, not necessarily the winner — re-filter into the output slot.
         filter_row(ft, row, prev, bpp, data_slot);
     }
-    compress_to_vec_zlib(&filtered, level)
+    filtered
+}
+
+/// Run the [`FilterStrategy::Brute`] search: compress the filtered byte
+/// stream `build(cand)` for every `cand` in
+/// [`FilterStrategy::BRUTE_CANDIDATES`] and return the smallest DEFLATE
+/// output. `build` re-filters the image under each candidate
+/// row-strategy; the closure returns the uncompressed filtered stream so
+/// the interlaced + sub-byte paths can reuse the same compare loop with
+/// their own pass-aware stream builders.
+fn brute_compress(
+    level: u8,
+    mut build: impl FnMut(FilterStrategy) -> Result<Vec<u8>>,
+) -> Result<Vec<u8>> {
+    let mut best: Option<Vec<u8>> = None;
+    for &cand in FilterStrategy::BRUTE_CANDIDATES.iter() {
+        let filtered = build(cand)?;
+        let compressed = compress_to_vec_zlib(&filtered, level)?;
+        let smaller = best.as_ref().map_or(true, |b| compressed.len() < b.len());
+        if smaller {
+            best = Some(compressed);
+        }
+    }
+    // BRUTE_CANDIDATES is non-empty, so `best` is always populated.
+    best.ok_or_else(|| Error::other("PNG encoder: brute filter search produced no candidate"))
 }
 
 /// Adam7 counterpart to [`deflate_encode_pixels`]: gather each of the
@@ -728,8 +777,39 @@ pub(crate) fn deflate_encode_pixels_adam7(
 ) -> Result<Vec<u8>> {
     let bpp = ihdr.bpp_for_filter()?;
     let bytes_per_pixel = ihdr.decoded_bytes_per_pixel()?;
-    let full_row_bytes = width * bytes_per_pixel;
+    if strategy == FilterStrategy::Brute {
+        return brute_compress(level, |cand| {
+            Ok(filter_image_stream_adam7(
+                raw,
+                width,
+                height,
+                bpp,
+                bytes_per_pixel,
+                cand,
+            ))
+        });
+    }
+    let filtered_all =
+        filter_image_stream_adam7(raw, width, height, bpp, bytes_per_pixel, strategy);
+    compress_to_vec_zlib(&filtered_all, level)
+}
 
+/// Build the concatenated Adam7 filtered byte stream for the ≥8-bit
+/// path: gather each non-empty pass into its own sub-image, filter its
+/// rows under `strategy` (each pass treated as a standalone image with a
+/// zero prior row at its top per §6.3), and append the
+/// `(1 + pass_row_bytes) * ph` filtered bytes. Factored out of
+/// [`deflate_encode_pixels_adam7`] so the [`FilterStrategy::Brute`]
+/// search can rebuild the stream under each candidate row-strategy.
+fn filter_image_stream_adam7(
+    raw: &[u8],
+    width: usize,
+    height: usize,
+    bpp: usize,
+    bytes_per_pixel: usize,
+    strategy: FilterStrategy,
+) -> Vec<u8> {
+    let full_row_bytes = width * bytes_per_pixel;
     let mut filtered_all = Vec::new();
     for (pass, &(sr, sc, rs, cs)) in ADAM7.iter().enumerate() {
         let (pw, ph) = adam7_pass_dims(width, height, pass);
@@ -773,7 +853,7 @@ pub(crate) fn deflate_encode_pixels_adam7(
             filter_row(ft, row, prev, bpp, data_slot);
         }
     }
-    compress_to_vec_zlib(&filtered_all, level)
+    filtered_all
 }
 
 /// Sub-byte (ct=0 / ct=3, depth 1/2/4) counterpart to
@@ -808,6 +888,32 @@ fn deflate_encode_pixels_adam7_subbyte(
     debug_assert!(ihdr.bit_depth == 1 || ihdr.bit_depth == 2 || ihdr.bit_depth == 4);
     debug_assert!(ihdr.colour_type == 0 || ihdr.colour_type == 3);
     let bpp = ihdr.bpp_for_filter()?; // = 1 for sub-byte
+                                      // Gather + MSB-pack every non-empty Adam7 pass once (this is where
+                                      // the per-sample bit-depth validation lives, so it must run exactly
+                                      // once regardless of how many filter candidates we later try).
+    let packed_passes = pack_subbyte_adam7_passes(image, ihdr)?;
+    if strategy == FilterStrategy::Brute {
+        return brute_compress(level, |cand| {
+            Ok(filter_subbyte_adam7_stream(&packed_passes, bpp, cand))
+        });
+    }
+    let filtered_all = filter_subbyte_adam7_stream(&packed_passes, bpp, strategy);
+    compress_to_vec_zlib(&filtered_all, level)
+}
+
+/// One Adam7 pass after MSB-packing: `(pass_row_bytes, ph, pass_raw)`.
+struct PackedPass {
+    pass_row_bytes: usize,
+    ph: usize,
+    pass_raw: Vec<u8>,
+}
+
+/// Gather + MSB-pack every non-empty Adam7 pass of a sub-byte
+/// (ct=0 / ct=3, depth 1/2/4) source into its own wire-row buffer,
+/// validating each source sample against `(1 << bit_depth) - 1`. The
+/// pack is strategy-independent, so it runs once even under the
+/// [`FilterStrategy::Brute`] multi-candidate search.
+fn pack_subbyte_adam7_passes(image: &PngImage, ihdr: &Ihdr) -> Result<Vec<PackedPass>> {
     let bd = ihdr.bit_depth as usize;
     let max: u8 = ((1u16 << bd) - 1) as u8;
     let pixels_per_byte = 8 / bd;
@@ -815,7 +921,7 @@ fn deflate_encode_pixels_adam7_subbyte(
     let img_h = image.height as usize;
     let src_stride = image.stride;
 
-    let mut filtered_all = Vec::new();
+    let mut passes = Vec::new();
     for (pass, &(sr, sc, rs, cs)) in ADAM7.iter().enumerate() {
         let (pw, ph) = adam7_pass_dims(img_w, img_h, pass);
         if pw == 0 || ph == 0 {
@@ -851,22 +957,38 @@ fn deflate_encode_pixels_adam7_subbyte(
                 dst_row[byte_idx] |= v << shift_in_byte;
             }
         }
+        passes.push(PackedPass {
+            pass_row_bytes,
+            ph,
+            pass_raw,
+        });
+    }
+    Ok(passes)
+}
 
-        // Filter this pass's rows independently with a zero prev-row at
-        // the top of the pass (RFC 2083 §6.3 "For filters that refer to
-        // the prior scanline, the entire prior scanline must be treated
-        // as being zeroes for the first scanline of an image (or of a
-        // pass of an interlaced image).").
+/// Filter every row of every packed Adam7 pass under `strategy` and
+/// concatenate the `(1 + pass_row_bytes) * ph` filtered bytes — each
+/// pass filtered independently with a zero prior row at its top
+/// (RFC 2083 §6.3). The strategy-dependent half of the sub-byte Adam7
+/// encode, rebuilt per candidate by the [`FilterStrategy::Brute`] search.
+fn filter_subbyte_adam7_stream(
+    passes: &[PackedPass],
+    bpp: usize,
+    strategy: FilterStrategy,
+) -> Vec<u8> {
+    let mut filtered_all = Vec::new();
+    for p in passes {
+        let pass_row_bytes = p.pass_row_bytes;
         let prev_start = filtered_all.len();
-        filtered_all.resize(prev_start + (1 + pass_row_bytes) * ph, 0);
+        filtered_all.resize(prev_start + (1 + pass_row_bytes) * p.ph, 0);
         let mut scratch = vec![0u8; pass_row_bytes];
         let zero_row = vec![0u8; pass_row_bytes];
-        for y in 0..ph {
-            let row = &pass_raw[y * pass_row_bytes..(y + 1) * pass_row_bytes];
+        for y in 0..p.ph {
+            let row = &p.pass_raw[y * pass_row_bytes..(y + 1) * pass_row_bytes];
             let prev: &[u8] = if y == 0 {
                 &zero_row
             } else {
-                &pass_raw[(y - 1) * pass_row_bytes..y * pass_row_bytes]
+                &p.pass_raw[(y - 1) * pass_row_bytes..y * pass_row_bytes]
             };
             let ft = strategy.pick(row, prev, bpp, &mut scratch);
             let dst_off = prev_start + y * (1 + pass_row_bytes);
@@ -875,7 +997,7 @@ fn deflate_encode_pixels_adam7_subbyte(
             filter_row(ft, row, prev, bpp, data_slot);
         }
     }
-    compress_to_vec_zlib(&filtered_all, level)
+    filtered_all
 }
 
 // ---- APNG encode --------------------------------------------------------

@@ -131,6 +131,10 @@ impl CodecOptionsStruct for PngEncoderOptions {
                    min-sum-abs-delta heuristic across all five filter types. \
                    `none` / `sub` / `up` / `average` / `paeth` pin a single \
                    filter type for every row, skipping the per-row trial. \
+                   `brute` filters the whole image under each of those six \
+                   policies, deflates every candidate, and keeps the \
+                   smallest — the §12.7 \"find what compresses best\" search \
+                   (slowest; best compression). \
                    An empty value is treated as `adaptive`.",
         },
         OptionField {
@@ -178,10 +182,11 @@ impl CodecOptionsStruct for PngEncoderOptions {
                     "up" => FilterStrategy::Fixed(FilterType::Up),
                     "average" => FilterStrategy::Fixed(FilterType::Average),
                     "paeth" => FilterStrategy::Fixed(FilterType::Paeth),
+                    "brute" => FilterStrategy::Brute,
                     other => {
                         return Err(oxideav_core::Error::invalid(format!(
                             "PNG encoder: option `filter` got {other:?}; \
-                             expected one of adaptive / none / sub / up / average / paeth"
+                             expected one of adaptive / none / sub / up / average / paeth / brute"
                         )))
                     }
                 };
@@ -501,5 +506,27 @@ mod register_tests {
             Some("png"),
             "PNG container extension not installed via RuntimeContext"
         );
+    }
+
+    #[test]
+    fn filter_option_parses_brute_and_rejects_unknown() {
+        use crate::filter::FilterStrategy;
+        use oxideav_core::OptionValue;
+
+        // `brute` (any case) maps to the whole-image exhaustive search.
+        for raw in ["brute", "BRUTE", "Brute"] {
+            let mut opts = PngEncoderOptions::default();
+            opts.apply("filter", &OptionValue::String(raw.to_string()))
+                .expect("filter=brute should parse");
+            assert_eq!(opts.filter_strategy, FilterStrategy::Brute, "raw {raw:?}");
+        }
+
+        // An unknown filter value still errors, and the message now lists
+        // `brute` among the accepted values.
+        let mut opts = PngEncoderOptions::default();
+        let err = opts
+            .apply("filter", &OptionValue::String("wibble".into()))
+            .unwrap_err();
+        assert!(err.to_string().contains("brute"), "got {err}");
     }
 }

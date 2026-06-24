@@ -290,6 +290,21 @@ pub enum FilterStrategy {
     /// pass (~5× faster than `Adaptive`) at the cost of compression
     /// for content the chosen filter does not suit.
     Fixed(FilterType),
+    /// Exhaustive per-image filter search (W3C PNG3 §12.7: "An encoder
+    /// could try every combination of filters to find what compresses
+    /// best for a given image … if compression efficiency is valued
+    /// over speed of compression"). Rather than the intractable
+    /// `5^rows` per-row combinatorial search, `Brute` builds the
+    /// whole-image filtered byte stream under each of the six candidate
+    /// row-strategies — the §12.8 `Adaptive` heuristic plus each of the
+    /// five `Fixed` filter types — compresses every candidate, and emits
+    /// the one whose DEFLATE output is smallest. The §12.8 heuristic
+    /// minimises a *proxy* for compressed size (signed-byte absolute
+    /// sum); `Brute` instead measures the real compressed size, so it is
+    /// always at least as small as `Adaptive` and never larger than any
+    /// `Fixed` choice. It is the slowest strategy (six full-image
+    /// deflate passes) and is opt-in only.
+    Brute,
 }
 
 impl FilterStrategy {
@@ -302,10 +317,31 @@ impl FilterStrategy {
     /// branch runs.
     pub fn pick(self, row: &[u8], prev_row: &[u8], bpp: usize, scratch: &mut [u8]) -> FilterType {
         match self {
-            FilterStrategy::Adaptive => choose_filter_heuristic(row, prev_row, bpp, scratch),
+            // `Brute` is a per-*image* decision, not a per-row one, so it
+            // has no single answer at this granularity. The whole-image
+            // encoder paths special-case it before reaching here; this
+            // arm is the defensive fallback for a direct `pick` caller,
+            // and the §12.8 heuristic is the closest single-row analogue.
+            FilterStrategy::Adaptive | FilterStrategy::Brute => {
+                choose_filter_heuristic(row, prev_row, bpp, scratch)
+            }
             FilterStrategy::Fixed(f) => f,
         }
     }
+
+    /// The candidate row-strategies a [`FilterStrategy::Brute`] search
+    /// compresses and compares: the §12.8 [`Adaptive`](FilterStrategy::Adaptive)
+    /// heuristic followed by each of the five [`Fixed`](FilterStrategy::Fixed)
+    /// filter types. A whole-image encoder filters the image once under
+    /// each, deflates the result, and keeps the smallest.
+    pub const BRUTE_CANDIDATES: [FilterStrategy; 6] = [
+        FilterStrategy::Adaptive,
+        FilterStrategy::Fixed(FilterType::None),
+        FilterStrategy::Fixed(FilterType::Sub),
+        FilterStrategy::Fixed(FilterType::Up),
+        FilterStrategy::Fixed(FilterType::Average),
+        FilterStrategy::Fixed(FilterType::Paeth),
+    ];
 }
 
 // --- CRC32 ---------------------------------------------------------------
