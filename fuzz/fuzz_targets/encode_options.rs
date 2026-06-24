@@ -4,8 +4,9 @@
 //! [`PngEncoderOptions`] matrix the existing `encode_decode_roundtrip`
 //! target leaves untouched: Adam7 interlace (both the >=8-bit and the
 //! sub-byte 1/2/4-bit pass layouts), caller-supplied sub-byte
-//! `bit_depth` packing, every `FilterStrategy` variant (Adaptive plus
-//! `Fixed` x5), and the ancillary-metadata emission path. The default
+//! `bit_depth` packing, every `FilterStrategy` variant (Adaptive,
+//! `Fixed` x5, plus the whole-image exhaustive `Brute` search), and the
+//! ancillary-metadata emission path. The default
 //! round-trip target only ever passes `PngEncoderOptions::default()`
 //! (non-interlaced, 8-bit, Adaptive, no metadata), so the interlaced
 //! sub-image gather (`deflate_encode_pixels_adam7` /
@@ -182,16 +183,21 @@ fn pixel_format_for(sel: u8) -> PngPixelFormat {
     }
 }
 
-/// Map a fuzz byte to a filter strategy: Adaptive plus all five Fixed
-/// variants, uniform over a 0..=5 modulo.
+/// Map a fuzz byte to a filter strategy: Adaptive, all five Fixed
+/// variants, plus the whole-image exhaustive `Brute` search, uniform
+/// over a 0..=6 modulo. `Brute` funnels the budget into the
+/// six-candidate compare loop (`brute_compress`) and, on the sub-byte
+/// paths, the pack-once / filter-six split — code the Adaptive/Fixed
+/// arms never exercise.
 fn filter_strategy_for(sel: u8) -> FilterStrategy {
-    match sel % 6 {
+    match sel % 7 {
         0 => FilterStrategy::Adaptive,
         1 => FilterStrategy::Fixed(FilterType::None),
         2 => FilterStrategy::Fixed(FilterType::Sub),
         3 => FilterStrategy::Fixed(FilterType::Up),
         4 => FilterStrategy::Fixed(FilterType::Average),
-        _ => FilterStrategy::Fixed(FilterType::Paeth),
+        5 => FilterStrategy::Fixed(FilterType::Paeth),
+        _ => FilterStrategy::Brute,
     }
 }
 
