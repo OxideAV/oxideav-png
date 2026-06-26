@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- APNG `APNG_BLEND_OP_OVER` now honours `tRNS`-keyed transparency on the
+  alpha-less canvas formats (colour types 0/2/3). W3C PNG3 §11.3.6.2 says
+  an OVER frame is "composited onto the output buffer based on its
+  alpha"; for grayscale / truecolour / indexed the alpha is carried by
+  `tRNS` (RFC 2083 §4.2.9), not by the pixel. Previously OVER on these
+  formats degraded to a plain Source overwrite, ignoring the keyed
+  transparency. The compositor now derives a frame-invariant transparency
+  key (palette per-index alpha tail, or the keyed gray / RGB sample
+  scaled to the canvas byte layout) and leaves the canvas untouched where
+  the source pixel is fully transparent. Because the composited canvas is
+  itself alpha-less, the behaviour is binary (transparent → skip, opaque
+  → write) — there is no representable partial blend. Covered by
+  `apng_trns_over_compositing.rs` (palette skip/overwrite, grayscale key,
+  truecolour key).
+
 - End-to-end APNG `blend_op` / `dispose_op` round-trip coverage
   (`apng_blend_dispose_roundtrip.rs`): the region-aware encoder builds
   animations exercising `Blend::Over` partial-alpha compositing,

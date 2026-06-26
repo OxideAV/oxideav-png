@@ -1545,6 +1545,95 @@ pub fn decode_apng(buf: &[u8]) -> Result<ApngImage> {
     decode_apng_info(&info)
 }
 
+/// Per-pixel transparency key for `APNG_BLEND_OP_OVER` on canvas formats
+/// that carry no alpha channel of their own (palette / grayscale / truecolour).
+///
+/// W3C PNG3 §11.3.6.2 says an OVER frame "should be composited onto the output
+/// buffer based on its alpha". For colour types 0/2/3 the alpha is not in the
+/// pixel — it comes from a `tRNS` chunk (RFC 2083 §4.2.9): a keyed gray/RGB
+/// sample (types 0/2) or a per-palette-entry alpha tail (type 3). Because the
+/// composited canvas is itself one of these alpha-less formats, an OVER pixel
+/// can only be fully transparent (leave the canvas) or fully written — there
+/// is no representable partial blend. This key identifies the transparent
+/// source pixels so OVER respects them rather than degrading to a plain
+/// overwrite. Without `tRNS` every pixel is opaque and OVER == SOURCE.
+#[derive(Clone, Debug)]
+enum TransparencyKey {
+    /// Every pixel opaque (no `tRNS`) — OVER behaves as SOURCE.
+    None,
+    /// Colour type 3 (Pal8): palette index `i` is transparent iff
+    /// `alpha[i] == 0`. Indices beyond the tail are opaque.
+    Palette(Vec<u8>),
+    /// Colour type 0 (Gray8): the 8-bit canvas value that is transparent.
+    Gray8(u8),
+    /// Colour type 0 (Gray16Le): the little-endian 16-bit value pair that
+    /// is transparent.
+    Gray16([u8; 2]),
+    /// Colour type 2 (Rgb24): the transparent RGB triple.
+    Rgb24([u8; 3]),
+    /// Colour type 2 (Rgb48Le): the transparent little-endian 48-bit pixel.
+    Rgb48([u8; 6]),
+}
+
+impl TransparencyKey {
+    /// Derive the canvas-format transparency key from the IHDR + parsed
+    /// `tRNS`. Returns [`TransparencyKey::None`] when the format carries its
+    /// own alpha (types 4/6) or no `tRNS` is present. The keyed gray/RGB
+    /// samples in `tRNS` are at the IHDR bit-depth's natural range and are
+    /// scaled to the canvas byte layout: an 8-bit grayscale canvas scales a
+    /// sub-8-bit keyed sample exactly as the pixel plane was scaled during
+    /// decode (`v * 255 / max`), and 16-bit samples are stored low-byte-first.
+    fn derive(ihdr: &Ihdr, fmt: PngPixelFormat, trns: Option<&[u8]>, plte_len: usize) -> Self {
+        let Some(trns_bytes) = trns else {
+            return Self::None;
+        };
+        let plte_entries = plte_len / 3;
+        let Ok(parsed) = Trns::parse(
+            trns_bytes,
+            ihdr.colour_type,
+            ihdr.bit_depth,
+            Some(plte_entries),
+        ) else {
+            return Self::None;
+        };
+        match (fmt, parsed) {
+            (PngPixelFormat::Pal8, Trns::Palette(alpha)) => Self::Palette(alpha),
+            (PngPixelFormat::Gray8, Trns::Grayscale(v)) => {
+                // Sub-8-bit grayscale is expanded to Gray8 by v * 255 / max.
+                let max = (1u32 << ihdr.bit_depth) - 1;
+                let scaled = ((v as u32 * 255 + max / 2) / max) as u8;
+                Self::Gray8(scaled)
+            }
+            (PngPixelFormat::Gray16Le, Trns::Grayscale(v)) => Self::Gray16(v.to_le_bytes()),
+            (PngPixelFormat::Rgb24, Trns::Rgb(r, g, b)) => Self::Rgb24([r as u8, g as u8, b as u8]),
+            (PngPixelFormat::Rgb48Le, Trns::Rgb(r, g, b)) => {
+                let mut px = [0u8; 6];
+                px[0..2].copy_from_slice(&r.to_le_bytes());
+                px[2..4].copy_from_slice(&g.to_le_bytes());
+                px[4..6].copy_from_slice(&b.to_le_bytes());
+                Self::Rgb48(px)
+            }
+            _ => Self::None,
+        }
+    }
+
+    /// Whether the source pixel `src` (one canvas-format pixel) is fully
+    /// transparent and should leave the canvas untouched under OVER.
+    fn is_transparent(&self, src: &[u8]) -> bool {
+        match self {
+            Self::None => false,
+            Self::Palette(alpha) => {
+                let idx = src[0] as usize;
+                alpha.get(idx).copied().unwrap_or(255) == 0
+            }
+            Self::Gray8(v) => src[0] == *v,
+            Self::Gray16(v) => src[0] == v[0] && src[1] == v[1],
+            Self::Rgb24(v) => src == v,
+            Self::Rgb48(v) => src == v,
+        }
+    }
+}
+
 /// Composite the parsed APNG `info` into per-frame canvases.
 pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
     let canvas_w = info.ihdr.width;
@@ -1552,6 +1641,14 @@ pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
     let canvas_fmt = info.ihdr.output_pixel_format()?;
     let bpp = canvas_fmt.bytes_per_pixel();
     let stride_canvas = canvas_w as usize * bpp;
+    // Transparency key for OVER on alpha-less canvas formats (types 0/2/3 with
+    // a tRNS chunk). Frame-invariant, so derive it once.
+    let trns_key = TransparencyKey::derive(
+        &info.ihdr,
+        canvas_fmt,
+        info.trns.as_deref(),
+        info.plte.as_deref().map(|p| p.len()).unwrap_or(0),
+    );
 
     let mut canvas = vec![0u8; stride_canvas * canvas_h as usize];
     // For Disposal::Previous we snapshot the pre-draw state before writing
@@ -1618,6 +1715,7 @@ pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
             frame.fctl.x_offset as usize,
             frame.fctl.y_offset as usize,
             frame.fctl.blend_op,
+            &trns_key,
         );
 
         let img = PngImage {
@@ -1682,6 +1780,7 @@ fn blit_sub_into_canvas(
     x_off: usize,
     y_off: usize,
     blend: Blend,
+    trns_key: &TransparencyKey,
 ) {
     let sub_stride = sub.stride;
     for sy in 0..sub_h {
@@ -1760,6 +1859,12 @@ fn blit_sub_into_canvas(
                             dst[6] = ab[0];
                             dst[7] = ab[1];
                         }
+                    } else if trns_key.is_transparent(src) {
+                        // Alpha-less canvas (palette / gray / RGB) under OVER:
+                        // a tRNS-keyed transparent source pixel leaves the
+                        // canvas untouched; everything else is fully opaque and
+                        // overwrites. (No representable partial blend in a
+                        // format that carries no alpha.)
                     } else {
                         dst.copy_from_slice(src);
                     }
