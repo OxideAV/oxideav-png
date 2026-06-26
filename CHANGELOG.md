@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- End-to-end APNG `blend_op` / `dispose_op` round-trip coverage
+  (`apng_blend_dispose_roundtrip.rs`): the region-aware encoder builds
+  animations exercising `Blend::Over` partial-alpha compositing,
+  `Disposal::Background` region clear, and `Disposal::Previous` region
+  revert; each is decoded back through the compositor and checked against
+  a hand-computed model, including the opaque-OVER-equals-SOURCE
+  invariant.
+
 - APNG `acTL` placement / multiplicity validation: `parse_apng` now
   rejects an `acTL` that appears after the first `IDAT` (W3C PNG3 §4.9.1:
   "an acTL chunk must appear in the stream before any IDAT chunks") and a
