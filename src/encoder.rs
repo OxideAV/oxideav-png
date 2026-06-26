@@ -1311,6 +1311,18 @@ pub fn encode_apng_frames_with_options(
                 f0.image.width, f0.image.height
             )));
         }
+        // W3C PNG3 §11.3.5.1: the default-image fcTL (the one preceding IDAT,
+        // which here is the first frame's) must have x_offset = y_offset = 0.
+        // Reject a non-zero offset explicitly rather than letting it surface
+        // as an opaque region-bounds failure downstream.
+        if f0.x_offset != 0 || f0.y_offset != 0 {
+            return Err(Error::invalid(format!(
+                "PNG encoder: with no separate default image the first APNG frame is the \
+                 default-image fcTL and must sit at offset (0, 0) (W3C PNG3 §11.3.5.1); \
+                 got ({}, {})",
+                f0.x_offset, f0.y_offset
+            )));
+        }
     }
 
     // Validate every frame region against the canvas up front so a bad

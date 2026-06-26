@@ -254,6 +254,28 @@ fn region_frame_partial_first_frame_without_default_is_rejected() {
 }
 
 #[test]
+fn region_first_frame_nonzero_offset_without_default_is_rejected() {
+    // No separate default image: the first frame is the default-image fcTL,
+    // which W3C PNG3 §11.3.5.1 requires at offset (0, 0). A full-canvas first
+    // frame placed at a non-zero offset is rejected with the §11.3.5.1
+    // message (rather than an opaque region-bounds failure).
+    let w = 4u32;
+    let h = 4u32;
+    let f0 = ApngFrameSpec {
+        image: solid_rgba(w, h, [1, 2, 3, 255]),
+        x_offset: 1,
+        y_offset: 0,
+        delay_num: 10,
+        delay_den: 100,
+        dispose_op: ApngDisposal::None,
+        blend_op: ApngBlend::Source,
+    };
+    let err = encode_apng_frames(w, h, None, &[f0], 0).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("offset (0, 0)"), "got: {msg}");
+}
+
+#[test]
 fn region_frame_mismatched_format_is_rejected() {
     let w = 2u32;
     let h = 2u32;

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The region-aware APNG encoder now rejects a non-zero `x_offset` /
+  `y_offset` on the first frame when no separate default image is
+  supplied (the first frame is then the default-image `fcTL`, which W3C
+  PNG3 §11.3.5.1 requires at offset (0, 0)), with a clear §11.3.5.1
+  message instead of an opaque region-bounds failure.
+
 - The container demuxer now enforces the APNG `acTL` placement /
   multiplicity rules (W3C PNG3 §4.9.1 "an acTL chunk must appear in the
   stream before any IDAT chunks"; §5.6 ordering table acTL "Multiple OK?
