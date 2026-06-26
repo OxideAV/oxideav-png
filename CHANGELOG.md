@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- APNG `acTL` placement / multiplicity validation: `parse_apng` now
+  rejects an `acTL` that appears after the first `IDAT` (W3C PNG3 §4.9.1:
+  "an acTL chunk must appear in the stream before any IDAT chunks") and a
+  stream carrying more than one `acTL` (W3C PNG3 §5.6 ordering table:
+  acTL "Multiple OK? No"). Covered by `apng_actl_ordering.rs`.
+
 - APNG default-image `fcTL` restrictions (W3C PNG3 §11.3.5.1): when the
   static image is the first animation frame (an `fcTL` precedes `IDAT`),
   that `fcTL`'s `x_offset` / `y_offset` must be 0 and its `width` /

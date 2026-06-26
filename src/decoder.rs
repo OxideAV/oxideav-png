@@ -1393,11 +1393,30 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
         }
     }
 
-    let actl = chunks
+    let actl_index = chunks
         .iter()
-        .find(|c| c.is_type(b"acTL"))
+        .position(|c| c.is_type(b"acTL"))
         .ok_or_else(|| Error::invalid("PNG: not animated (no acTL)"))?;
-    let actl = Actl::parse(actl.data)?;
+    // W3C PNG3 §5.6 Table: acTL "Multiple OK? No". A second acTL would
+    // declare two conflicting animations in one stream; reject it.
+    if chunks.iter().filter(|c| c.is_type(b"acTL")).count() > 1 {
+        return Err(Error::invalid(
+            "PNG acTL: appears more than once (W3C PNG3 §5.6: \"Multiple OK? No\")",
+        ));
+    }
+    // W3C PNG3 §4.9 / §11.3.4: "The acTL chunk must appear before the first
+    // IDAT chunk within a valid PNG stream." An acTL that follows IDAT names
+    // an animation the renderer would have to retro-fit onto an already-shown
+    // static image; reject it as malformed rather than silently animating.
+    if let Some(first_idat) = chunks.iter().position(|c| c.is_type(b"IDAT")) {
+        if actl_index > first_idat {
+            return Err(Error::invalid(
+                "PNG acTL: appears after the first IDAT (W3C PNG3 §4.9: \
+                 \"The acTL chunk must appear before the first IDAT chunk\")",
+            ));
+        }
+    }
+    let actl = Actl::parse(chunks[actl_index].data)?;
 
     let mut plte: Option<Vec<u8>> = None;
     let mut trns: Option<Vec<u8>> = None;
