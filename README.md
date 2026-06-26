@@ -27,25 +27,36 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
 - Sub-byte grayscale scaled up to 8-bit (PNG §13.12 ×255 / ×85 / ×17)
 - Sub-byte indexed expanded to one index-byte-per-pixel
 - APNG: `acTL` / `fcTL` / `fdAT` with None/Background/Previous disposal and
-  Source/Over blending. Each `fcTL` frame region is policed against the
-  IHDR canvas per W3C PNG3 §11.3.6.1: `width` / `height` must be greater
-  than zero, and the region "may not fall outside of the default image"
+  Source/Over blending. The frame compositor implements the non-
+  premultiplied OVER (W3C PNG3 §13.16, referenced by §11.3.6.2
+  `blend_op`) at **8-bit and 16-bit** per-channel precision (RGBA, gray+
+  alpha, and 16-bit RGBA / Ya16-as-RGBA64). On alpha-less canvases
+  (colour types 0/2/3) OVER honours `tRNS`-keyed transparency — a keyed
+  gray / RGB sample or a transparent palette index leaves the canvas,
+  everything else overwrites (binary, since the canvas carries no alpha).
+  A first-frame `dispose_op` of `Previous` is normalised to `Background`
+  (§11.3.5.1). Each `fcTL` frame region is policed against the IHDR canvas
+  per W3C PNG3 §11.3.6.1: `width` / `height` must be greater than zero,
+  and the region "may not fall outside of the default image"
   (`x_offset + width ≤` canvas width, `y_offset + height ≤` canvas height,
   the two sums taken in `u64` so an offset/extent pair near `u32::MAX`
-  cannot wrap past the bound). A hostile out-of-canvas frame is rejected
-  with an error on both the standalone `decode_apng` path and the demuxer
+  cannot wrap past the bound). The default-image `fcTL` (the one preceding
+  `IDAT`) additionally must sit at offset (0, 0) with full-canvas
+  dimensions (§11.3.5.1). A hostile out-of-canvas frame is rejected with
+  an error on both the standalone `decode_apng` path and the demuxer
   frame-splitter rather than silently clipped. The shared `fcTL` / `fdAT`
   sequence-number stream is validated per W3C PNG3 §4.9.2: the first
   `fcTL` "shall contain sequence number 0" and the remaining `fcTL` /
   `fdAT` chunks "shall be in ascending order, with no gaps or
   duplicates" — a non-zero first sequence, a leading `fdAT`, or any gap /
   duplicate / descending step is an error ("Decoders shall treat
-  out-of-order APNG chunks as an error", §4.9.1). `acTL.num_frames == 0`
-  is rejected (§4.9: "0 is not a valid value"); a `num_frames` value that
-  merely *disagrees* with the actual `fcTL` count stays advisory (the
-  authoritative chain is the walked `fcTL` / `fdAT` sequence). All checks
-  apply on both the standalone `parse_apng` / `decode_apng` path and the
-  demuxer.
+  out-of-order APNG chunks as an error", §4.9.1). The `acTL` must appear
+  before the first `IDAT` (§4.9.1) and at most once (§5.6 "Multiple OK?
+  No"); `acTL.num_frames == 0` is rejected (§4.9: "0 is not a valid
+  value"); a `num_frames` value that merely *disagrees* with the actual
+  `fcTL` count stays advisory (the authoritative chain is the walked
+  `fcTL` / `fdAT` sequence). All checks apply on both the standalone
+  `parse_apng` / `decode_apng` path and the demuxer.
 - `PLTE` + `tRNS` palettes — `PLTE` drives `Pal8` index resolution and the
   demuxer preserves both verbatim in `CodecParameters::extradata` so the
   encoder can faithfully rewrite them
