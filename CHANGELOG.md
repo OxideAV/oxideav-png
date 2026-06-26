@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The container demuxer now enforces the APNG `acTL` placement /
+  multiplicity rules (W3C PNG3 §4.9.1 "an acTL chunk must appear in the
+  stream before any IDAT chunks"; §5.6 ordering table acTL "Multiple OK?
+  No") at the demux boundary, matching the standalone `parse_apng` gate,
+  rather than splitting frames off an ill-formed stream. Factored into a
+  shared `validate_apng_chunk_placement` helper with inline coverage.
+
 - APNG `APNG_BLEND_OP_OVER` now honours `tRNS`-keyed transparency on the
   alpha-less canvas formats (colour types 0/2/3). W3C PNG3 §11.3.6.2 says
   an OVER frame is "composited onto the output buffer based on its

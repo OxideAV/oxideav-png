@@ -89,6 +89,12 @@ fn open_demuxer(
             .data,
     )?;
     let has_actl = chunks.iter().any(|c| c.is_type(b"acTL"));
+    if has_actl {
+        // Reject a malformed APNG container at the demux boundary so it fails
+        // to the same standard as the standalone parse_apng path rather than
+        // splitting frames off an ill-formed stream.
+        validate_apng_chunk_placement(&chunks)?;
+    }
     let loop_count = if let Some(actl) = chunks.iter().find(|c| c.is_type(b"acTL")) {
         if actl.data.len() == 8 {
             Some(u32::from_be_bytes([
@@ -178,6 +184,33 @@ fn ihdr_chunk_data<'a>(chunks: &'a [ChunkRef<'_>]) -> Result<&'a [u8]> {
         .find(|c| c.is_type(b"IHDR"))
         .map(|c| c.data)
         .ok_or_else(|| Error::invalid("PNG: missing IHDR"))
+}
+
+/// Enforce the two structural placement / multiplicity rules an APNG `acTL`
+/// must satisfy, mirroring the standalone `parse_apng` gate:
+///
+/// * W3C PNG3 §5.6 ordering table: acTL "Multiple OK? No" — at most one.
+/// * W3C PNG3 §4.9.1: "an acTL chunk must appear in the stream before any
+///   IDAT chunks."
+///
+/// Called only when an `acTL` is present.
+pub(crate) fn validate_apng_chunk_placement(chunks: &[ChunkRef<'_>]) -> Result<()> {
+    if chunks.iter().filter(|c| c.is_type(b"acTL")).count() > 1 {
+        return Err(Error::invalid(
+            "PNG acTL: appears more than once (W3C PNG3 §5.6: \"Multiple OK? No\")",
+        ));
+    }
+    let actl_pos = chunks.iter().position(|c| c.is_type(b"acTL"));
+    let idat_pos = chunks.iter().position(|c| c.is_type(b"IDAT"));
+    if let (Some(a), Some(i)) = (actl_pos, idat_pos) {
+        if a > i {
+            return Err(Error::invalid(
+                "PNG acTL: appears after the first IDAT (W3C PNG3 §4.9.1: \
+                 \"an acTL chunk must appear in the stream before any IDAT chunks\")",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// For an APNG file, split it into one packet per animation frame. Each
@@ -595,5 +628,48 @@ mod tests {
     #[test]
     fn demux_rejects_zero_extent_frame() {
         assert!(demux_one_frame_apng(8, 8, &region_fctl(0, 0, 0, 8)).is_err());
+    }
+
+    /// Assemble a raw APNG byte stream with the supplied chunk layout, then
+    /// run only the placement gate over its parsed chunks.
+    fn placement_ok(chunk_types: &[&[u8; 4]]) -> bool {
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&4u32.to_be_bytes());
+        ihdr.extend_from_slice(&4u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        let mut actl = Vec::new();
+        actl.extend_from_slice(&1u32.to_be_bytes());
+        actl.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&PNG_MAGIC);
+        write_chunk(&mut out, b"IHDR", &ihdr);
+        for ty in chunk_types {
+            match *ty {
+                b"acTL" => write_chunk(&mut out, b"acTL", &actl),
+                b"IDAT" => write_chunk(&mut out, b"IDAT", &[0u8]),
+                other => write_chunk(&mut out, other, &[]),
+            }
+        }
+        write_chunk(&mut out, b"IEND", &[]);
+        let chunks = parse_all_chunks(&out).unwrap();
+        validate_apng_chunk_placement(&chunks).is_ok()
+    }
+
+    #[test]
+    fn placement_accepts_actl_before_idat() {
+        assert!(placement_ok(&[b"acTL", b"IDAT"]));
+    }
+
+    #[test]
+    fn placement_rejects_actl_after_idat() {
+        // §4.9.1: acTL must come before any IDAT.
+        assert!(!placement_ok(&[b"IDAT", b"acTL"]));
+    }
+
+    #[test]
+    fn placement_rejects_duplicate_actl() {
+        // §5.6: acTL "Multiple OK? No".
+        assert!(!placement_ok(&[b"acTL", b"acTL", b"IDAT"]));
     }
 }
