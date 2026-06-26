@@ -232,3 +232,102 @@ fn truecolour_over_skips_keyed_rgb() {
     // Pixel 1: opaque → overwrites to (99,88,77).
     assert_eq!(&d[3..6], &[99, 88, 77], "opaque RGB should overwrite");
 }
+
+#[test]
+fn grayscale16_over_skips_keyed_sample() {
+    // 16-bit grayscale, tRNS keys gray 0x1234 as transparent. The canvas is
+    // Gray16Le, so the keyed sample is matched against the little-endian pair.
+    let w = 2u32;
+    let h = 1u32;
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&be32(w));
+    ihdr.extend_from_slice(&be32(h));
+    ihdr.push(16);
+    ihdr.push(0); // grayscale
+    ihdr.push(0);
+    ihdr.push(0);
+    ihdr.push(0);
+    let key = 0x1234u16;
+    let trns = key.to_be_bytes().to_vec(); // ct0: 2-byte big-endian sample
+                                           // 16-bit gray frames: big-endian per sample on the wire.
+    let gray16 = |g: u16| -> Vec<u8> {
+        let mut raw = vec![0u8]; // filter None
+        for _ in 0..w {
+            raw.extend_from_slice(&g.to_be_bytes());
+        }
+        zlib(&raw)
+    };
+    let f0 = gray16(0xABCD);
+    let f1 = gray16(key); // keyed transparent
+    let mut fdat = Vec::new();
+    fdat.extend_from_slice(&be32(2));
+    fdat.extend_from_slice(&f1);
+    let mut png = Vec::new();
+    png.extend_from_slice(&SIG);
+    write_chunk(&mut png, b"IHDR", &ihdr);
+    write_chunk(&mut png, b"acTL", &actl(2));
+    write_chunk(&mut png, b"tRNS", &trns);
+    write_chunk(&mut png, b"fcTL", &fctl_bytes(0, w, h, 0));
+    write_chunk(&mut png, b"IDAT", &f0);
+    write_chunk(&mut png, b"fcTL", &fctl_bytes(1, w, h, 1));
+    write_chunk(&mut png, b"fdAT", &fdat);
+    write_chunk(&mut png, b"IEND", &[]);
+    let anim = decode_apng(&png).expect("decode");
+    let d = &anim.frames[1].image.data;
+    // Canvas is Gray16Le: keyed source leaves frame-0 gray (LE 0xABCD).
+    assert_eq!(
+        u16::from_le_bytes([d[0], d[1]]),
+        0xABCD,
+        "keyed 16-bit gray should leave canvas"
+    );
+}
+
+#[test]
+fn truecolour48_over_skips_keyed_rgb() {
+    // 16-bit RGB, tRNS keys (0x1111, 0x2222, 0x3333) as transparent.
+    let w = 2u32;
+    let h = 1u32;
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&be32(w));
+    ihdr.extend_from_slice(&be32(h));
+    ihdr.push(16);
+    ihdr.push(2); // truecolour
+    ihdr.push(0);
+    ihdr.push(0);
+    ihdr.push(0);
+    let key = [0x1111u16, 0x2222u16, 0x3333u16];
+    let mut trns = Vec::new();
+    for k in key {
+        trns.extend_from_slice(&k.to_be_bytes());
+    }
+    let rgb48 = |rgb: [u16; 3]| -> Vec<u8> {
+        let mut raw = vec![0u8];
+        for _ in 0..w {
+            for c in rgb {
+                raw.extend_from_slice(&c.to_be_bytes());
+            }
+        }
+        zlib(&raw)
+    };
+    let f0 = rgb48([0xAAAA, 0xBBBB, 0xCCCC]);
+    let f1 = rgb48(key); // keyed transparent
+    let mut fdat = Vec::new();
+    fdat.extend_from_slice(&be32(2));
+    fdat.extend_from_slice(&f1);
+    let mut png = Vec::new();
+    png.extend_from_slice(&SIG);
+    write_chunk(&mut png, b"IHDR", &ihdr);
+    write_chunk(&mut png, b"acTL", &actl(2));
+    write_chunk(&mut png, b"tRNS", &trns);
+    write_chunk(&mut png, b"fcTL", &fctl_bytes(0, w, h, 0));
+    write_chunk(&mut png, b"IDAT", &f0);
+    write_chunk(&mut png, b"fcTL", &fctl_bytes(1, w, h, 1));
+    write_chunk(&mut png, b"fdAT", &fdat);
+    write_chunk(&mut png, b"IEND", &[]);
+    let anim = decode_apng(&png).expect("decode");
+    let d = &anim.frames[1].image.data;
+    // Canvas is Rgb48Le: keyed source leaves frame-0 colour (LE per channel).
+    assert_eq!(u16::from_le_bytes([d[0], d[1]]), 0xAAAA, "R kept");
+    assert_eq!(u16::from_le_bytes([d[2], d[3]]), 0xBBBB, "G kept");
+    assert_eq!(u16::from_le_bytes([d[4], d[5]]), 0xCCCC, "B kept");
+}
