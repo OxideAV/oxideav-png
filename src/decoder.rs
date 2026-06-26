@@ -1439,6 +1439,28 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
                 // An fcTL appearing before any IDAT means the default image
                 // doubles as the first animation frame.
                 if !saw_idat {
+                    // W3C PNG3 §11.3.5.1: "The fcTL chunk corresponding to the
+                    // default image, if it exists, has these restrictions: the
+                    // x_offset and y_offset fields must be 0. The width and
+                    // height fields must equal the corresponding fields from
+                    // the IHDR chunk." The default-image fcTL is precisely the
+                    // one that precedes the first IDAT.
+                    if !first_frame_is_default {
+                        if f.x_offset != 0 || f.y_offset != 0 {
+                            return Err(Error::invalid(format!(
+                                "APNG: default-image fcTL must have x_offset=0 \
+                                 y_offset=0, got ({}, {}) (W3C PNG3 §11.3.5.1)",
+                                f.x_offset, f.y_offset
+                            )));
+                        }
+                        if f.width != ihdr.width || f.height != ihdr.height {
+                            return Err(Error::invalid(format!(
+                                "APNG: default-image fcTL dimensions {}x{} must \
+                                 equal IHDR {}x{} (W3C PNG3 §11.3.5.1)",
+                                f.width, f.height, ihdr.width, ihdr.height
+                            )));
+                        }
+                    }
                     first_frame_is_default = true;
                 }
                 current_fctl = Some(f);
@@ -1518,13 +1540,24 @@ pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
     let mut prev_snapshot: Option<Vec<u8>> = None;
     let mut out_frames: Vec<ApngFrameImage> = Vec::new();
 
-    for frame in info.frames.iter() {
+    for (frame_index, frame) in info.frames.iter().enumerate() {
         // W3C PNG3 §11.3.6.1: the frame region (non-zero width/height,
         // x_offset + width ≤ canvas width, y_offset + height ≤ canvas height)
         // "may not fall outside of the default image". Reject a hostile fcTL
         // here rather than relying on the blit/clear clip to silently drop the
         // out-of-canvas pixels.
         frame.fctl.validate_within_canvas(canvas_w, canvas_h)?;
+
+        // W3C PNG3 §11.3.5.1: "If the first fcTL chunk uses a dispose_op of
+        // APNG_DISPOSE_OP_PREVIOUS it should be treated as
+        // APNG_DISPOSE_OP_BACKGROUND." The output buffer is conceptually
+        // cleared before the first frame, so there is no prior state to
+        // revert to; normalise it to a region clear.
+        let effective_dispose = if frame_index == 0 && frame.fctl.dispose_op == Disposal::Previous {
+            Disposal::Background
+        } else {
+            frame.fctl.dispose_op
+        };
 
         // Build a synthetic IHDR-like block for the sub-frame dimensions.
         // Same colour_type / bit_depth / compression / filter / interlace.
@@ -1548,7 +1581,7 @@ pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
         )?;
 
         // Disposal: Previous → snapshot the region pre-draw.
-        if frame.fctl.dispose_op == Disposal::Previous {
+        if effective_dispose == Disposal::Previous {
             prev_snapshot = Some(canvas.clone());
         }
 
@@ -1583,7 +1616,7 @@ pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
         });
 
         // Apply disposal *after* emitting.
-        match frame.fctl.dispose_op {
+        match effective_dispose {
             Disposal::None => {}
             Disposal::Background => {
                 // Clear the sub-region to zeros.

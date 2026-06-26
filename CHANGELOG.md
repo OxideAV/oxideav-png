@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- APNG default-image `fcTL` restrictions (W3C PNG3 §11.3.5.1): when the
+  static image is the first animation frame (an `fcTL` precedes `IDAT`),
+  that `fcTL`'s `x_offset` / `y_offset` must be 0 and its `width` /
+  `height` must equal the IHDR fields. `parse_apng` now rejects a
+  malformed default-image `fcTL`. The restriction is correctly scoped:
+  an `fcTL` appearing *after* `IDAT` (separate static image, not part of
+  the animation) may still carry offsets and a sub-canvas extent.
+
+- APNG first-frame disposal normalisation (W3C PNG3 §11.3.5.1): "If the
+  first fcTL chunk uses a dispose_op of APNG_DISPOSE_OP_PREVIOUS it
+  should be treated as APNG_DISPOSE_OP_BACKGROUND." The compositor now
+  maps a first-frame `Previous` disposal to `Background` (region clear)
+  rather than attempting to revert to a non-existent prior buffer state.
+  Covered by `apng_default_fctl_restrictions.rs`.
+
 - APNG `APNG_BLEND_OP_OVER` compositing at 16-bit-per-channel precision.
   The frame-compositor previously implemented the non-premultiplied OVER
   operation (W3C PNG3 §13.16 "Alpha Channel Processing", referenced by
