@@ -1680,6 +1680,34 @@ fn blit_sub_into_canvas(
                             let a_dst = dst[1] as u32;
                             dst[1] = (a + ((a_dst * inv + 127) / 255)) as u8;
                         }
+                    } else if bpp == 8 && matches!(sub_fmt, PngPixelFormat::Rgba64Le) {
+                        // 16-bit RGBA (or expanded Ya16 → RGBA64) OVER. Samples
+                        // are little-endian per channel: pairs at byte offsets
+                        // 0/2/4 are colour, 6 is alpha. W3C PNG3 §13.16
+                        // "Alpha Channel Processing" describes the non-
+                        // premultiplied OVER referenced by APNG_BLEND_OP_OVER;
+                        // arithmetic is the same shape as the 8-bit path scaled
+                        // to a 65535 denominator.
+                        let a = u16::from_le_bytes([src[6], src[7]]) as u64;
+                        if a == 65535 {
+                            dst.copy_from_slice(src);
+                        } else if a != 0 {
+                            let inv = 65535 - a;
+                            for c in 0..3 {
+                                let off = c * 2;
+                                let fg = u16::from_le_bytes([src[off], src[off + 1]]) as u64;
+                                let bg = u16::from_le_bytes([dst[off], dst[off + 1]]) as u64;
+                                let v = ((fg * a + bg * inv + 32767) / 65535) as u16;
+                                let b = v.to_le_bytes();
+                                dst[off] = b[0];
+                                dst[off + 1] = b[1];
+                            }
+                            let a_dst = u16::from_le_bytes([dst[6], dst[7]]) as u64;
+                            let a_out = (a + (a_dst * inv + 32767) / 65535) as u16;
+                            let ab = a_out.to_le_bytes();
+                            dst[6] = ab[0];
+                            dst[7] = ab[1];
+                        }
                     } else {
                         dst.copy_from_slice(src);
                     }

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- APNG `APNG_BLEND_OP_OVER` compositing at 16-bit-per-channel precision.
+  The frame-compositor previously implemented the non-premultiplied OVER
+  operation (W3C PNG3 §13.16 "Alpha Channel Processing", referenced by
+  the §11.3.5 `blend_op` description) only for 8-bit RGBA and 8-bit
+  gray+alpha canvases; 16-bit canvases (colour type 6 bit depth 16, and
+  colour type 4 bit depth 16 expanded internally to RGBA64) fell through
+  to a Source overwrite, silently dropping the alpha blend. The
+  compositor now blends little-endian 16-bit samples with the same
+  rounded integer OVER arithmetic scaled to a 65535 denominator,
+  including the `a_out = a_src + a_dst·(1 − a_src)` resultant-alpha rule.
+  New `apng_16bit_compositing.rs` pins the partial-alpha blend, the
+  fully-opaque overwrite shortcut, the fully-transparent leave-canvas
+  shortcut, and the gray+alpha-16 path.
+
 - `FilterStrategy::Brute` — whole-image exhaustive filter search (W3C
   PNG3 §12.7: "An encoder could try every combination of filters to find
   what compresses best for a given image … if compression efficiency is
