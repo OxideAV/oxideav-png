@@ -378,6 +378,72 @@ impl OrderTracker {
     }
 }
 
+/// Validate the W3C PNG3 §5.6 / §11.2.3 (RFC 2083 §4.1.3) rule that
+/// "There may be multiple IDAT chunks; if so, they shall appear
+/// consecutively with no other intervening chunks." A decoder
+/// concatenates IDAT payloads into a single zlib stream, so a run broken
+/// by an intervening non-IDAT chunk would silently splice two
+/// logically-separate compressed segments. Tracks the run with a
+/// two-state flag: once an IDAT has been seen and a non-IDAT chunk
+/// follows, any *later* IDAT is non-consecutive.
+fn validate_idat_consecutive(chunks: &[crate::chunk::ChunkRef<'_>]) -> Result<()> {
+    let mut in_idat_run = false;
+    let mut idat_run_closed = false;
+    for c in chunks {
+        if c.is_type(b"IDAT") {
+            if idat_run_closed {
+                return Err(Error::invalid(
+                    "PNG: non-consecutive IDAT chunks \
+                     (W3C PNG3 §5.6: \"Multiple IDAT chunks shall be consecutive\")",
+                ));
+            }
+            in_idat_run = true;
+        } else if in_idat_run {
+            idat_run_closed = true;
+        }
+    }
+    Ok(())
+}
+
+/// Validate the W3C PNG3 §5.6 Table 7 ancillary-chunk ordering buckets
+/// over a parsed chunk list, without parsing any chunk body. Walks the
+/// chunk *types* only, flipping the [`OrderTracker`] as the first `PLTE`
+/// / `IDAT` are crossed, and rejects any recognised ancillary chunk that
+/// lands outside its Table 7 bucket.
+///
+/// Shared by the metadata reader ([`parse_metadata`]) and the APNG
+/// container parser ([`parse_apng`]) so a mis-ordered colour-space /
+/// background / physical-dimension chunk is rejected uniformly on both
+/// the static-image and the animated-image decode paths. (`tIME`,
+/// `tEXt`, `zTXt`, `iTXt` carry no ordering constraint and are skipped;
+/// the APNG control chunks `acTL` / `fcTL` / `fdAT` are policed by their
+/// own §4.9 sequence rules.)
+fn validate_ancillary_ordering(chunks: &[crate::chunk::ChunkRef<'_>]) -> Result<()> {
+    let mut order = OrderTracker::default();
+    for c in chunks {
+        match &c.chunk_type {
+            b"cHRM" => order.before_plte_and_idat("cHRM")?,
+            b"cICP" => order.before_plte_and_idat("cICP")?,
+            b"gAMA" => order.before_plte_and_idat("gAMA")?,
+            b"iCCP" => order.before_plte_and_idat("iCCP")?,
+            b"mDCV" => order.before_plte_and_idat("mDCV")?,
+            b"cLLI" => order.before_plte_and_idat("cLLI")?,
+            b"sBIT" => order.before_plte_and_idat("sBIT")?,
+            b"sRGB" => order.before_plte_and_idat("sRGB")?,
+            b"bKGD" => order.after_plte_before_idat("bKGD")?,
+            b"hIST" => order.after_plte_before_idat("hIST")?,
+            b"tRNS" => order.after_plte_before_idat("tRNS")?,
+            b"eXIf" => order.before_idat("eXIf")?,
+            b"pHYs" => order.before_idat("pHYs")?,
+            b"sPLT" => order.before_idat("sPLT")?,
+            b"PLTE" => order.seen_plte = true,
+            b"IDAT" => order.seen_idat = true,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Extract round-trippable PNG ancillary metadata (`sBIT`, `pHYs`,
 /// `tIME`, `bKGD`, `hIST`, `eXIf`, `sRGB`, `cICP`, `gAMA`, `cHRM`,
 /// `mDCV`, `cLLI`, `sPLT`, `tEXt`, `zTXt`, `iCCP`, `iTXt`) from a
@@ -713,37 +779,20 @@ pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
         }
     }
 
+    // W3C PNG3 §5.6 / §11.2.3: the IDAT run shall be consecutive (the
+    // decoder concatenates IDAT payloads into one zlib stream).
+    validate_idat_consecutive(&chunks)?;
+
     let mut plte: Option<&[u8]> = None;
     let mut trns: Option<&[u8]> = None;
     let mut idat_total_len = 0usize;
-    // W3C PNG3 §5.6 / §11.2.3 (RFC 2083 §4.1.3): "There may be multiple
-    // IDAT chunks; if so, they shall appear consecutively with no other
-    // intervening chunks." The decoder concatenates IDAT payloads into a
-    // single zlib stream, so a non-consecutive run would silently splice
-    // two logically-separate compressed segments — reject it. Track the
-    // run with a small two-state flag: once an IDAT has been seen and a
-    // non-IDAT chunk follows, any *later* IDAT is non-consecutive.
-    let mut in_idat_run = false;
-    let mut idat_run_closed = false;
     for c in &chunks {
-        if c.is_type(b"IDAT") {
-            if idat_run_closed {
-                return Err(Error::invalid(
-                    "PNG: non-consecutive IDAT chunks \
-                     (W3C PNG3 §5.6: \"Multiple IDAT chunks shall be consecutive\")",
-                ));
-            }
-            in_idat_run = true;
-            idat_total_len += c.data.len();
-        } else if in_idat_run {
-            // A non-IDAT chunk after the run closes it.
-            idat_run_closed = true;
-        }
-
         if c.is_type(b"PLTE") {
             plte = Some(c.data);
         } else if c.is_type(b"tRNS") {
             trns = Some(c.data);
+        } else if c.is_type(b"IDAT") {
+            idat_total_len += c.data.len();
         }
     }
     validate_trns(&ihdr, trns, plte)?;
@@ -1516,6 +1565,14 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
             )));
         }
     }
+
+    // W3C PNG3 §5.6 Table 7 ancillary ordering applies to the animated
+    // stream too — an APNG carrying a mis-placed colour-space /
+    // background / physical-dimension chunk is as malformed as a static
+    // PNG. Shared validator with `parse_metadata`.
+    validate_ancillary_ordering(&chunks)?;
+    // §5.6 / §11.2.3: the default image's IDAT run shall be consecutive.
+    validate_idat_consecutive(&chunks)?;
 
     let actl_index = chunks
         .iter()

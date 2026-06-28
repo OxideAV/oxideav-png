@@ -18,7 +18,9 @@
 //! assert `parse_metadata` / `decode_png` reject them, plus matching
 //! positive cases that conformant ordering still parses.
 
-use oxideav_png::{decode_png, encode_png_image, parse_metadata, PngImage, PngPixelFormat};
+use oxideav_png::{
+    decode_png, encode_apng, encode_png_image, parse_apng, parse_metadata, PngImage, PngPixelFormat,
+};
 
 fn rgba_2x2() -> PngImage {
     PngImage {
@@ -329,4 +331,51 @@ fn text_after_idat_accepted() {
     let bytes = splice_before_iend(&base_rgba_png(), &[(b"tEXt", &payload)]);
     let md = parse_metadata(&bytes).expect("tEXt after IDAT parses (Ordering: None)");
     assert_eq!(md.texts.len(), 1);
+}
+
+// =====================================================================
+// APNG container — §5.6 ordering enforced on the animated path too
+// =====================================================================
+
+fn base_apng() -> Vec<u8> {
+    // Two identical RGBA frames; the encoder paints both full-canvas.
+    let f = rgba_2x2();
+    encode_apng(&[f.clone(), f], 10, 0).expect("encode apng")
+}
+
+#[test]
+fn apng_baseline_parses() {
+    let png = base_apng();
+    let info = parse_apng(&png).expect("baseline APNG parses");
+    assert_eq!(info.frames.len(), 2);
+}
+
+#[test]
+fn apng_srgb_after_idat_rejected() {
+    // A colour-space chunk shall precede PLTE/IDAT even in an APNG.
+    let png = base_apng();
+    let bytes = splice_before_iend(&png, &[(b"sRGB", SRGB_PERCEPTUAL)]);
+    assert!(
+        parse_apng(&bytes).is_err(),
+        "sRGB after IDAT must be rejected on the APNG path (§5.6)"
+    );
+}
+
+#[test]
+fn apng_phys_after_idat_rejected() {
+    let png = base_apng();
+    let bytes = splice_before_iend(&png, &[(b"pHYs", PHYS_72DPI)]);
+    assert!(parse_apng(&bytes).is_err());
+}
+
+#[test]
+fn apng_non_consecutive_default_idat_rejected() {
+    // Break the default image's IDAT run with a tIME then a second IDAT.
+    let png = base_apng();
+    let time: &[u8] = &[0x07, 0xE8, 1, 1, 0, 0, 0];
+    let bytes = splice_before_iend(&png, &[(b"tIME", time), (b"IDAT", &[])]);
+    assert!(
+        parse_apng(&bytes).is_err(),
+        "non-consecutive default-image IDAT must be rejected on the APNG path (§5.6)"
+    );
 }
