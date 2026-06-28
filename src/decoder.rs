@@ -716,13 +716,34 @@ pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
     let mut plte: Option<&[u8]> = None;
     let mut trns: Option<&[u8]> = None;
     let mut idat_total_len = 0usize;
+    // W3C PNG3 §5.6 / §11.2.3 (RFC 2083 §4.1.3): "There may be multiple
+    // IDAT chunks; if so, they shall appear consecutively with no other
+    // intervening chunks." The decoder concatenates IDAT payloads into a
+    // single zlib stream, so a non-consecutive run would silently splice
+    // two logically-separate compressed segments — reject it. Track the
+    // run with a small two-state flag: once an IDAT has been seen and a
+    // non-IDAT chunk follows, any *later* IDAT is non-consecutive.
+    let mut in_idat_run = false;
+    let mut idat_run_closed = false;
     for c in &chunks {
+        if c.is_type(b"IDAT") {
+            if idat_run_closed {
+                return Err(Error::invalid(
+                    "PNG: non-consecutive IDAT chunks \
+                     (W3C PNG3 §5.6: \"Multiple IDAT chunks shall be consecutive\")",
+                ));
+            }
+            in_idat_run = true;
+            idat_total_len += c.data.len();
+        } else if in_idat_run {
+            // A non-IDAT chunk after the run closes it.
+            idat_run_closed = true;
+        }
+
         if c.is_type(b"PLTE") {
             plte = Some(c.data);
         } else if c.is_type(b"tRNS") {
             trns = Some(c.data);
-        } else if c.is_type(b"IDAT") {
-            idat_total_len += c.data.len();
         }
     }
     validate_trns(&ihdr, trns, plte)?;

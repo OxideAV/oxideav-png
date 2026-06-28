@@ -18,7 +18,7 @@
 //! assert `parse_metadata` / `decode_png` reject them, plus matching
 //! positive cases that conformant ordering still parses.
 
-use oxideav_png::{encode_png_image, parse_metadata, PngImage, PngPixelFormat};
+use oxideav_png::{decode_png, encode_png_image, parse_metadata, PngImage, PngPixelFormat};
 
 fn rgba_2x2() -> PngImage {
     PngImage {
@@ -277,6 +277,47 @@ fn time_after_idat_accepted() {
     let bytes = splice_before_iend(&base_rgba_png(), &[(b"tIME", time)]);
     let md = parse_metadata(&bytes).expect("tIME after IDAT parses (Ordering: None)");
     assert!(md.time.is_some());
+}
+
+// =====================================================================
+// §5.6 / §11.2.3 — "Multiple IDAT chunks shall be consecutive"
+// =====================================================================
+
+/// Split a single-IDAT PNG so a *non*-IDAT chunk (tIME) lands between
+/// the IDAT run and IEND — but with a second (empty) IDAT after it. The
+/// decode path concatenates IDAT payloads, so a non-consecutive run must
+/// be rejected rather than silently splicing two compressed segments.
+#[test]
+fn non_consecutive_idat_rejected() {
+    let png = base_rgba_png();
+    // Insert a tIME then a second (empty) IDAT before IEND. The original
+    // IDAT run sits earlier; the new IDAT is now non-consecutive.
+    let time: &[u8] = &[0x07, 0xE8, 1, 1, 0, 0, 0];
+    let bytes = splice_before_iend(&png, &[(b"tIME", time), (b"IDAT", &[])]);
+    assert!(
+        decode_png(&bytes).is_err(),
+        "non-consecutive IDAT must be rejected (§5.6)"
+    );
+}
+
+/// A trailing *consecutive* extra IDAT (no intervening chunk) is legal —
+/// the run is unbroken. (Here the extra IDAT is empty and abuts the
+/// real one.)
+#[test]
+fn consecutive_extra_idat_accepted() {
+    let png = base_rgba_png();
+    // Inject an empty IDAT immediately *after* the existing IDAT run by
+    // splicing it before IEND with nothing in between. Find the byte
+    // just past the last IDAT's CRC by locating IEND and inserting the
+    // empty IDAT right before it with no other chunk — still consecutive
+    // because no non-IDAT chunk separates them.
+    let bytes = splice_before_iend(&png, &[(b"IDAT", &[])]);
+    // An empty trailing IDAT contributes no bytes to the zlib stream and
+    // does not break the run, so the image still decodes.
+    assert!(
+        decode_png(&bytes).is_ok(),
+        "consecutive extra (empty) IDAT must still decode (§5.6)"
+    );
 }
 
 #[test]
