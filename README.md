@@ -24,6 +24,21 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   empty decode; and the compression / filter / interlace method bytes
   must be 0 / 0 / 0-or-1. The single gate is shared by `decode_png`,
   `parse_metadata`, `parse_apng`, and the demuxer.
+- Chunk ordering is enforced per W3C PNG3 §5.1 / §5.6 ("Chunks higher up
+  shall appear before chunks lower down"). The shared chunk walker
+  rejects a non-`IHDR` first chunk, a second `IHDR`, and a `PLTE` that
+  does not precede the first `IDAT` (§5.1 / §5.6 Table 7), plus a
+  non-consecutive `IDAT` run (§5.6 / §11.2.3 "Multiple IDAT chunks shall
+  be consecutive" — a run broken by an intervening chunk would silently
+  splice two compressed segments). On top of that the §5.6 Table 7
+  ancillary buckets are policed before any chunk body is parsed:
+  `cHRM` / `cICP` / `gAMA` / `iCCP` / `mDCV` / `cLLI` / `sBIT` / `sRGB`
+  shall come **before PLTE and IDAT**; `bKGD` / `hIST` / `tRNS` shall come
+  **after PLTE (when present) and before IDAT**; `eXIf` / `pHYs` / `sPLT`
+  shall come **before IDAT**; `tIME` / `tEXt` / `zTXt` / `iTXt` carry no
+  ordering constraint. All checks fire uniformly on `parse_metadata`,
+  `parse_apng`, and the container demuxer (the encoder already emits in
+  conformant order, so its own output round-trips).
 - Sub-byte grayscale scaled up to 8-bit (PNG §13.12 ×255 / ×85 / ×17)
 - Sub-byte indexed expanded to one index-byte-per-pixel
 - APNG: `acTL` / `fcTL` / `fdAT` with None/Background/Previous disposal and

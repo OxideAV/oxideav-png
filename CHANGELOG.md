@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Decode-side enforcement of the W3C PNG3 §5.1 / §5.6 chunk-ordering
+  rules ("Chunks higher up shall appear before chunks lower down"). The
+  shared chunk walker rejects a non-`IHDR` first chunk, a duplicate
+  `IHDR`, a `PLTE` that does not precede the first `IDAT`, and a
+  non-consecutive `IDAT` run (§5.6 / §11.2.3). The §5.6 Table 7
+  ancillary buckets are policed before any chunk body is parsed —
+  `cHRM` / `cICP` / `gAMA` / `iCCP` / `mDCV` / `cLLI` / `sBIT` / `sRGB`
+  before PLTE and IDAT; `bKGD` / `hIST` / `tRNS` after PLTE (when
+  present) and before IDAT; `eXIf` / `pHYs` / `sPLT` before IDAT;
+  `tIME` / `tEXt` / `zTXt` / `iTXt` unconstrained. The checks fire
+  uniformly on `parse_metadata`, `parse_apng`, and the container
+  demuxer. New `chunk_ordering_enforcement.rs` integration test (29
+  cases) drives every bucket and both the static and animated paths.
+
 - The region-aware APNG encoder now rejects a non-zero `x_offset` /
   `y_offset` on the first frame when no separate default image is
   supplied (the first frame is then the default-image `fcTL`, which W3C
