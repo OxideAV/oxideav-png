@@ -379,3 +379,71 @@ fn apng_non_consecutive_default_idat_rejected() {
         "non-consecutive default-image IDAT must be rejected on the APNG path (§5.6)"
     );
 }
+
+// =====================================================================
+// Critical-chunk ordering (§5.1 / §5.6): IHDR-first, single IHDR,
+// PLTE-before-IDAT.
+// =====================================================================
+
+/// Splice `chunks` immediately after the 8-byte PNG signature — i.e.
+/// *before* the IHDR chunk.
+fn splice_after_signature(bytes: &[u8], chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    out.extend_from_slice(&bytes[..8]); // signature
+    for (ty, data) in chunks {
+        oxideav_png::chunk::write_chunk(&mut out, ty, data);
+    }
+    out.extend_from_slice(&bytes[8..]);
+    out
+}
+
+#[test]
+fn chunk_before_ihdr_rejected() {
+    // A pHYs ahead of IHDR violates "signature immediately followed by
+    // an IHDR chunk" (§5.1).
+    let bytes = splice_after_signature(&base_rgba_png(), &[(b"pHYs", PHYS_72DPI)]);
+    assert!(
+        parse_metadata(&bytes).is_err(),
+        "a chunk before IHDR must be rejected (§5.1)"
+    );
+    assert!(decode_png(&bytes).is_err());
+}
+
+#[test]
+fn duplicate_ihdr_rejected() {
+    // The IHDR payload of a 2x2 RGBA image, re-spliced after the
+    // signature so two IHDRs precede everything else.
+    let png = base_rgba_png();
+    // IHDR data is the 13 bytes following the "IHDR" type code.
+    let ihdr_pos = png.windows(4).position(|w| w == b"IHDR").expect("IHDR");
+    let ihdr_data = &png[ihdr_pos + 4..ihdr_pos + 4 + 13];
+    let bytes = splice_after_signature(&png, &[(b"IHDR", ihdr_data)]);
+    assert!(
+        parse_metadata(&bytes).is_err(),
+        "a second IHDR must be rejected (§5.1: \"Only one IHDR chunk\")"
+    );
+}
+
+#[test]
+fn plte_after_idat_rejected() {
+    // Splice a PLTE after the IDAT run of a truecolor image (which has
+    // no original PLTE). §5.6 places PLTE "Before first IDAT"; a palette
+    // following the pixel data is rejected.
+    let png = base_rgba_png();
+    let plte: &[u8] = &[0, 0, 0, 255, 255, 255];
+    let bytes = splice_before_iend(&png, &[(b"PLTE", plte)]);
+    assert!(
+        decode_png(&bytes).is_err(),
+        "PLTE after IDAT must be rejected (§5.6 Table 7)"
+    );
+}
+
+#[test]
+fn well_ordered_stream_still_parses() {
+    // The encoder's own output is fully conformant on every gate.
+    let png = base_rgba_png();
+    assert!(decode_png(&png).is_ok());
+    assert!(parse_metadata(&png).is_ok());
+    let pal = base_pal_png();
+    assert!(decode_png(&pal).is_ok());
+}

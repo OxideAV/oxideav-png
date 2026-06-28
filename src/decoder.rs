@@ -297,7 +297,53 @@ pub(crate) fn parse_all_chunks(buf: &[u8]) -> Result<Vec<ChunkRef<'_>>> {
             return Err(Error::invalid("PNG: stream ended before IEND"));
         }
     }
+    validate_critical_ordering(&out)?;
     Ok(out)
+}
+
+/// Enforce the W3C PNG3 §5.6 / §5.1 critical-chunk ordering shared by
+/// every decode entry point. §5.1: "A valid PNG datastream shall begin
+/// with a PNG signature, immediately followed by an IHDR chunk … and
+/// shall end with an IEND chunk. Only one IHDR chunk and one IEND chunk
+/// are allowed." §5.6 Table 7 additionally places `PLTE` "Before first
+/// IDAT".
+///
+/// Concretely this rejects: a chunk before the first `IHDR`; a second
+/// `IHDR`; and a `PLTE` that does not precede the first `IDAT` (a `PLTE`
+/// after `IDAT` would address a palette the pixel stream has already
+/// been decoded against). The walker already guarantees the list ends
+/// at the first `IEND`, so the "shall end with IEND" / "ends before
+/// IEND" arms are handled by [`parse_all_chunks`] itself.
+fn validate_critical_ordering(chunks: &[ChunkRef<'_>]) -> Result<()> {
+    // IHDR shall be first.
+    match chunks.first() {
+        Some(c) if c.is_type(b"IHDR") => {}
+        Some(_) => {
+            return Err(Error::invalid(
+                "PNG: first chunk is not IHDR \
+                 (W3C PNG3 §5.1: signature \"immediately followed by an IHDR chunk\")",
+            ))
+        }
+        None => return Err(Error::invalid("PNG: no chunks")),
+    }
+    // Exactly one IHDR (§5.1: "Only one IHDR chunk … allowed").
+    if chunks.iter().filter(|c| c.is_type(b"IHDR")).count() > 1 {
+        return Err(Error::invalid(
+            "PNG: more than one IHDR chunk (W3C PNG3 §5.1: \"Only one IHDR chunk … allowed\")",
+        ));
+    }
+    // PLTE shall precede the first IDAT (§5.6 Table 7: "Before first IDAT").
+    let first_idat = chunks.iter().position(|c| c.is_type(b"IDAT"));
+    let first_plte = chunks.iter().position(|c| c.is_type(b"PLTE"));
+    if let (Some(plte), Some(idat)) = (first_plte, first_idat) {
+        if plte > idat {
+            return Err(Error::invalid(
+                "PNG: PLTE appears after IDAT \
+                 (W3C PNG3 §5.6 Table 7: PLTE \"Before first IDAT\")",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Walk-position tracker for the W3C PNG3 §5.6 Table 7 chunk-ordering
