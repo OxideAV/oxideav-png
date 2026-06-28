@@ -471,7 +471,7 @@ fn validate_idat_consecutive(chunks: &[crate::chunk::ChunkRef<'_>]) -> Result<()
 /// `tEXt`, `zTXt`, `iTXt` carry no ordering constraint and are skipped;
 /// the APNG control chunks `acTL` / `fcTL` / `fdAT` are policed by their
 /// own §4.9 sequence rules.)
-fn validate_ancillary_ordering(chunks: &[crate::chunk::ChunkRef<'_>]) -> Result<()> {
+pub(crate) fn validate_ancillary_ordering(chunks: &[crate::chunk::ChunkRef<'_>]) -> Result<()> {
     // Whether the stream carries a PLTE at all: the "After PLTE" half of
     // the bKGD / hIST / tRNS bucket is only meaningful when a palette is
     // present (a truecolor image with no PLTE has nothing to trail).

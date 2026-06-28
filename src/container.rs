@@ -26,7 +26,7 @@ use oxideav_core::{ContainerRegistry, Demuxer, Error, Muxer, ProbeData, ReadSeek
 
 use crate::apng::parse_fdat;
 use crate::chunk::{write_chunk, ChunkRef, PNG_MAGIC};
-use crate::decoder::{parse_all_chunks, Ihdr};
+use crate::decoder::{parse_all_chunks, validate_ancillary_ordering, Ihdr};
 use crate::image::PngPixelFormat;
 
 /// Map a [`PngPixelFormat`] back to the framework's pixel-format enum
@@ -79,8 +79,13 @@ fn open_demuxer(
         return Err(Error::invalid("PNG: bad magic"));
     }
 
-    // Walk chunks to classify.
+    // Walk chunks to classify. parse_all_chunks already enforced the
+    // §5.1/§5.6 critical-chunk ordering (IHDR-first, single IHDR,
+    // PLTE-before-IDAT) and the §5.6 consecutive-IDAT rule; police the
+    // §5.6 Table 7 ancillary ordering here too so a demuxed stream is
+    // held to the same standard as the standalone parse_metadata path.
     let chunks = parse_all_chunks(&buf)?;
+    validate_ancillary_ordering(&chunks)?;
     let ihdr = Ihdr::parse(
         chunks
             .iter()
