@@ -210,6 +210,43 @@ fn bkgd_after_idat_rejected() {
 }
 
 #[test]
+fn bkgd_before_plte_rejected() {
+    // On a palette image bKGD shall trail the PLTE ("After PLTE; before
+    // IDAT"). A bKGD spliced ahead of the PLTE is rejected. (bKGD on an
+    // indexed image is a single 1-byte palette index.)
+    let bytes = splice_before_plte(&base_pal_png(), &[(b"bKGD", &[0])]);
+    assert!(
+        parse_metadata(&bytes).is_err(),
+        "bKGD before PLTE must be rejected on a palette image (§5.6)"
+    );
+}
+
+#[test]
+fn hist_before_plte_rejected() {
+    // hIST is one u16 per PLTE entry (4 entries => 8 bytes); placed
+    // ahead of the PLTE it violates the "After PLTE" half.
+    let hist: &[u8] = &[0, 1, 0, 2, 0, 3, 0, 4];
+    let bytes = splice_before_plte(&base_pal_png(), &[(b"hIST", hist)]);
+    assert!(parse_metadata(&bytes).is_err());
+}
+
+#[test]
+fn trns_before_plte_rejected() {
+    // tRNS on a palette image (one alpha byte per entry) shall trail
+    // the PLTE.
+    let bytes = splice_before_plte(&base_pal_png(), &[(b"tRNS", &[0, 128])]);
+    assert!(parse_metadata(&bytes).is_err());
+}
+
+#[test]
+fn bkgd_after_plte_accepted_on_palette() {
+    // The conformant position: bKGD between PLTE and IDAT.
+    let bytes = splice_after_plte(&base_pal_png(), &[(b"bKGD", &[1])]);
+    let md = parse_metadata(&bytes).expect("bKGD after PLTE parses");
+    assert!(md.bkgd.is_some());
+}
+
+#[test]
 fn bkgd_before_idat_accepted() {
     let bytes = splice_before_idat(&base_rgba_png(), &[(b"bKGD", BKGD_RGBA)]);
     let md = parse_metadata(&bytes).expect("bKGD before IDAT parses");

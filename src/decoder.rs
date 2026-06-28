@@ -395,14 +395,21 @@ impl OrderTracker {
     /// `tRNS`. These reference palette entries (or, for the
     /// non-palette colour types that still carry `bKGD` / `tRNS`,
     /// describe the post-palette image), so they shall trail any `PLTE`
-    /// and precede the pixel data. When `PLTE` is present the chunk
-    /// shall not precede it; in every case it shall precede `IDAT`. (A
-    /// missing-`PLTE` requirement for the palette colour type is policed
-    /// separately by the per-chunk parser.)
-    fn after_plte_before_idat(&self, name: &str) -> Result<()> {
+    /// and precede the pixel data. When a `PLTE` is present in the
+    /// stream (`plte_present`) the chunk shall not precede it; in every
+    /// case it shall precede `IDAT`. (A missing-`PLTE` requirement for
+    /// the palette colour type is policed separately by the per-chunk
+    /// parser.)
+    fn after_plte_before_idat(&self, name: &str, plte_present: bool) -> Result<()> {
         if self.seen_idat {
             return Err(Error::invalid(format!(
                 "PNG {name}: chunk appears after IDAT \
+                 (W3C PNG3 §5.6 Table 7: \"After PLTE; before IDAT\")",
+            )));
+        }
+        if plte_present && !self.seen_plte {
+            return Err(Error::invalid(format!(
+                "PNG {name}: chunk appears before PLTE \
                  (W3C PNG3 §5.6 Table 7: \"After PLTE; before IDAT\")",
             )));
         }
@@ -465,6 +472,10 @@ fn validate_idat_consecutive(chunks: &[crate::chunk::ChunkRef<'_>]) -> Result<()
 /// the APNG control chunks `acTL` / `fcTL` / `fdAT` are policed by their
 /// own §4.9 sequence rules.)
 fn validate_ancillary_ordering(chunks: &[crate::chunk::ChunkRef<'_>]) -> Result<()> {
+    // Whether the stream carries a PLTE at all: the "After PLTE" half of
+    // the bKGD / hIST / tRNS bucket is only meaningful when a palette is
+    // present (a truecolor image with no PLTE has nothing to trail).
+    let plte_present = chunks.iter().any(|c| c.is_type(b"PLTE"));
     let mut order = OrderTracker::default();
     for c in chunks {
         match &c.chunk_type {
@@ -476,9 +487,9 @@ fn validate_ancillary_ordering(chunks: &[crate::chunk::ChunkRef<'_>]) -> Result<
             b"cLLI" => order.before_plte_and_idat("cLLI")?,
             b"sBIT" => order.before_plte_and_idat("sBIT")?,
             b"sRGB" => order.before_plte_and_idat("sRGB")?,
-            b"bKGD" => order.after_plte_before_idat("bKGD")?,
-            b"hIST" => order.after_plte_before_idat("hIST")?,
-            b"tRNS" => order.after_plte_before_idat("tRNS")?,
+            b"bKGD" => order.after_plte_before_idat("bKGD", plte_present)?,
+            b"hIST" => order.after_plte_before_idat("hIST", plte_present)?,
+            b"tRNS" => order.after_plte_before_idat("tRNS", plte_present)?,
             b"eXIf" => order.before_idat("eXIf")?,
             b"pHYs" => order.before_idat("pHYs")?,
             b"sPLT" => order.before_idat("sPLT")?,
@@ -555,25 +566,27 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
         })
         .transpose()?;
 
+    // §5.6 Table 7 ancillary-chunk ordering (and the §5.6 "After PLTE"
+    // half for bKGD / hIST / tRNS, which needs whole-stream PLTE
+    // lookahead) is validated up front by the shared body-free walker
+    // before any chunk body is parsed.
+    validate_ancillary_ordering(&chunks)?;
+
     let mut out = PngMetadata::default();
     // Tracks whether the chunk walk has passed the first `IDAT` chunk
     // yet, so an unrecognised ancillary chunk can be recorded on the
     // correct side of `IDAT` (W3C PNG3 §14.2: a safe-to-copy chunk
     // "shall not be moved from before IDAT to after IDAT or vice versa").
     let mut after_idat = false;
-    // §5.6 Table 7 positional buckets (relative to the first PLTE / IDAT).
-    let mut order = OrderTracker::default();
     for c in &chunks {
         match &c.chunk_type {
             b"sBIT" => {
-                order.before_plte_and_idat("sBIT")?;
                 if out.sbit.is_some() {
                     return Err(Error::invalid("PNG: duplicate sBIT chunk"));
                 }
                 out.sbit = Some(Sbit::parse(c.data, ihdr.colour_type, sample_depth)?);
             }
             b"pHYs" => {
-                order.before_idat("pHYs")?;
                 if out.phys.is_some() {
                     return Err(Error::invalid("PNG: duplicate pHYs chunk"));
                 }
@@ -586,7 +599,6 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                 out.time = Some(Time::parse(c.data)?);
             }
             b"bKGD" => {
-                order.after_plte_before_idat("bKGD")?;
                 if out.bkgd.is_some() {
                     return Err(Error::invalid("PNG: duplicate bKGD chunk"));
                 }
@@ -609,7 +621,6 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                 out.bkgd = Some(b);
             }
             b"hIST" => {
-                order.after_plte_before_idat("hIST")?;
                 if out.hist.is_some() {
                     return Err(Error::invalid("PNG: duplicate hIST chunk"));
                 }
@@ -625,7 +636,6 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                 // (Trns::parse enforces both). For colour type 3 the
                 // chunk length is bounded by the PLTE entry count;
                 // missing PLTE on ct=3 is itself an error.
-                order.after_plte_before_idat("tRNS")?;
                 if out.trns.is_some() {
                     return Err(Error::invalid("PNG: duplicate tRNS chunk"));
                 }
@@ -637,35 +647,30 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                 )?);
             }
             b"eXIf" => {
-                order.before_idat("eXIf")?;
                 if out.exif.is_some() {
                     return Err(Error::invalid("PNG: duplicate eXIf chunk"));
                 }
                 out.exif = Some(Exif::parse(c.data)?);
             }
             b"sRGB" => {
-                order.before_plte_and_idat("sRGB")?;
                 if out.srgb.is_some() {
                     return Err(Error::invalid("PNG: duplicate sRGB chunk"));
                 }
                 out.srgb = Some(Srgb::parse(c.data)?);
             }
             b"cICP" => {
-                order.before_plte_and_idat("cICP")?;
                 if out.cicp.is_some() {
                     return Err(Error::invalid("PNG: duplicate cICP chunk"));
                 }
                 out.cicp = Some(Cicp::parse(c.data)?);
             }
             b"gAMA" => {
-                order.before_plte_and_idat("gAMA")?;
                 if out.gama.is_some() {
                     return Err(Error::invalid("PNG: duplicate gAMA chunk"));
                 }
                 out.gama = Some(Gama::parse(c.data)?);
             }
             b"cHRM" => {
-                order.before_plte_and_idat("cHRM")?;
                 if out.chrm.is_some() {
                     return Err(Error::invalid("PNG: duplicate cHRM chunk"));
                 }
@@ -678,7 +683,6 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                 // a §11.3.2.7 reader interprets *together with* cICP);
                 // we round-trip the bytes verbatim and leave that
                 // policy choice to the caller.
-                order.before_plte_and_idat("mDCV")?;
                 if out.mdcv.is_some() {
                     return Err(Error::invalid("PNG: duplicate mDCV chunk"));
                 }
@@ -691,7 +695,6 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                 // verbatim. A zero value is the spec's "unknown / not
                 // currently calculable" sentinel (§11.3.2.8); the codec
                 // preserves it rather than rejecting.
-                order.before_plte_and_idat("cLLI")?;
                 if out.clli.is_some() {
                     return Err(Error::invalid("PNG: duplicate cLLI chunk"));
                 }
@@ -701,7 +704,6 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                 // Multiple sPLT chunks are permitted, but each shall have
                 // a distinct palette name (W3C PNG3 §11.3.4.4 final
                 // paragraph). Reject a repeated name.
-                order.before_idat("sPLT")?;
                 let splt = Splt::parse(c.data)?;
                 if out.splt.iter().any(|s| s.name == splt.name) {
                     return Err(Error::invalid(format!(
@@ -732,7 +734,6 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                 // §4.3 colour-chunk table (cICP `1` > iCCP `2`); the
                 // codec keeps them as independent fields and leaves
                 // policy to the caller.
-                order.before_plte_and_idat("iCCP")?;
                 if out.iccp.is_some() {
                     return Err(Error::invalid("PNG: duplicate iCCP chunk"));
                 }
@@ -749,15 +750,12 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
             }
             // Critical chunks + the APNG control chunks are understood by
             // the codec elsewhere (decode / parse_apng); they are not
-            // metadata and never become an `UnknownChunk`. `IDAT` also
-            // flips the before/after-IDAT tracker for any later unknown
-            // ancillary chunk.
-            b"IHDR" | b"IEND" | b"acTL" | b"fcTL" | b"fdAT" => {}
-            b"PLTE" => order.seen_plte = true,
-            b"IDAT" => {
-                after_idat = true;
-                order.seen_idat = true;
-            }
+            // metadata and never become an `UnknownChunk`. `IDAT` flips
+            // the before/after-IDAT tracker for any later unknown
+            // ancillary chunk. (Positional §5.6 ordering was already
+            // validated up front by `validate_ancillary_ordering`.)
+            b"IHDR" | b"IEND" | b"acTL" | b"fcTL" | b"fdAT" | b"PLTE" => {}
+            b"IDAT" => after_idat = true,
             // Any remaining 4-byte type is one the codec does not parse.
             // W3C PNG3 §14.2: an unrecognised *critical* chunk (§5.4
             // ancillary bit clear) is a hard error — "PNG editors shall
