@@ -402,8 +402,27 @@ fn crc_tables() -> &'static CrcTables {
 /// shorter than one slice block (or the trailing remainder of a longer one)
 /// fall back to the classic single-byte loop.
 pub fn crc32(bytes: &[u8]) -> u32 {
+    crc32_update(CRC32_INIT, bytes) ^ 0xFFFF_FFFF
+}
+
+/// The pre-conditioning value a CRC-32 register starts from (all-ones),
+/// before any input has been folded in. Pair with [`crc32_update`] and a
+/// final `^ 0xFFFF_FFFF` to reproduce [`crc32`] incrementally — useful when
+/// the CRC input is spread across two non-contiguous slices (chunk type then
+/// chunk data) and materialising a concatenated buffer would waste an
+/// allocation.
+pub const CRC32_INIT: u32 = 0xFFFF_FFFF;
+
+/// Fold `bytes` into a running (un-finalised) CRC-32 register and return the
+/// updated register. Start from [`CRC32_INIT`], call this once per input
+/// slice, then XOR the result with `0xFFFF_FFFF` to obtain the final CRC.
+/// `crc32(a ++ b)` equals
+/// `crc32_update(crc32_update(CRC32_INIT, a), b) ^ 0xFFFF_FFFF`.
+///
+/// Uses the slice-by-[`CRC_SLICES`] algorithm (see [`crc32`]); the register
+/// is *not* inverted here so the state can be threaded across calls.
+pub fn crc32_update(mut c: u32, bytes: &[u8]) -> u32 {
     let tables = crc_tables();
-    let mut c: u32 = 0xFFFF_FFFF;
 
     let mut chunks = bytes.chunks_exact(CRC_SLICES);
     for block in &mut chunks {
@@ -427,7 +446,7 @@ pub fn crc32(bytes: &[u8]) -> u32 {
     for &b in chunks.remainder() {
         c = tbl[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8);
     }
-    c ^ 0xFFFF_FFFF
+    c
 }
 
 /// Same but with `once_cell` avoided — pure-loop crc32 for tiny use cases.
@@ -476,6 +495,37 @@ mod tests {
             let bitwise = crc32_loop(&buf[..len]);
             assert_eq!(fast, bitwise, "CRC mismatch at length {len}");
         }
+    }
+
+    #[test]
+    fn crc_incremental_matches_contiguous() {
+        // The two-slice incremental path (chunk type then chunk data) must
+        // reproduce crc32 over the concatenation exactly — this is the
+        // property write_chunk relies on to skip the concat allocation.
+        let mut state = 0x0bad_f00du32;
+        let mut buf = [0u8; 300];
+        for b in buf.iter_mut() {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *b = (state & 0xff) as u8;
+        }
+        // Sweep the split point across block boundaries so both slices
+        // exercise full-block and remainder cases.
+        for split in [0usize, 1, 4, 15, 16, 17, 31, 100, 299, 300] {
+            let (a, b) = buf.split_at(split);
+            let incremental = crc32_update(crc32_update(CRC32_INIT, a), b) ^ 0xFFFF_FFFF;
+            let contiguous = crc32(&buf);
+            assert_eq!(incremental, contiguous, "split {split}");
+        }
+        // The canonical PNG use: 4-byte type + data.
+        let ty = *b"IDAT";
+        let data = &buf[..64];
+        let mut concat = Vec::new();
+        concat.extend_from_slice(&ty);
+        concat.extend_from_slice(data);
+        let incremental = crc32_update(crc32_update(CRC32_INIT, &ty), data) ^ 0xFFFF_FFFF;
+        assert_eq!(incremental, crc32(&concat));
     }
 
     #[test]

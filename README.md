@@ -670,7 +670,10 @@ optimisation changes against a stable baseline:
   reference across every length up to several block boundaries). Measured
   ≈5.8× throughput on 1 MiB buffers (≈0.5 → ≈2.9 GiB/s) and ≈6× on 64 B
   chunks; buffers below one 16-byte block fall back to the classic
-  single-byte loop.
+  single-byte loop. A `chunk_crc` scenario compares the two `write_chunk`
+  CRC shapes — concatenating `type ++ data` into a scratch `Vec` vs.
+  threading the CRC register across the two slices with `crc32_update`
+  (no allocation) — showing ≈42% / ≈26% wins on 13 B / 256 B chunks.
 
 Each scenario synthesises a fresh input on the fly with the public
 encoder API — no committed fixture files — so the benches reproduce

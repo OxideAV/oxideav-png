@@ -12,7 +12,7 @@
 //! The 8-byte magic `\x89PNG\r\n\x1a\n` precedes the first chunk.
 
 use crate::error::{PngError as Error, Result};
-use crate::filter::crc32;
+use crate::filter::{crc32, crc32_update, CRC32_INIT};
 
 /// PNG file magic.
 pub const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
@@ -381,11 +381,9 @@ pub fn write_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(chunk_type);
     out.extend_from_slice(data);
-    // CRC over type + data.
-    let mut crc_input = Vec::with_capacity(4 + data.len());
-    crc_input.extend_from_slice(chunk_type);
-    crc_input.extend_from_slice(data);
-    let c = crc32(&crc_input);
+    // CRC over type + data, computed incrementally so the type and data
+    // slices feed the CRC directly — no throwaway concat buffer per chunk.
+    let c = crc32_update(crc32_update(CRC32_INIT, chunk_type), data) ^ 0xFFFF_FFFF;
     out.extend_from_slice(&c.to_be_bytes());
 }
 

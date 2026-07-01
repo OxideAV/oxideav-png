@@ -286,9 +286,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   buffers (≈0.5 → ≈2.9 GiB/s) and ≈6× on 64 B / 1 KiB inputs. Buffers
   below one 16-byte block fall back to the classic single-byte loop.
 
+- `chunk::write_chunk` now computes each chunk's CRC incrementally
+  (`filter::crc32_update` / `CRC32_INIT`) over the type slice then the
+  data slice, rather than concatenating `type ++ data` into a throwaway
+  `Vec` first. This removes one heap allocation + copy per chunk emitted.
+  The `chunk_crc` bench scenario measures the concat-vs-incremental gap at
+  ≈42% (13 B chunk) / ≈26% (256 B) — larger the smaller the chunk, since
+  the eliminated cost is the fixed allocation. Output is byte-identical
+  (every encode→decode roundtrip test re-validates the emitted CRC on the
+  decode side); a `crc_incremental_matches_contiguous` unit test asserts
+  `crc32_update(crc32_update(INIT, a), b) ^ 0xFFFF_FFFF == crc32(a ++ b)`
+  across split points spanning several block boundaries.
+
 - New `crc` criterion bench (`benches/crc.rs`) drives `crc32` over
   8 B … 1 MiB buffers so the CRC inner loop can be A/B-ed in isolation
-  from the surrounding chunk walk and DEFLATE cost.
+  from the surrounding chunk walk and DEFLATE cost, plus a `chunk_crc`
+  scenario comparing the concat and incremental CRC shapes.
 
 ### Other
 

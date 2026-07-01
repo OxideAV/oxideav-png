@@ -16,7 +16,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use oxideav_png::filter::crc32;
+use oxideav_png::filter::{crc32, crc32_update, CRC32_INIT};
 
 /// Deterministic pseudo-random fill so the table-index distribution is
 /// realistic (a flat ramp would hammer a narrow slice of the table).
@@ -51,5 +51,40 @@ fn bench_crc32(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_crc32);
+/// Model the `write_chunk` CRC: 4-byte type + data. The `concat` variant
+/// materialises `type ++ data` in a fresh Vec (the pre-optimisation shape);
+/// the `incremental` variant threads the CRC register across the two slices
+/// with no allocation. Both must yield identical CRCs.
+fn bench_chunk_crc(c: &mut Criterion) {
+    let sizes = [
+        ("data=13B", 13usize), // e.g. IHDR
+        ("data=256B", 256),
+        ("data=8KiB", 8 * 1024), // a typical split IDAT
+    ];
+    let ty = *b"IDAT";
+    let mut g = c.benchmark_group("chunk_crc");
+    for (label, n) in sizes {
+        let mut data = vec![0u8; n];
+        fill(&mut data, 0x1234_abcd);
+        g.throughput(Throughput::Bytes((n + 4) as u64));
+
+        g.bench_function(BenchmarkId::new("concat", label), |b| {
+            b.iter(|| {
+                let mut buf = Vec::with_capacity(4 + data.len());
+                buf.extend_from_slice(&ty);
+                buf.extend_from_slice(&data);
+                criterion::black_box(crc32(&buf))
+            });
+        });
+        g.bench_function(BenchmarkId::new("incremental", label), |b| {
+            b.iter(|| {
+                let c = crc32_update(crc32_update(CRC32_INIT, &ty), &data) ^ 0xFFFF_FFFF;
+                criterion::black_box(c)
+            });
+        });
+    }
+    g.finish();
+}
+
+criterion_group!(benches, bench_crc32, bench_chunk_crc);
 criterion_main!(benches);
