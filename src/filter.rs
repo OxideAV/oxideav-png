@@ -348,13 +348,30 @@ impl FilterStrategy {
 
 use std::sync::OnceLock;
 
-static CRC_TABLE: OnceLock<[u32; 256]> = OnceLock::new();
+/// Number of interleaved slices processed per iteration by the fast CRC-32
+/// inner loop. Sixteen bytes at a time keeps sixteen independent table
+/// lookups in flight so the CPU can overlap their latencies, while the
+/// table set (`SLICES * 256` `u32` = 16 KiB) still fits comfortably in L1.
+const CRC_SLICES: usize = 16;
 
-fn crc_table() -> &'static [u32; 256] {
-    CRC_TABLE.get_or_init(|| {
-        let mut t = [0u32; 256];
-        for n in 0..256u32 {
-            let mut c = n;
+/// The slice-by-N table set. `TABLES[0]` is the classic byte-at-a-time
+/// CRC-32 table for the reflected `0xEDB88320` polynomial; each subsequent
+/// table `TABLES[k]` is derived by advancing every `TABLES[k-1]` entry one
+/// more byte position through the same polynomial. Feeding `CRC_SLICES`
+/// consecutive input bytes through `TABLES[CRC_SLICES-1 - i]` and XOR-ing
+/// the results reproduces exactly the byte-at-a-time recurrence — the
+/// output is bit-identical, only the arithmetic is reorganised so more of
+/// it runs in parallel.
+type CrcTables = [[u32; 256]; CRC_SLICES];
+
+static CRC_TABLES: OnceLock<CrcTables> = OnceLock::new();
+
+fn crc_tables() -> &'static CrcTables {
+    CRC_TABLES.get_or_init(|| {
+        let mut t: CrcTables = [[0u32; 256]; CRC_SLICES];
+        // Base table: the reflected polynomial recurrence, one byte.
+        for (n, slot) in t[0].iter_mut().enumerate() {
+            let mut c = n as u32;
             for _ in 0..8 {
                 if c & 1 != 0 {
                     c = 0xEDB8_8320 ^ (c >> 1);
@@ -362,17 +379,52 @@ fn crc_table() -> &'static [u32; 256] {
                     c >>= 1;
                 }
             }
-            t[n as usize] = c;
+            *slot = c;
+        }
+        // Each higher table advances the previous one by one more byte:
+        // TABLES[k][n] = TABLES[0][ TABLES[k-1][n] & 0xFF ] ^ (TABLES[k-1][n] >> 8).
+        for k in 1..CRC_SLICES {
+            for n in 0..256 {
+                let prev = t[k - 1][n];
+                t[k][n] = t[0][(prev & 0xFF) as usize] ^ (prev >> 8);
+            }
         }
         t
     })
 }
 
 /// PNG CRC32 (IEEE 802.3 polynomial, start with 0xFFFFFFFF, invert result).
+///
+/// Uses the slice-by-[`CRC_SLICES`] algorithm: `CRC_SLICES` input bytes are
+/// consumed per iteration through independent tables and combined with XOR,
+/// which exposes far more instruction-level parallelism than the
+/// byte-at-a-time recurrence while producing bit-identical output. Buffers
+/// shorter than one slice block (or the trailing remainder of a longer one)
+/// fall back to the classic single-byte loop.
 pub fn crc32(bytes: &[u8]) -> u32 {
-    let tbl = crc_table();
+    let tables = crc_tables();
     let mut c: u32 = 0xFFFF_FFFF;
-    for &b in bytes {
+
+    let mut chunks = bytes.chunks_exact(CRC_SLICES);
+    for block in &mut chunks {
+        // Fold the running CRC into the first four input bytes (little-endian,
+        // matching the reflected polynomial's bit order) before indexing.
+        let a = c ^ u32::from_le_bytes([block[0], block[1], block[2], block[3]]);
+        c = tables[CRC_SLICES - 1][(a & 0xFF) as usize]
+            ^ tables[CRC_SLICES - 2][((a >> 8) & 0xFF) as usize]
+            ^ tables[CRC_SLICES - 3][((a >> 16) & 0xFF) as usize]
+            ^ tables[CRC_SLICES - 4][((a >> 24) & 0xFF) as usize];
+        // Remaining slice bytes fold in directly through their own tables.
+        let mut i = 4;
+        while i < CRC_SLICES {
+            c ^= tables[CRC_SLICES - 1 - i][block[i] as usize];
+            i += 1;
+        }
+    }
+
+    // Tail: fewer than CRC_SLICES bytes left — classic byte-at-a-time.
+    let tbl = &tables[0];
+    for &b in chunks.remainder() {
         c = tbl[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8);
     }
     c ^ 0xFFFF_FFFF
@@ -402,6 +454,46 @@ mod tests {
         assert_eq!(a, b);
         // Known value: CRC32 of "IEND" chunk type (empty payload) — well-known.
         assert_eq!(a, 0xAE42_6082);
+    }
+
+    #[test]
+    fn crc_slice_matches_bitwise_across_lengths() {
+        // The slice-by-N fast path only engages once the buffer reaches a
+        // full CRC_SLICES block, and the tail loop handles the remainder;
+        // sweep lengths across several block boundaries (0..=200) so both
+        // the block loop and every remainder size are exercised against the
+        // bit-serial reference `crc32_loop`.
+        let mut state = 0x1234_5678u32;
+        let mut buf = [0u8; 200];
+        for b in buf.iter_mut() {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *b = (state & 0xff) as u8;
+        }
+        for len in 0..=buf.len() {
+            let fast = crc32(&buf[..len]);
+            let bitwise = crc32_loop(&buf[..len]);
+            assert_eq!(fast, bitwise, "CRC mismatch at length {len}");
+        }
+    }
+
+    #[test]
+    fn crc_slice_matches_bitwise_all_ones_and_zeros() {
+        // Degenerate table-index distributions (all 0x00, all 0xFF) can
+        // surface an off-by-one in the per-slice table selection that a
+        // pseudo-random fill would mask. Check both across a full block
+        // plus a partial one.
+        for &byte in &[0x00u8, 0xFF] {
+            for len in [15usize, 16, 17, 31, 32, 33, 48] {
+                let buf = vec![byte; len];
+                assert_eq!(
+                    crc32(&buf),
+                    crc32_loop(&buf),
+                    "CRC mismatch: byte {byte:#04x} len {len}"
+                );
+            }
+        }
     }
 
     #[test]

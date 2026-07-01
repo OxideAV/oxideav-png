@@ -268,6 +268,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on `Rgba64Le`, the non-16-bit rejection, wider-stride padding
   preservation, and the zero-`gAMA` / non-positive-factor no-ops.
 
+### Changed
+
+- The chunk CRC-32 (`filter::crc32`, RFC 2083 §5.5) now uses the
+  slice-by-16 algorithm: sixteen input bytes are consumed per iteration
+  through sixteen independent lookup tables (derived from the base
+  `0xEDB88320`-reflected table) and combined with XOR, which exposes far
+  more instruction-level parallelism than the byte-at-a-time recurrence.
+  Output is bit-identical to the previous byte-at-a-time table loop — a
+  new `crc_slice_matches_bitwise_across_lengths` test verifies equality
+  against the bit-serial reference `crc32_loop` at every length from 0 to
+  200 (crossing several 16-byte block boundaries and every remainder
+  size), plus an all-`0x00` / all-`0xFF` degenerate-input check. The CRC
+  runs over every chunk's type + data on both decode (validation) and
+  encode (emission), so on an IDAT-heavy image it is an O(file-size)
+  cost. Measured throughput on the new `crc` bench: ≈5.8× on 1 MiB
+  buffers (≈0.5 → ≈2.9 GiB/s) and ≈6× on 64 B / 1 KiB inputs. Buffers
+  below one 16-byte block fall back to the classic single-byte loop.
+
+- New `crc` criterion bench (`benches/crc.rs`) drives `crc32` over
+  8 B … 1 MiB buffers so the CRC inner loop can be A/B-ed in isolation
+  from the surrounding chunk walk and DEFLATE cost.
+
 ### Other
 
 - fuzz: `metadata_chunk_splice` target — build a valid 8x8 base PNG

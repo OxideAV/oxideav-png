@@ -639,7 +639,7 @@ cargo +nightly fuzz run decode
 
 ## Benchmarks
 
-Three criterion harnesses live under `benches/` for A/B-testing
+Five criterion harnesses live under `benches/` for A/B-testing
 optimisation changes against a stable baseline:
 
 - `decode` — every supported pixel layout at "natural" sizes (1920×1080
@@ -655,6 +655,22 @@ optimisation changes against a stable baseline:
 - `roundtrip` — paired encode → decode at the same sizes, so a perf
   regression that silently mis-encodes surfaces as a panic rather than
   a deceptively-cheaper number.
+- `filter` — the §6 per-row reconstruct (`unfilter_row`) and the §12.8
+  filter heuristic (`choose_filter_heuristic` / `filter_row`) driven
+  directly over a full image's rows, so filter-loop changes are visible
+  without inflate noise.
+- `crc` — the RFC 2083 §5.5 chunk CRC-32 (`crc32`) over 8 B … 1 MiB
+  buffers. The CRC runs over every chunk's type + data on both decode
+  (validation) and encode (emission), so on an IDAT-heavy image it is an
+  O(file-size) cost. The inner loop uses the slice-by-16 algorithm:
+  sixteen input bytes are consumed per iteration through sixteen
+  independent tables and combined with XOR, exposing far more
+  instruction-level parallelism than the byte-at-a-time recurrence while
+  producing **bit-identical** output (verified against a bit-serial
+  reference across every length up to several block boundaries). Measured
+  ≈5.8× throughput on 1 MiB buffers (≈0.5 → ≈2.9 GiB/s) and ≈6× on 64 B
+  chunks; buffers below one 16-byte block fall back to the classic
+  single-byte loop.
 
 Each scenario synthesises a fresh input on the fly with the public
 encoder API — no committed fixture files — so the benches reproduce
@@ -664,6 +680,8 @@ from a clean checkout.
 cargo bench -p oxideav-png --bench decode
 cargo bench -p oxideav-png --bench encode
 cargo bench -p oxideav-png --bench roundtrip
+cargo bench -p oxideav-png --bench filter
+cargo bench -p oxideav-png --bench crc
 ```
 
 ## Usage

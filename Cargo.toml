@@ -66,3 +66,7 @@ harness = false
 [[bench]]
 name = "filter"
 harness = false
+
+[[bench]]
+name = "crc"
+harness = false
