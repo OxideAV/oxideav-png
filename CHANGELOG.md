@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- New `depth` module implementing W3C PNG3 §12.4 sample-depth scaling and
+  §13.12 sample-depth rescaling. Pure primitives `rescale_sample` (the
+  linear `floor(input × max_out / max_in + 0.5)` equation),
+  `scale_up_bit_replication` (§12.4 left bit replication, matching the
+  spec's `27@5bit → 222@8bit` worked example and property-tested to stay
+  within one of linear across every depth pair), `scale_up_zero_fill`,
+  and `recover_sbit` (§13.12 significant-bit recovery by right shift).
+  Decoder conveniences `rescale_16bit_to_8bit` /
+  `rescale_16bit_to_8bit_via_sbit` accurately reduce a decoded 16-bit
+  `PngImage` (`Gray16Le` / `Rgb48Le` / `Rgba64Le`) to 8 bits, the latter
+  first recovering each channel's `sBIT` significant bits. Covered by 26
+  unit tests, a `tests/depth_rescale.rs` integration suite driving the
+  real encode → decode path, a `depth` criterion bench, and an extension
+  to the `decode` fuzz target's liveness contract. No behavioural change
+  to existing decode / encode paths.
+
 - Decode-side enforcement of the W3C PNG3 §5.1 / §5.6 chunk-ordering
   rules ("Chunks higher up shall appear before chunks lower down"). The
   shared chunk walker rejects a non-`IHDR` first chunk, a duplicate

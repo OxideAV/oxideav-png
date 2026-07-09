@@ -514,6 +514,39 @@ instances are explicitly permitted (§4.2.7 ¶3 / §4.2.10 ¶6 /
   invariants. The new entry point is also folded into the `decode` fuzz
   target (both the chunk-resolution and override arms).
 
+- Sample-depth scaling (W3C PNG3 §12.4 "Sample depth scaling" / §13.12
+  "Sample depth rescaling") — the `depth` module moves a sample between
+  bit depths. It exposes the three spec methods as pure primitives:
+  `rescale_sample` is the "most accurate" linear equation
+  `floor(input × max_out / max_in + 0.5)` (u64-safe rounding, covering
+  scale-up, scale-down and identity in one function);
+  `scale_up_bit_replication` is §12.4 left bit replication (the spec's
+  worked example scales the 5-bit `27` = `11011` up to the 8-bit `222` =
+  `11011110`, "never off by more than one" from linear — a property test
+  confirms this across every from/to depth pair); `scale_up_zero_fill`
+  is the §12.4 "distinctly less accurate" left shift (documented as
+  not-for-alpha since it cannot reproduce an all-ones maximum); and
+  `recover_sbit` performs the §13.12 significant-bit recovery
+  (`sample >> (stored_bits − sbit)`) — because the encoder is required
+  to preserve the high-order bits when it writes `sBIT`, this shift round
+  -trips every §12.4 scale-up method back to the reference sample.
+  Layered on top, `rescale_16bit_to_8bit` accurately reduces a decoded
+  16-bit `PngImage` to its 8-bit counterpart (`Gray16Le` → `Gray8`,
+  `Rgb48Le` → `Rgb24`, `Rgba64Le` → `Rgba`) — every colour **and** alpha
+  sample rescaled linearly (a depth reduction, distinct from gamma per
+  §13.16), endpoints exact (`0 → 0`, `65535 → 255`, mid-scale
+  `0x8000 → 128` rather than the low-byte-discard shortcut), stride
+  padding dropped. `rescale_16bit_to_8bit_via_sbit` first recovers each
+  channel's `sBIT` significant bits before scaling — "using sBIT to
+  recover the original samples before scaling them to suit the display
+  often yields a more accurate display than ignoring sBIT" (§13.12); a
+  channel with `S = 16` (or an `Sbit` variant that doesn't match the
+  pixel format) falls back to the plain linear path. An 8-bit input is
+  returned unchanged. An integration suite (`tests/depth_rescale.rs`)
+  drives the whole chain through the real encode → decode path; the pure
+  primitives and the 16→8 reduction are also folded into the `decode`
+  fuzz target's liveness contract.
+
 ## Chunk naming property bits
 
 `ChunkType` wraps a four-byte chunk name and exposes the W3C PNG 3rd
@@ -568,7 +601,12 @@ The decoder is fuzzed with `cargo-fuzz`. Nine targets live under `fuzz/`:
   `parse_apng`, `decode_apng`) and asserts none of them ever panic /
   abort / overflow / OOM. Covers chunk-CRC framing, the IDAT zlib stream,
   per-row filters, sub-byte unpacking, Adam7 interlacing, PLTE/tRNS
-  bounds, and the APNG container's disposal / blend paths.
+  bounds, and the APNG container's disposal / blend paths. Also drives
+  the §12.4 / §13.12 sample-depth primitives (`rescale_sample` /
+  `scale_up_bit_replication` / `scale_up_zero_fill` / `recover_sbit`)
+  with fuzz-derived depth pairs and the `rescale_16bit_to_8bit` /
+  `_via_sbit` reduction over any successfully decoded image — pure
+  integer arithmetic that must never overflow / shift out of range.
 - `apng_frame_walk` — builds a valid base APNG with the standalone
   encoder, then mutates every `fcTL` chunk's `dispose_op` / `blend_op` /
   `x_offset` / `y_offset` with fuzz-derived values (recomputing CRC32
@@ -641,7 +679,7 @@ cargo +nightly fuzz run decode
 
 ## Benchmarks
 
-Five criterion harnesses live under `benches/` for A/B-testing
+Six criterion harnesses live under `benches/` for A/B-testing
 optimisation changes against a stable baseline:
 
 - `decode` — every supported pixel layout at "natural" sizes (1920×1080
@@ -676,6 +714,11 @@ optimisation changes against a stable baseline:
   CRC shapes — concatenating `type ++ data` into a scratch `Vec` vs.
   threading the CRC register across the two slices with `crc32_update`
   (no allocation) — showing ≈42% / ≈26% wins on 13 B / 256 B chunks.
+- `depth` — the §12.4 / §13.12 sample-depth rescale inner loop
+  (`rescale_16bit_to_8bit` and the `sBIT`-aware variant) over full
+  Gray16Le / Rgb48Le / Rgba64Le images, isolated from decode / inflate
+  cost so a change to the per-sample linear equation is visible on its
+  own.
 
 Each scenario synthesises a fresh input on the fly with the public
 encoder API — no committed fixture files — so the benches reproduce
@@ -687,6 +730,7 @@ cargo bench -p oxideav-png --bench encode
 cargo bench -p oxideav-png --bench roundtrip
 cargo bench -p oxideav-png --bench filter
 cargo bench -p oxideav-png --bench crc
+cargo bench -p oxideav-png --bench depth
 ```
 
 ## Usage
