@@ -91,7 +91,12 @@
 //! implements the IEC 61966-2-1 sRGB transfer function ([`srgb_to_linear8`]
 //! / [`srgb_from_linear`]) plus linear-light alpha compositing
 //! ([`composite_over_background`]) — the §13-correct path for blending an
-//! sRGB image over a background.
+//! sRGB image over a background. The [`depth`] module performs §12.4 /
+//! §13.12 sample-depth scaling — the linear rescale, left-bit-replication
+//! and zero-fill primitives plus [`rescale_16bit_to_8bit`] /
+//! [`rescale_16bit_to_8bit_via_sbit`] for reducing a decoded 16-bit
+//! [`PngImage`] to 8 bits (optionally recovering the significant bits an
+//! `sBIT` chunk recorded before scaling).
 //!
 //! ## Standalone (no `oxideav-core`) mode
 //!
@@ -113,6 +118,7 @@ pub mod chunk;
 #[cfg(feature = "registry")]
 pub mod container;
 pub mod decoder;
+pub mod depth;
 pub mod encoder;
 pub mod error;
 pub mod filter;
@@ -132,6 +138,10 @@ pub use decoder::CODEC_ID_STR;
 pub use decoder::{
     decode_apng, decode_apng_info, decode_png, decode_png_over_background, decode_png_to_rgba,
     parse_apng, parse_metadata, ApngInfo, Ihdr, DEFAULT_BACKGROUND_GREY,
+};
+pub use depth::{
+    max_sample, recover_sbit, rescale_16bit_to_8bit, rescale_16bit_to_8bit_via_sbit,
+    rescale_sample, scale_up_bit_replication, scale_up_zero_fill,
 };
 pub use encoder::{
     encode_apng, encode_apng_frames, encode_apng_frames_with_options, encode_apng_with_options,
