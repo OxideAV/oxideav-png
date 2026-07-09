@@ -26,14 +26,45 @@
 //! well-formed input yields `Ok`, and neither path may crash.
 
 use libfuzzer_sys::fuzz_target;
+use oxideav_png::depth::{
+    max_sample, recover_sbit, rescale_16bit_to_8bit, rescale_16bit_to_8bit_via_sbit,
+    rescale_sample, scale_up_bit_replication, scale_up_zero_fill,
+};
+use oxideav_png::metadata::Sbit;
 use oxideav_png::{
     decode_apng, decode_png, decode_png_over_background, decode_png_to_rgba, parse_apng,
     parse_metadata,
 };
 
 fuzz_target!(|data: &[u8]| {
+    // §12.4 / §13.12 sample-depth scaling primitives — pure integer
+    // arithmetic that must never panic (overflow / shift-out-of-range)
+    // for any depth pair or sample value. Draw from the head of the
+    // input.
+    if data.len() >= 6 {
+        let sample = u16::from_le_bytes([data[0], data[1]]);
+        let a = data[2];
+        let b = data[3];
+        let max_in = u16::from_le_bytes([data[4], data[5]]);
+        let _ = max_sample(a);
+        let _ = rescale_sample(sample, max_in, max_sample(b));
+        let _ = scale_up_bit_replication(sample, a, b);
+        let _ = scale_up_zero_fill(sample, a, b);
+        let _ = recover_sbit(sample, a, b);
+    }
+
     // Static single-image decode (any colour type / bit depth / interlace).
     let _ = decode_png(data);
+
+    // §13.12 sample-depth reduction of any successfully decoded 16-bit
+    // image, plus the sBIT-aware arm keyed off whatever sBIT the metadata
+    // parser recovered. Both must stay live on adversarial dimensions /
+    // strides.
+    if let Ok(img) = decode_png(data) {
+        let _ = rescale_16bit_to_8bit(&img);
+        let sbit = parse_metadata(data).ok().and_then(|m| m.sbit);
+        let _ = rescale_16bit_to_8bit_via_sbit(&img, sbit.unwrap_or(Sbit::Grayscale(8)));
+    }
 
     // One-shot promotion to 8-bit RGBA — exercises palette resolution,
     // grayscale widening, 16->8 truncation and alpha fill on top of the
