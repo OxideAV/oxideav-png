@@ -70,3 +70,7 @@ harness = false
 [[bench]]
 name = "crc"
 harness = false
+
+[[bench]]
+name = "depth"
+harness = false
