@@ -81,7 +81,7 @@ fn gray8_trns_marks_matching_pixels_transparent() {
 
     let rgba = decode_png_to_rgba(&spliced).expect("decode");
     let alphas: Vec<u8> = (0..4).map(|i| rgba.data[i * 4 + 3]).collect();
-    assert_eq!(alphas, vec![255, 0, 255, 255], "{:?}", &rgba.data);
+    assert_eq!(alphas, vec![255, 0, 255, 255], "{:?}", rgba.data);
     // Colour bytes are still the source gray replicated 3×.
     for (i, &g) in raw.iter().enumerate() {
         assert_eq!(rgba.data[i * 4], g);
