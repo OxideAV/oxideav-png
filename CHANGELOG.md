@@ -351,6 +351,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reject zero width/height, non-Table-12 colour-type/bit-depth pairs, and
   unknown compression/filter/interlace methods
 
+### Fixed
+
+- `depth` sample-scaling primitives (`scale_up_zero_fill`,
+  `scale_up_bit_replication`, `recover_sbit`) no longer panic with a
+  shift-left/right overflow when handed a bit-width argument wider than a
+  PNG sample. A legal PNG sample depth is at most 16 bits (RFC 2083
+  §11.2.2 — "the allowed bit depths are 1, 2, 4, 8, and 16"), so the
+  width arguments now saturate to 16 — the widest legal depth and the
+  `u16` sample width — keeping every shift inside the type width for any
+  width value. Found by the `decode` fuzz target, which exercises the
+  primitives with arbitrary width bytes (a decoder-DoS: a 13→80-bit
+  "scale" drove a `<< 67` over the `u16` width). Regression-pinned with
+  the crash vector plus a full-width `0..=255` sweep of all three
+  functions.
+
 ## [0.1.8](https://github.com/OxideAV/oxideav-png/compare/v0.1.7...v0.1.8) - 2026-06-12
 
 ### Other

@@ -116,8 +116,18 @@ pub fn rescale_sample(input: u16, max_in: u16, max_out: u16) -> u16 {
 /// For `from_bits >= to_bits` the value is right-shifted (truncated) to
 /// `to_bits` since there are no open bits to fill. `from_bits == 0`
 /// yields `0`.
+///
+/// A PNG sample depth is one of `1, 2, 4, 8, 16` (RFC 2083 §11.2.2 /
+/// W3C PNG 3rd Ed. §11.2.2 — "the allowed bit depths are 1, 2, 4, 8,
+/// and 16"), so a sample never exceeds 16 bits. Any `from_bits` /
+/// `to_bits` above `16` is saturated to `16` — the widest legal depth
+/// and the width of the `u16` a sample lives in — so every shift stays
+/// in range for arbitrary (e.g. fuzz-supplied) width arguments instead
+/// of shifting past the `u16` / `u32` width.
 #[must_use]
 pub fn scale_up_bit_replication(input: u16, from_bits: u8, to_bits: u8) -> u16 {
+    let from_bits = from_bits.min(16);
+    let to_bits = to_bits.min(16);
     if from_bits == 0 || to_bits == 0 {
         return 0;
     }
@@ -145,8 +155,15 @@ pub fn scale_up_bit_replication(input: u16, from_bits: u8, to_bits: u8) -> u16 {
 /// alpha channel data". Provided for completeness / measurement; the
 /// [`PngImage`] conveniences here never use it. For `from_bits >=
 /// to_bits` the value is right-shifted to `to_bits`.
+///
+/// As with [`scale_up_bit_replication`], `from_bits` / `to_bits` above
+/// `16` — the widest legal PNG sample depth (RFC 2083 §11.2.2) and the
+/// `u16` sample width — are saturated to `16`, keeping the shift within
+/// the type width for any width argument.
 #[must_use]
 pub fn scale_up_zero_fill(input: u16, from_bits: u8, to_bits: u8) -> u16 {
+    let from_bits = from_bits.min(16);
+    let to_bits = to_bits.min(16);
     if from_bits == 0 || to_bits == 0 {
         return 0;
     }
@@ -165,8 +182,15 @@ pub fn scale_up_zero_fill(input: u16, from_bits: u8, to_bits: u8) -> u16 {
 /// high-order bits, so shifting always works." The result lies in
 /// `0..=2^sbit - 1`. `sbit >= stored_bits` (nothing to recover) returns
 /// the sample unchanged; `sbit == 0` returns `0`.
+///
+/// `stored_bits` / `sbit` above `16` — a stored sample is at most the
+/// widest legal PNG depth of 16 bits (RFC 2083 §11.2.2), the `u16`
+/// sample width — are saturated to `16` so the right shift never exceeds
+/// the type width for any width argument.
 #[must_use]
 pub fn recover_sbit(sample: u16, stored_bits: u8, sbit: u8) -> u16 {
+    let stored_bits = stored_bits.min(16);
+    let sbit = sbit.min(16);
     if sbit == 0 {
         return 0;
     }
@@ -407,6 +431,54 @@ mod tests {
             let v = max_sample(s);
             let up = scale_up_bit_replication(v, s, 16);
             assert_eq!(recover_sbit(up, 16, s), v, "16-bit s={s}");
+        }
+    }
+
+    #[test]
+    fn out_of_range_depths_never_shift_overflow() {
+        // Regression: fuzz `decode` target crash-17b883b6… drove the
+        // sample-depth primitives with attacker-controlled width bytes
+        // (`from_bits = 0x0d = 13`, `to_bits = 0x50 = 80`), overflowing
+        // `masked << (to_bits - from_bits)` (= `<< 67`) in
+        // `scale_up_zero_fill`, and the sibling shifts in
+        // `scale_up_bit_replication` / `recover_sbit`. A PNG sample depth
+        // is at most 16 (RFC 2083 §11.2.2), so widths saturate to 16 and
+        // every shift stays inside the u16/u32 width. Just returning is
+        // the assertion — a shift-overflow would panic here.
+        let sample = 0x470a; // data[0..2] of the crash vector.
+        let _ = scale_up_zero_fill(sample, 13, 80);
+        let _ = scale_up_bit_replication(sample, 13, 80);
+        let _ = recover_sbit(sample, 13, 80);
+        // Sweep the whole u8 width domain for all three: none may panic.
+        for from in 0u8..=255 {
+            for to in 0u8..=255 {
+                let _ = scale_up_zero_fill(sample, from, to);
+                let _ = scale_up_bit_replication(sample, from, to);
+                let _ = recover_sbit(sample, from, to);
+            }
+        }
+    }
+
+    #[test]
+    fn over_16_widths_saturate_to_16() {
+        // Out-of-range widths behave exactly as the widest legal depth
+        // (16), never as a wrapped shift producing a different sample.
+        for w in [17u8, 80, 200, 255] {
+            assert_eq!(
+                scale_up_zero_fill(0x1234, w, 8),
+                scale_up_zero_fill(0x1234, 16, 8),
+                "zero_fill from_bits={w}"
+            );
+            assert_eq!(
+                scale_up_bit_replication(0x1234, 5, w),
+                scale_up_bit_replication(0x1234, 5, 16),
+                "bit_replication to_bits={w}"
+            );
+            assert_eq!(
+                recover_sbit(0x1234, w, 5),
+                recover_sbit(0x1234, 16, 5),
+                "recover_sbit stored_bits={w}"
+            );
         }
     }
 
