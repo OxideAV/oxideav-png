@@ -44,6 +44,11 @@ registry = ["dep:oxideav-core"]
 # into the workspace. The test skips silently when libpng isn't installed.
 libloading = "0.8"
 
+# Hostile-input tests (tests/hostile_inflate.rs) craft zlib bodies that
+# inflate past the crate's decompression bounds; they use the same
+# workspace compression crate the library itself delegates to.
+compcol = { version = "0.6", default-features = false, features = ["zlib"] }
+
 # Round 154 (depth-mode benchmarks): Criterion drives the three bench
 # harnesses (`decode`, `encode`, `roundtrip`) that future PNG encoder /
 # decoder rounds can use to A/B their changes. Pinned to the same 0.5

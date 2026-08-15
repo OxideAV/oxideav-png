@@ -39,7 +39,7 @@ use crate::image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitm
 #[cfg(feature = "registry")]
 pub use crate::registry::{decode_png_to_frame, make_decoder};
 
-use crate::zlibvec::decompress_to_vec_zlib;
+use crate::zlibvec::decompress_to_vec_zlib_capped;
 
 use crate::apng::{parse_fdat, Actl, Blend, Disposal, Fctl};
 use crate::chunk::{read_chunk, ChunkRef, PNG_MAGIC};
@@ -229,6 +229,48 @@ impl Ihdr {
         let bits_per_pixel = channels * self.bit_depth as usize;
         let bits_per_row = bits_per_pixel * self.width as usize;
         Ok(bits_per_row.div_ceil(8))
+    }
+
+    /// Exact byte length of the filtered scanline stream this IHDR
+    /// implies — the size the IDAT (or per-frame fdAT) zlib stream must
+    /// inflate to.
+    ///
+    /// Non-interlaced (W3C PNG3 §7.2 / §9.1): every scanline is one
+    /// filter-type byte plus [`Self::row_bytes`], so the stream is
+    /// `(1 + row_bytes) × height`. Adam7 (§8.1): each of the seven
+    /// passes is serialized "as though it were a complete image of the
+    /// appropriate dimensions", each pass row carrying its own
+    /// filter-type byte; empty passes (zero width or height) contribute
+    /// nothing. The sum is taken in saturating `u64` so a
+    /// maximum-dimension IHDR cannot wrap — for any decodable image the
+    /// value is exact.
+    ///
+    /// Knowing this size *before* inflating lets the decoder cap the
+    /// zlib output at `expected + 1` bytes: a hostile stream that
+    /// inflates past the IHDR-implied size (a decompression bomb behind
+    /// a small declared canvas, W3C PNG3 §13.3) is cut off at the bound
+    /// instead of being fully materialised and only then length-checked.
+    pub fn expected_filtered_len(&self) -> Result<u64> {
+        if self.interlace == 0 {
+            let rb = self.row_bytes()? as u64;
+            Ok((1u64.saturating_add(rb)).saturating_mul(self.height as u64))
+        } else {
+            let mut total = 0u64;
+            for pass in 0..7 {
+                let (pw, ph) = adam7_pass_dims(self.width as usize, self.height as usize, pass);
+                if pw == 0 || ph == 0 {
+                    continue;
+                }
+                let pass_ihdr = Ihdr {
+                    width: pw as u32,
+                    height: ph as u32,
+                    ..*self
+                };
+                let rb = pass_ihdr.row_bytes()? as u64;
+                total = total.saturating_add((1u64.saturating_add(rb)).saturating_mul(ph as u64));
+            }
+            Ok(total)
+        }
     }
 
     /// Pixel format the decoder produces for this IHDR.
@@ -851,8 +893,20 @@ pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
         return Err(Error::invalid("PNG: no IDAT chunks"));
     }
 
-    let pixels = decompress_to_vec_zlib(&idat_concat)
-        .map_err(|e| Error::invalid(format!("PNG: zlib decompress failed: {e:?}")))?;
+    // Cap the inflate at the IHDR-implied filtered-stream size (+1 so an
+    // overlong stream is detected as such): a bomb-shaped IDAT behind a
+    // small declared canvas errors at the bound instead of committing
+    // attacker-chosen memory (W3C PNG3 §13.3).
+    let expected = ihdr.expected_filtered_len()?;
+    let pixels = decompress_to_vec_zlib_capped(&idat_concat, expected.saturating_add(1)).map_err(
+        |e| match e {
+            compcol::Error::OutputLimitExceeded => Error::invalid(format!(
+                "PNG: IDAT inflates past the {expected}-byte filtered-stream size \
+                 implied by IHDR (decompression bomb, W3C PNG3 §13.3)"
+            )),
+            e => Error::invalid(format!("PNG: zlib decompress failed: {e:?}")),
+        },
+    )?;
 
     let frame_pixels = decode_image_pixels(&pixels, &ihdr)?;
     build_png_image(&ihdr, &frame_pixels, plte, trns)
@@ -1911,8 +1965,21 @@ pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
             filter: info.ihdr.filter,
             interlace: info.ihdr.interlace,
         };
-        let decompressed = decompress_to_vec_zlib(&frame.compressed)
-            .map_err(|e| Error::invalid(format!("APNG: zlib failed: {e:?}")))?;
+        // Same bomb defence as the still-image IDAT path: the fcTL
+        // dimensions imply the exact filtered-stream size, so cap the
+        // inflate there (+1 to detect overlong) rather than
+        // materialising an unbounded hostile stream (W3C PNG3 §13.3).
+        let frame_expected = sub_ihdr.expected_filtered_len()?;
+        let decompressed =
+            decompress_to_vec_zlib_capped(&frame.compressed, frame_expected.saturating_add(1))
+                .map_err(|e| match e {
+                    compcol::Error::OutputLimitExceeded => Error::invalid(format!(
+                        "APNG: frame data inflates past the {frame_expected}-byte \
+                         filtered-stream size implied by fcTL (decompression bomb, \
+                         W3C PNG3 §13.3)"
+                    )),
+                    e => Error::invalid(format!("APNG: zlib failed: {e:?}")),
+                })?;
         let frame_raw = decode_image_pixels(&decompressed, &sub_ihdr)?;
         let sub_frame = build_png_image(
             &sub_ihdr,

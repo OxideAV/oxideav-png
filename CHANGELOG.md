@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Every zlib inflate in the crate is now **output-bounded** — the
+  decompression-bomb defence W3C PNG3 §13.3 motivates ("chunks can be
+  extremely large", up to 2^31-1 bytes, and DEFLATE expands ~1000:1).
+  The IDAT and per-frame fdAT pixel streams are capped at the exact
+  filtered-stream size implied by the IHDR / fcTL dimensions plus one
+  byte (new `Ihdr::expected_filtered_len()`, covering both the
+  non-interlaced §7.2 layout and the Adam7 §8.1 per-pass sum with
+  empty-pass and saturating-arithmetic handling), so a bomb-shaped
+  stream behind a small declared canvas errors at the bound instead of
+  being fully materialised and only then length-checked. The
+  compressed metadata bodies (`zTXt` / `iTXt` text, `iCCP` profile),
+  which have no intrinsic expected size, are capped at the new
+  `MAX_INFLATED_METADATA_LEN` (64 MiB — orders of magnitude above any
+  legitimate annotation or ICC profile); the three `to_bytes` emitters
+  mirror the bound so every chunk the encoder writes round-trips
+  through its own parser. A body that would inflate past its bound is
+  an `InvalidData` error naming the bound. New
+  `tests/hostile_inflate.rs` suite (18 tests): per-chunk and
+  full-file bombs, oversized-profile encode rejection, IDAT / fdAT
+  bombs behind 1×1 / 2×2 canvases, under-cap legitimate payloads,
+  `expected_filtered_len` hand-computed pins (including the 7×7 Adam7
+  sum and the max-dimension saturation case), plus iTXt hostile-body
+  depth: invalid UTF-8 and embedded NUL inside the *compressed* text
+  arm, invalid UTF-8 in the translated keyword, non-ASCII language
+  tag, and truncated `iCCP` framings.
+
+- `PngMetadata::colour_source()` — the W3C PNG3 §4.3 "Color Chunk
+  Priority" resolution (Table 1: `cICP` 1 > `iCCP` 2 > `sRGB` 3 >
+  `cHRM`/`gAMA` 4; "the chunk with the lowest Priority number should
+  take precedence and any higher-numbered chunk types should be
+  ignored"). Returns the new `ColourSource` enum (with a `priority()`
+  accessor) telling a colour-managing caller which populated signal
+  governs the samples; `None` when the datastream carries no
+  colour-space chunk at all. Read-side resolution only — all chunks
+  still round-trip verbatim. Pinned by `tests/colour_precedence.rs`
+  across singles, pairs, the full stack, and a real encode → parse
+  round-trip.
+
+- `Gama::SRGB` (45455) and `Chrm::SRGB` (sRGB primaries + D65 white
+  point) constants — the one set of companion values W3C PNG3
+  §11.3.2.5 Table 17 permits alongside an `sRGB` chunk ("Only the
+  following values shall be used"). The encoder now rejects an `sRGB`
+  chunk paired with a *contradicting* `gAMA` or `cHRM` (which would
+  hand sRGB-unaware decoders a different colour space than sRGB-aware
+  ones); non-`sRGB` streams keep free choice of `gAMA` / `cHRM`
+  values. Enforced on both the static and APNG encode paths.
+
 - New `depth` module implementing W3C PNG3 §12.4 sample-depth scaling and
   §13.12 sample-depth rescaling. Pure primitives `rescale_sample` (the
   linear `floor(input × max_out / max_in + 0.5)` equation),

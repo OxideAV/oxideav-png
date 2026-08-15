@@ -317,7 +317,11 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   validated. Emitted before `PLTE` and `IDAT` in §4.3 Color-Chunk-
   Priority order (cICP `1` > iCCP `2` > sRGB `3` > cHRM/gAMA `4`).
   Single-instance only — duplicate `iCCP` is rejected on parse. A
-  4 KB run of one byte round-trips at well under 200 wire bytes.
+  4 KB run of one byte round-trips at well under 200 wire bytes. The
+  inflate is bounded (`MAX_INFLATED_METADATA_LEN`, 64 MiB) so an
+  oversized-profile / decompression-bomb chunk errors at the bound
+  (W3C PNG3 §13.3) instead of committing attacker-chosen memory; the
+  emitter mirrors the bound.
 - `mDCV` (Mastering Display Color Volume, W3C PNG3 §11.3.2.7) — 24-byte
   HDR static metadata pairing the `cICP` colour-volume signal. Carries
   three RGB display-primary `(x, y)` CIE 1931 chromaticity pairs, the
@@ -360,7 +364,10 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   before `IDAT` alongside `tEXt` / `zTXt`; the encoder writes them
   after `zTXt` so the Latin-1 chunks (cheap to decode for callers
   that only need byte-exact metadata) lead the internationalised
-  UTF-8 chunks in the stream.
+  UTF-8 chunks in the stream. Both compressed-text chunks (`zTXt` /
+  `iTXt`) share the `iCCP` inflate bound, so a compression-bomb body
+  errors instead of allocating without limit; the UTF-8 / no-`NUL`
+  rules apply identically to the compressed and uncompressed arms.
 
 - Unrecognised ancillary chunks (`PngMetadata::unknowns`, W3C PNG3 §14.2
   "Behavior of PNG editors") — the PNG-*editor* round-trip. Any ancillary
@@ -399,6 +406,21 @@ repeated (the "Multiple OK? No" rule in RFC 2083 §4.3 / W3C PNG3
 `iTXt` are the three chunks where identical keywords on multiple
 instances are explicitly permitted (§4.2.7 ¶3 / §4.2.10 ¶6 /
 §11.3.3.4).
+
+Colour-chunk precedence (W3C PNG3 §4.3 Table 1) is *resolved*, not
+just emission-ordered: `PngMetadata::colour_source()` returns a
+`ColourSource` (`Cicp` > `Iccp` > `Srgb` > `GamaChrm`, priorities
+1–4) naming the signal that governs the samples — "the chunk with the
+lowest Priority number should take precedence and any higher-numbered
+chunk types should be ignored", restated per-chunk by §11.3.2.3 /
+§11.3.2.5 ("ignored unless it is the highest-precedence color chunk").
+Resolution is read-side only; every chunk still round-trips verbatim.
+On the write side, §11.3.2.5 Table 17 is enforced: an `sRGB` chunk may
+ride only with the sRGB-equivalent companion values ("Only the
+following values shall be used") — `Gama::SRGB` (45455) and
+`Chrm::SRGB` (sRGB primaries + D65) are provided as constants and a
+contradicting pairing is an encode error, while non-`sRGB` streams
+keep free choice of `gAMA` / `cHRM`.
 
 ## Colour management
 
@@ -593,6 +615,19 @@ re-derived inline. Pure typed-primitive addition; no behavioural
 change to existing decode / encode paths.
 
 ## Robustness
+
+Every zlib inflate is output-bounded (W3C PNG3 §13.3): the IDAT /
+fdAT pixel streams are capped at the exact filtered-stream size the
+IHDR / fcTL dimensions imply (`Ihdr::expected_filtered_len()`, both
+interlace layouts), and the compressed metadata bodies (`zTXt` /
+`iTXt` / `iCCP`) at `MAX_INFLATED_METADATA_LEN` (64 MiB) — a
+decompression bomb errors at the bound instead of allocating without
+limit. `tests/hostile_inflate.rs` pins the whole surface: per-chunk
+and spliced-into-file bombs, IDAT / fdAT bombs behind tiny declared
+canvases, oversized-profile encode rejection, bad-UTF-8 / embedded-NUL
+bodies in the compressed `iTXt` arm, and hand-computed
+`expected_filtered_len` values including the Adam7 per-pass sum and
+the max-dimension saturation case.
 
 The decoder is fuzzed with `cargo-fuzz`. Nine targets live under `fuzz/`:
 

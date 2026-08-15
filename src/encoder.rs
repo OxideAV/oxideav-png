@@ -273,6 +273,35 @@ fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
     let Some(meta) = meta else {
         return Ok(());
     };
+    // W3C PNG3 §11.3.2.5 Table 17: an encoder writing the sRGB chunk
+    // that also writes gAMA / cHRM companion chunks (recommended "for
+    // compatibility with decoders that do not use the sRGB chunk") may
+    // use ONLY the sRGB-equivalent values — "Only the following values
+    // shall be used": gAMA 45455, cHRM = sRGB primaries + D65 white
+    // point. Emitting an sRGB chunk alongside a *contradicting*
+    // gAMA / cHRM would hand sRGB-unaware decoders a different colour
+    // space than sRGB-aware ones, so a mismatch is an encode error
+    // ahead of the wire rather than a silently nonconformant stream.
+    if meta.srgb.is_some() {
+        if let Some(gama) = &meta.gama {
+            if *gama != crate::metadata::Gama::SRGB {
+                return Err(Error::invalid(format!(
+                    "PNG encoder: gAMA {} alongside sRGB — W3C PNG3 §11.3.2.5 Table 17 \
+                     permits only 45455 (Gama::SRGB) next to an sRGB chunk",
+                    gama.gamma_times_100000
+                )));
+            }
+        }
+        if let Some(chrm) = &meta.chrm {
+            if *chrm != crate::metadata::Chrm::SRGB {
+                return Err(Error::invalid(
+                    "PNG encoder: cHRM alongside sRGB does not match the sRGB \
+                     primaries / D65 white point — W3C PNG3 §11.3.2.5 Table 17 \
+                     permits only those values (Chrm::SRGB) next to an sRGB chunk",
+                ));
+            }
+        }
+    }
     if let Some(cicp) = &meta.cicp {
         write_chunk(out, b"cICP", &cicp.to_bytes());
     }

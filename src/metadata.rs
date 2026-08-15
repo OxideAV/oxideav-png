@@ -285,7 +285,26 @@
 //! §11.3.3.4).
 
 use crate::error::{PngError as Error, Result};
-use crate::zlibvec::{compress_to_vec_zlib, decompress_to_vec_zlib};
+use crate::zlibvec::{compress_to_vec_zlib, decompress_to_vec_zlib_capped};
+
+/// Upper bound, in bytes, on the *decompressed* body of a compressed
+/// metadata chunk (`zTXt` text, `iTXt` text, `iCCP` profile).
+///
+/// The PNG spec places no size limit on these bodies — a chunk may be
+/// up to 2^31-1 bytes long (W3C PNG3 §13.3 Security considerations:
+/// "chunks can be extremely large") and the zlib stream inside it can
+/// expand by roughly three further orders of magnitude — so an
+/// unbounded inflate would let a few-kilobyte hostile chunk commit
+/// gigabytes of memory before any content check runs (a decompression
+/// bomb). Unlike the IDAT / fdAT pixel stream, whose exact inflated
+/// size is implied by the IHDR / fcTL dimensions, a text or profile
+/// body has no intrinsic expected size, so the crate draws a fixed
+/// defensive line here: 64 MiB, orders of magnitude above any
+/// plausible legitimate text annotation or ICC profile, and small
+/// enough to bound the allocation a hostile stream can force. A body
+/// that would inflate past the bound is an `InvalidData` error, not a
+/// crash or an unbounded allocation.
+pub const MAX_INFLATED_METADATA_LEN: u64 = 64 * 1024 * 1024;
 
 /// `sBIT` payload (RFC 2083 §4.2.6).
 ///
@@ -1102,6 +1121,14 @@ pub struct Gama {
 }
 
 impl Gama {
+    /// The one `gAMA` value W3C PNG3 §11.3.2.5 Table 17 permits
+    /// alongside an `sRGB` chunk ("Only the following values shall be
+    /// used"): gamma 45455, i.e. the sRGB-compatible 1/2.2 transfer
+    /// exponent.
+    pub const SRGB: Self = Self {
+        gamma_times_100000: 45_455,
+    };
+
     /// Parse a `gAMA` chunk payload (exactly four bytes, big-endian).
     /// Other lengths are rejected. The value is preserved verbatim — the
     /// spec's "decoders should ignore a zero gamma" is a recommendation,
@@ -1159,6 +1186,21 @@ pub struct Chrm {
 }
 
 impl Chrm {
+    /// The one set of `cHRM` values W3C PNG3 §11.3.2.5 Table 17 permits
+    /// alongside an `sRGB` chunk ("Only the following values shall be
+    /// used"): the sRGB primaries and D65 white point, each CIE 1931
+    /// chromaticity stored `× 100000`.
+    pub const SRGB: Self = Self {
+        white_point_x: 31_270,
+        white_point_y: 32_900,
+        red_x: 64_000,
+        red_y: 33_000,
+        green_x: 30_000,
+        green_y: 60_000,
+        blue_x: 15_000,
+        blue_y: 6_000,
+    };
+
     /// Parse a `cHRM` chunk payload (exactly 32 bytes: eight 4-byte
     /// big-endian unsigned integers). Other lengths are rejected.
     pub fn parse(data: &[u8]) -> Result<Self> {
@@ -1843,9 +1885,16 @@ impl Ztxt {
 
         // §4.2.10: "For compression method 0, this datastream adheres to
         // the zlib datastream format." Inflate it; surface a decode
-        // error rather than panicking on a tampered chunk.
-        let decompressed = decompress_to_vec_zlib(compressed)
-            .map_err(|e| Error::invalid(format!("PNG zTXt: zlib decompression failed: {e:?}")))?;
+        // error rather than panicking on a tampered chunk. The inflate
+        // is bounded so a decompression bomb fails cleanly (§13.3).
+        let decompressed = decompress_to_vec_zlib_capped(compressed, MAX_INFLATED_METADATA_LEN)
+            .map_err(|e| match e {
+                compcol::Error::OutputLimitExceeded => Error::invalid(format!(
+                    "PNG zTXt: text inflates past the {MAX_INFLATED_METADATA_LEN}-byte \
+                     decompressed-size bound (decompression bomb, W3C PNG3 §13.3)"
+                )),
+                e => Error::invalid(format!("PNG zTXt: zlib decompression failed: {e:?}")),
+            })?;
 
         // Decompressed text obeys the same NUL-forbidden rule as tEXt
         // (RFC 2083 §4.2.10: "Decompression of this datastream yields
@@ -1871,6 +1920,15 @@ impl Ztxt {
     /// malformed `Ztxt` value cannot silently corrupt the output PNG.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let keyword_bytes = validate_keyword(&self.keyword, "zTXt")?;
+        // Mirror the parse-side inflate bound so every chunk this
+        // encoder emits round-trips through its own parser.
+        if self.text.len() as u64 > MAX_INFLATED_METADATA_LEN {
+            return Err(Error::invalid(format!(
+                "PNG zTXt: text length {} exceeds the {MAX_INFLATED_METADATA_LEN}-byte \
+                 decompressed-size bound",
+                self.text.len()
+            )));
+        }
         let mut text_bytes = Vec::with_capacity(self.text.len());
         for ch in self.text.chars() {
             let cp = ch as u32;
@@ -1961,8 +2019,19 @@ impl Iccp {
             )));
         }
         let compressed = &rest[1..];
-        let profile = decompress_to_vec_zlib(compressed)
-            .map_err(|e| Error::invalid(format!("PNG iCCP: zlib decompression failed: {e:?}")))?;
+        // Bounded inflate: an ICC profile has no intrinsic expected
+        // size, so a hostile chunk could otherwise inflate to gigabytes
+        // (decompression bomb, W3C PNG3 §13.3). Legitimate profiles are
+        // orders of magnitude below the bound.
+        let profile = decompress_to_vec_zlib_capped(compressed, MAX_INFLATED_METADATA_LEN)
+            .map_err(|e| match e {
+                compcol::Error::OutputLimitExceeded => Error::invalid(format!(
+                    "PNG iCCP: profile inflates past the {MAX_INFLATED_METADATA_LEN}-byte \
+                     decompressed-size bound (oversized profile / decompression bomb, \
+                     W3C PNG3 §13.3)"
+                )),
+                e => Error::invalid(format!("PNG iCCP: zlib decompression failed: {e:?}")),
+            })?;
         Ok(Self {
             name: name_str,
             profile,
@@ -1975,6 +2044,15 @@ impl Iccp {
     /// corrupt the output PNG.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let name_bytes = validate_keyword(&self.name, "iCCP")?;
+        // Mirror the parse-side inflate bound so every chunk this
+        // encoder emits round-trips through its own parser.
+        if self.profile.len() as u64 > MAX_INFLATED_METADATA_LEN {
+            return Err(Error::invalid(format!(
+                "PNG iCCP: profile length {} exceeds the {MAX_INFLATED_METADATA_LEN}-byte \
+                 decompressed-size bound",
+                self.profile.len()
+            )));
+        }
         // Level 6 (the zlib default) matches the encoder's IDAT
         // compression level — we don't yet expose a per-chunk knob, and
         // the spec leaves the choice entirely to the encoder.
@@ -2133,9 +2211,17 @@ impl Itxt {
         // Text: rest of payload, possibly zlib-compressed.
         let text_bytes_owned: Vec<u8>;
         let text_bytes: &[u8] = if compressed {
-            text_bytes_owned = decompress_to_vec_zlib(text_region).map_err(|e| {
-                Error::invalid(format!("PNG iTXt: zlib decompression failed: {e:?}"))
-            })?;
+            // Bounded inflate — decompression-bomb defence (§13.3).
+            text_bytes_owned =
+                decompress_to_vec_zlib_capped(text_region, MAX_INFLATED_METADATA_LEN).map_err(
+                    |e| match e {
+                        compcol::Error::OutputLimitExceeded => Error::invalid(format!(
+                            "PNG iTXt: text inflates past the {MAX_INFLATED_METADATA_LEN}-byte \
+                         decompressed-size bound (decompression bomb, W3C PNG3 §13.3)"
+                        )),
+                        e => Error::invalid(format!("PNG iTXt: zlib decompression failed: {e:?}")),
+                    },
+                )?;
             &text_bytes_owned
         } else {
             text_region
@@ -2171,6 +2257,15 @@ impl Itxt {
     /// determinism.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let keyword_bytes = validate_keyword(&self.keyword, "iTXt")?;
+        // Mirror the parse-side inflate bound so every chunk this
+        // encoder emits round-trips through its own parser.
+        if self.text.len() as u64 > MAX_INFLATED_METADATA_LEN {
+            return Err(Error::invalid(format!(
+                "PNG iTXt: text length {} exceeds the {MAX_INFLATED_METADATA_LEN}-byte \
+                 decompressed-size bound",
+                self.text.len()
+            )));
+        }
         // Language tag: ASCII only (BCP47 is ASCII by construction).
         // Empty is permitted (= "language unspecified", §11.3.3.4).
         for ch in self.language_tag.chars() {
@@ -2381,6 +2476,70 @@ impl PngMetadata {
             && self.ztxts.is_empty()
             && self.itxts.is_empty()
             && self.unknowns.is_empty()
+    }
+
+    /// Resolve which colour-space signal governs the image samples per
+    /// the W3C PNG3 §4.3 "Color Chunk Priority" table (Table 1).
+    ///
+    /// §4.3: "If a single image contains more than one of these chunk
+    /// types, the chunk with the lowest Priority number should take
+    /// precedence and any higher-numbered chunk types should be
+    /// ignored." The priorities are `cICP` = 1, `iCCP` = 2, `sRGB` = 3,
+    /// `cHRM` and `gAMA` = 4 (the two rank-4 chunks share one row —
+    /// together they describe a single colour space, so either one
+    /// present selects [`ColourSource::GamaChrm`]). The per-chunk
+    /// sections restate the rule from the other side: `iCCP` / `sRGB`
+    /// are each "ignored unless it is the highest-precedence color
+    /// chunk understood by the decoder" (§11.3.2.3 / §11.3.2.5).
+    ///
+    /// The codec itself never transforms samples — this accessor tells
+    /// a colour-managing caller which chunk to honour and, by
+    /// implication, which populated fields the §4.3 rule says to
+    /// ignore. `None` means the datastream carries no colour-space
+    /// signal at all (the §13.13 unknown-gamma fallback territory).
+    pub fn colour_source(&self) -> Option<ColourSource> {
+        if self.cicp.is_some() {
+            Some(ColourSource::Cicp)
+        } else if self.iccp.is_some() {
+            Some(ColourSource::Iccp)
+        } else if self.srgb.is_some() {
+            Some(ColourSource::Srgb)
+        } else if self.gama.is_some() || self.chrm.is_some() {
+            Some(ColourSource::GamaChrm)
+        } else {
+            None
+        }
+    }
+}
+
+/// The winning colour-space signal per the W3C PNG3 §4.3 "Color Chunk
+/// Priority" table — see [`PngMetadata::colour_source`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColourSource {
+    /// `cICP` (priority 1): coding-independent code points name the
+    /// colour space (§11.3.2.6).
+    Cicp,
+    /// `iCCP` (priority 2): the embedded ICC profile defines the colour
+    /// space (§11.3.2.3).
+    Iccp,
+    /// `sRGB` (priority 3): the samples conform to the sRGB colour
+    /// space (§11.3.2.5).
+    Srgb,
+    /// `cHRM` and/or `gAMA` (priority 4, one shared table row): the
+    /// colour space is described by primary chromaticities + white
+    /// point and/or a transfer exponent (§11.3.2.1 / §11.3.2.2).
+    GamaChrm,
+}
+
+impl ColourSource {
+    /// The §4.3 Table 1 priority number (1 = highest precedence).
+    pub const fn priority(self) -> u8 {
+        match self {
+            ColourSource::Cicp => 1,
+            ColourSource::Iccp => 2,
+            ColourSource::Srgb => 3,
+            ColourSource::GamaChrm => 4,
+        }
     }
 }
 
