@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/OxideAV/oxideav-png/compare/v0.1.8...v0.2.0) - 2026-08-18
+
+### Other
+
+- record the r448 profile pass in BENCHMARKS.md + README + CHANGELOG
+- share one CRC-validating chunk walk + const-depth sub-byte packing
+- whole-plane flatten fast path + paired-byte LE->BE swap on encode
+- single-allocation decode pipeline + lockstep promotion loops
+- register-lane unfilter kernels + read-only $12.8 heuristic
+- bound every zlib inflate + $4.3 colour precedence + Table 17 sRGB gate
+- fix shift overflow in depth sample-scaling on out-of-range widths
+- fix clippy useless_borrows_in_formatting in trns test
+- document §12.4/§13.12 sample-depth scaling (README + CHANGELOG)
+- criterion bench for §12.4/§13.12 sample-depth rescaling
+- exercise depth scaling in the decode fuzz target
+- integration test for §12.4/§13.12 sample-depth rescaling
+- sample-depth scaling module (§12.4 / §13.12)
+- add CI / crates.io / docs.rs / MIT-license badges
+- incremental chunk CRC in write_chunk — drop per-chunk concat alloc
+- slice-by-16 chunk CRC-32 — ~5.8x throughput, bit-identical output
+- document §5.1/§5.6 chunk-ordering enforcement (README + CHANGELOG)
+- police §5.6 ancillary ordering at the container demux boundary
+- enforce the "After PLTE" half of the bKGD/hIST/tRNS ordering bucket
+- enforce §5.1/§5.6 critical-chunk ordering in the shared walker
+- enforce §5.6 ancillary ordering + consecutive IDAT on the APNG path
+- reject non-consecutive IDAT chunks on decode (§5.6 / §11.2.3)
+- enforce §5.6 Table 7 chunk-ordering buckets on metadata decode
+- README — document r374 APNG compositing/validation deepening
+- cover 16-bit gray/RGB tRNS-keyed APNG OVER compositing
+- reject non-zero first-frame offset in default-image APNG encode
+- enforce APNG acTL placement in the container demuxer
+- APNG OVER honours tRNS transparency on alpha-less canvases
+- end-to-end APNG blend/dispose round-trip coverage
+- validate APNG acTL placement and multiplicity
+- enforce APNG default-image fcTL restrictions + first-frame disposal
+- APNG OVER compositing at 16-bit precision
+- fuzz encode_options reaches FilterStrategy::Brute
+- FilterStrategy::Brute — whole-image exhaustive filter search (W3C PNG3 §12.7)
+- property sweep for the unknown-chunk capture → re-emit round-trip
+- preserve unrecognised ancillary chunks for the §14.2 editor round-trip
+- head/body-split the §6 reconstruct + §12.8 heuristic loops
+- fuzz decode_png_over_background + document bKGD compositing in README
+- decode_png_over_background — §13.15/§13.16 bKGD background compositing
+- Bkgd::resolve_rgb8 — resolve bKGD chunk to 8-bit sRGB background (§13.15/§13.12)
+- neutralize reference-library mention in srgb test comment
+- document sRGB linear-light conversion (README/CHANGELOG/crate docs)
+- integration test — sRGB chunk roundtrip + linear-light compositing
+- sRGB EOTF linear-light conversion module (§11.3.2 / §13)
+- region-aware APNG encoder (fcTL/fdAT with per-frame region + delay + dispose/blend)
+- 16-bit decoder gamma correction (W3C PNG3 §13.13)
+- indexed-image palette gamma correction (W3C PNG3 §13.13)
+- decoder gamma handling (W3C PNG3 §13.13 / RFC 2083 §10.5)
+- metadata_chunk_splice target over the ancillary-chunk parsers
+- enforce W3C PNG3 §4.9.2 fcTL/fdAT sequence-number rules
+- refresh to current status, drop per-round changelog cruft
+- drive compression_level in encode_options target
+- caller-selectable IDAT/fdAT DEFLATE compression level (1..=9)
+- gate IHDR field validity at wire-decode boundary (W3C PNG3 §11.2.1)
+- add encode_options target over encode_png_image_with_options matrix
+
 ### Changed
 
 - Round 448 profile/bench depth pass — decode and encode are
