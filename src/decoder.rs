@@ -871,6 +871,7 @@ pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
 
     let mut plte: Option<&[u8]> = None;
     let mut trns: Option<&[u8]> = None;
+    let mut idat_slices: Vec<&[u8]> = Vec::new();
     let mut idat_total_len = 0usize;
     for c in &chunks {
         if c.is_type(b"PLTE") {
@@ -879,26 +880,36 @@ pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
             trns = Some(c.data);
         } else if c.is_type(b"IDAT") {
             idat_total_len += c.data.len();
+            idat_slices.push(c.data);
         }
     }
     validate_trns(&ihdr, trns, plte)?;
 
-    let mut idat_concat = Vec::with_capacity(idat_total_len);
-    for c in &chunks {
-        if c.is_type(b"IDAT") {
-            idat_concat.extend_from_slice(c.data);
-        }
-    }
-    if idat_concat.is_empty() {
+    if idat_total_len == 0 {
         return Err(Error::invalid("PNG: no IDAT chunks"));
     }
+    // Single-chunk streams (the common case — this crate's own encoder
+    // emits exactly one IDAT) borrow the payload straight out of the
+    // source buffer; only a genuinely split IDAT run pays for the
+    // concatenation copy.
+    let idat_concat: Vec<u8>;
+    let idat_stream: &[u8] = if idat_slices.len() == 1 {
+        idat_slices[0]
+    } else {
+        let mut buf = Vec::with_capacity(idat_total_len);
+        for s in &idat_slices {
+            buf.extend_from_slice(s);
+        }
+        idat_concat = buf;
+        &idat_concat
+    };
 
     // Cap the inflate at the IHDR-implied filtered-stream size (+1 so an
     // overlong stream is detected as such): a bomb-shaped IDAT behind a
     // small declared canvas errors at the bound instead of committing
     // attacker-chosen memory (W3C PNG3 §13.3).
     let expected = ihdr.expected_filtered_len()?;
-    let pixels = decompress_to_vec_zlib_capped(&idat_concat, expected.saturating_add(1)).map_err(
+    let pixels = decompress_to_vec_zlib_capped(idat_stream, expected.saturating_add(1)).map_err(
         |e| match e {
             compcol::Error::OutputLimitExceeded => Error::invalid(format!(
                 "PNG: IDAT inflates past the {expected}-byte filtered-stream size \
@@ -909,7 +920,7 @@ pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
     )?;
 
     let frame_pixels = decode_image_pixels(&pixels, &ihdr)?;
-    build_png_image(&ihdr, &frame_pixels, plte, trns)
+    build_png_image(&ihdr, frame_pixels, plte, trns)
 }
 
 /// Enforce the per-IHDR rules RFC 2083 §4.2.9 places on a `tRNS` chunk.
@@ -1176,22 +1187,24 @@ fn png_image_to_rgba(
         _ => None,
     };
 
+    // Every arm walks source pixels and destination RGBA cells in
+    // lockstep (`chunks_exact` pairs) so the loops carry no index
+    // arithmetic or per-pixel bounds checks, and the tRNS key is
+    // resolved to a concrete comparison value ahead of the loop
+    // instead of re-matching the `Option` per pixel.
     match img.pixel_format {
         PngPixelFormat::Gray8 => {
-            for i in 0..n {
-                let g = img.data[i];
-                out[i * 4] = g;
-                out[i * 4 + 1] = g;
-                out[i * 4 + 2] = g;
-                // tRNS keyed sample for ct=0 / bit_depth=8: the
-                // 2-byte tRNS stores the gray sample in the low
-                // byte (high byte is zero per spec), so the match
-                // condition is `tRNS_gray16 as u8 == g` *and* the
-                // high byte zero (already guaranteed by validation).
-                out[i * 4 + 3] = match trns_gray16 {
-                    Some(k) if (k as u8) == g => 0,
-                    _ => 255,
-                };
+            // tRNS keyed sample for ct=0 / bit_depth=8: the 2-byte tRNS
+            // stores the gray sample in the low byte (high byte is zero
+            // per spec), so the match condition is `tRNS_gray16 as u8 ==
+            // g` *and* the high byte zero (already guaranteed by
+            // validation).
+            let key = trns_gray16.map(|k| k as u8);
+            for (&g, px) in img.data.iter().zip(out.chunks_exact_mut(4)) {
+                px[0] = g;
+                px[1] = g;
+                px[2] = g;
+                px[3] = if key == Some(g) { 0 } else { 255 };
             }
         }
         PngPixelFormat::Gray16Le => {
@@ -1201,52 +1214,44 @@ fn png_image_to_rgba(
             // (RFC 2083 §4.2.9 note: "it is important to compare both
             // bytes of the sample values to determine whether a pixel
             // is transparent").
-            for i in 0..n {
-                let lo = img.data[i * 2];
-                let hi = img.data[i * 2 + 1];
-                out[i * 4] = hi;
-                out[i * 4 + 1] = hi;
-                out[i * 4 + 2] = hi;
+            for (s, px) in img.data.chunks_exact(2).zip(out.chunks_exact_mut(4)) {
+                let (lo, hi) = (s[0], s[1]);
+                px[0] = hi;
+                px[1] = hi;
+                px[2] = hi;
                 let sample16 = u16::from_le_bytes([lo, hi]);
-                out[i * 4 + 3] = match trns_gray16 {
-                    Some(k) if k == sample16 => 0,
-                    _ => 255,
+                px[3] = if trns_gray16 == Some(sample16) {
+                    0
+                } else {
+                    255
                 };
             }
         }
         PngPixelFormat::Rgb24 => {
-            for i in 0..n {
-                let r = img.data[i * 3];
-                let g = img.data[i * 3 + 1];
-                let b = img.data[i * 3 + 2];
-                out[i * 4] = r;
-                out[i * 4 + 1] = g;
-                out[i * 4 + 2] = b;
-                out[i * 4 + 3] = match trns_rgb16 {
-                    Some((rk, gk, bk)) if (rk as u8) == r && (gk as u8) == g && (bk as u8) == b => {
-                        0
-                    }
-                    _ => 255,
+            let key = trns_rgb16.map(|(rk, gk, bk)| [rk as u8, gk as u8, bk as u8]);
+            for (s, px) in img.data.chunks_exact(3).zip(out.chunks_exact_mut(4)) {
+                px[0] = s[0];
+                px[1] = s[1];
+                px[2] = s[2];
+                px[3] = if key == Some([s[0], s[1], s[2]]) {
+                    0
+                } else {
+                    255
                 };
             }
         }
         PngPixelFormat::Rgb48Le => {
-            for i in 0..n {
-                let r_lo = img.data[i * 6];
-                let r_hi = img.data[i * 6 + 1];
-                let g_lo = img.data[i * 6 + 2];
-                let g_hi = img.data[i * 6 + 3];
-                let b_lo = img.data[i * 6 + 4];
-                let b_hi = img.data[i * 6 + 5];
-                out[i * 4] = r_hi;
-                out[i * 4 + 1] = g_hi;
-                out[i * 4 + 2] = b_hi;
-                let r16 = u16::from_le_bytes([r_lo, r_hi]);
-                let g16 = u16::from_le_bytes([g_lo, g_hi]);
-                let b16 = u16::from_le_bytes([b_lo, b_hi]);
-                out[i * 4 + 3] = match trns_rgb16 {
-                    Some((rk, gk, bk)) if rk == r16 && gk == g16 && bk == b16 => 0,
-                    _ => 255,
+            for (s, px) in img.data.chunks_exact(6).zip(out.chunks_exact_mut(4)) {
+                px[0] = s[1];
+                px[1] = s[3];
+                px[2] = s[5];
+                let r16 = u16::from_le_bytes([s[0], s[1]]);
+                let g16 = u16::from_le_bytes([s[2], s[3]]);
+                let b16 = u16::from_le_bytes([s[4], s[5]]);
+                px[3] = if trns_rgb16 == Some((r16, g16, b16)) {
+                    0
+                } else {
+                    255
                 };
             }
         }
@@ -1262,40 +1267,46 @@ fn png_image_to_rgba(
             }
             let entries = plte.len() / 3;
             let trns = trns.unwrap_or(&[]);
-            for i in 0..n {
-                let idx = img.data[i] as usize;
+            // Resolve PLTE + tRNS into a 256-entry RGBA lookup once so
+            // the per-pixel work is a single 4-byte table move. Indexes
+            // are u8, so a (nonconformant) PLTE longer than 256 entries
+            // simply leaves its unreachable tail out of the table —
+            // exactly the entries no index byte can address.
+            let mut lut = [[0u8; 4]; 256];
+            for (j, e) in plte.chunks_exact(3).take(256).enumerate() {
+                let a = if j < trns.len() { trns[j] } else { 255 };
+                lut[j] = [e[0], e[1], e[2], a];
+            }
+            for (&idx, px) in img.data.iter().zip(out.chunks_exact_mut(4)) {
+                let idx = idx as usize;
+                // tRNS (per spec): leading entries carry alpha; all
+                // entries past tRNS.len() are fully opaque.
                 if idx >= entries {
                     return Err(Error::invalid(format!(
                         "PNG: palette index {idx} out of bounds (PLTE has {entries} entries)"
                     )));
                 }
-                out[i * 4] = plte[idx * 3];
-                out[i * 4 + 1] = plte[idx * 3 + 1];
-                out[i * 4 + 2] = plte[idx * 3 + 2];
-                // tRNS (per spec): leading entries carry alpha; all
-                // entries past tRNS.len() are fully opaque.
-                out[i * 4 + 3] = if idx < trns.len() { trns[idx] } else { 255 };
+                px.copy_from_slice(&lut[idx]);
             }
         }
         PngPixelFormat::Ya8 => {
-            for i in 0..n {
-                let g = img.data[i * 2];
-                let a = img.data[i * 2 + 1];
-                out[i * 4] = g;
-                out[i * 4 + 1] = g;
-                out[i * 4 + 2] = g;
-                out[i * 4 + 3] = a;
+            for (s, px) in img.data.chunks_exact(2).zip(out.chunks_exact_mut(4)) {
+                let (g, a) = (s[0], s[1]);
+                px[0] = g;
+                px[1] = g;
+                px[2] = g;
+                px[3] = a;
             }
         }
         PngPixelFormat::Rgba => {
             out.copy_from_slice(&img.data);
         }
         PngPixelFormat::Rgba64Le => {
-            for i in 0..n {
-                out[i * 4] = img.data[i * 8 + 1];
-                out[i * 4 + 1] = img.data[i * 8 + 3];
-                out[i * 4 + 2] = img.data[i * 8 + 5];
-                out[i * 4 + 3] = img.data[i * 8 + 7];
+            for (s, px) in img.data.chunks_exact(8).zip(out.chunks_exact_mut(4)) {
+                px[0] = s[1];
+                px[1] = s[3];
+                px[2] = s[5];
+                px[3] = s[7];
             }
         }
     }
@@ -1312,9 +1323,15 @@ fn png_image_to_rgba(
 /// to little-endian; for colour type 4 / 16-bit it expands `(gray,
 /// alpha)` into `(gray, gray, gray, alpha)` because we have no native
 /// Ya16 pixel format.
+///
+/// Takes the raw plane by value: the 8-bit formats pass the buffer
+/// through untouched and the 16-bit endian swap happens in place, so
+/// the decode pipeline hands one allocation from reconstruction to the
+/// returned [`PngImage`] instead of re-copying the whole plane here.
+/// Only the ct=4/16-bit `(G16, A16) → RGBA64` widening allocates.
 fn build_png_image(
     ihdr: &Ihdr,
-    raw: &[u8],
+    raw: Vec<u8>,
     plte: Option<&[u8]>,
     trns: Option<&[u8]>,
 ) -> Result<PngImage> {
@@ -1323,60 +1340,39 @@ fn build_png_image(
     let h = ihdr.height as usize;
 
     let (stride, data) = match pf {
-        PngPixelFormat::Gray8 => (w, raw.to_vec()),
+        PngPixelFormat::Gray8 => (w, raw),
         PngPixelFormat::Pal8 => {
             let _plte =
                 plte.ok_or_else(|| Error::invalid("PNG: colour type 3 requires PLTE chunk"))?;
-            (w, raw.to_vec())
+            (w, raw)
         }
-        PngPixelFormat::Gray16Le => {
-            let mut out = vec![0u8; w * h * 2];
-            for i in 0..w * h {
-                let be = &raw[i * 2..i * 2 + 2];
-                out[i * 2] = be[1];
-                out[i * 2 + 1] = be[0];
-            }
-            (w * 2, out)
-        }
-        PngPixelFormat::Rgb24 => (w * 3, raw.to_vec()),
-        PngPixelFormat::Rgba => (w * 4, raw.to_vec()),
-        PngPixelFormat::Rgb48Le => {
-            let mut out = vec![0u8; w * h * 6];
-            for i in 0..w * h * 3 {
-                out[i * 2] = raw[i * 2 + 1];
-                out[i * 2 + 1] = raw[i * 2];
-            }
-            (w * 6, out)
-        }
+        PngPixelFormat::Gray16Le => (w * 2, swap16_in_place(raw)),
+        PngPixelFormat::Rgb24 => (w * 3, raw),
+        PngPixelFormat::Rgba => (w * 4, raw),
+        PngPixelFormat::Rgb48Le => (w * 6, swap16_in_place(raw)),
         PngPixelFormat::Rgba64Le => {
             // Two cases: genuinely RGBA 16 (ct=6, bd=16) or gray+alpha 16 (ct=4, bd=16).
             if ihdr.colour_type == 6 {
-                let mut out = vec![0u8; w * h * 8];
-                for i in 0..w * h * 4 {
-                    out[i * 2] = raw[i * 2 + 1];
-                    out[i * 2 + 1] = raw[i * 2];
-                }
-                (w * 8, out)
+                (w * 8, swap16_in_place(raw))
             } else {
                 // colour type 4 + 16 bit → (G16, A16) in BE per sample.
                 // Expand to (G,G,G,A) LE.
                 let mut out = vec![0u8; w * h * 8];
-                for i in 0..w * h {
-                    let g_hi = raw[i * 4];
-                    let g_lo = raw[i * 4 + 1];
-                    let a_hi = raw[i * 4 + 2];
-                    let a_lo = raw[i * 4 + 3];
-                    for c in 0..3 {
-                        out[i * 8 + c * 2] = g_lo;
-                        out[i * 8 + c * 2 + 1] = g_hi;
-                    }
-                    out[i * 8 + 6] = a_lo;
-                    out[i * 8 + 7] = a_hi;
+                for (src, dst) in raw.chunks_exact(4).zip(out.chunks_exact_mut(8)) {
+                    let (g_hi, g_lo, a_hi, a_lo) = (src[0], src[1], src[2], src[3]);
+                    dst[0] = g_lo;
+                    dst[1] = g_hi;
+                    dst[2] = g_lo;
+                    dst[3] = g_hi;
+                    dst[4] = g_lo;
+                    dst[5] = g_hi;
+                    dst[6] = a_lo;
+                    dst[7] = a_hi;
                 }
                 (w * 8, out)
             }
         }
-        PngPixelFormat::Ya8 => (w * 2, raw.to_vec()),
+        PngPixelFormat::Ya8 => (w * 2, raw),
     };
 
     let palette = if pf == PngPixelFormat::Pal8 {
@@ -1402,6 +1398,19 @@ fn build_png_image(
     })
 }
 
+/// Swap every 2-byte sample of a network-byte-order plane to
+/// little-endian in place and return the same buffer (PNG stores 16-bit
+/// samples "most significant byte first", RFC 2083 §2.1; the decoder's
+/// 16-bit output formats are LE). The paired-byte walk compiles to a
+/// straight-line byte-shuffle loop and avoids allocating a second
+/// full-size plane just to reorder bytes.
+fn swap16_in_place(mut plane: Vec<u8>) -> Vec<u8> {
+    for px in plane.chunks_exact_mut(2) {
+        px.swap(0, 1);
+    }
+    plane
+}
+
 /// Decompressed-zlib → unfiltered → (optionally expanded sub-byte, and for
 /// Adam7 interlaced streams, scattered into the full canvas) byte plane.
 ///
@@ -1410,7 +1419,7 @@ fn build_png_image(
 pub(crate) fn decode_image_pixels(decompressed: &[u8], ihdr: &Ihdr) -> Result<Vec<u8>> {
     if ihdr.interlace == 0 {
         let raw = reconstruct_filtered(decompressed, ihdr)?;
-        expand_byte_plane(&raw, ihdr, ihdr.width as usize, ihdr.height as usize)
+        expand_byte_plane(raw, ihdr, ihdr.width as usize, ihdr.height as usize)
     } else {
         // Adam7: seven passes, reconstructed independently, scattered into
         // the full canvas.
@@ -1482,17 +1491,41 @@ fn decode_adam7(decompressed: &[u8], ihdr: &Ihdr) -> Result<Vec<u8>> {
         cursor += pass_bytes;
 
         let raw = reconstruct_filtered(pass_slice, &pass_ihdr)?;
-        let expanded = expand_byte_plane(&raw, ihdr, pw, ph)?;
+        let expanded = expand_byte_plane(raw, ihdr, pw, ph)?;
 
         // Scatter `expanded` (pw × ph, out_bpp bytes/pixel) into `canvas`.
-        for py in 0..ph {
-            let dst_y = sr + py * rs;
-            for px in 0..pw {
-                let dst_x = sc + px * cs;
-                let src_off = (py * pw + px) * out_bpp;
-                let dst_off = (dst_y * img_w + dst_x) * out_bpp;
-                canvas[dst_off..dst_off + out_bpp]
-                    .copy_from_slice(&expanded[src_off..src_off + out_bpp]);
+        if cs == 1 {
+            // Column-spacing 1 (pass 7): the pass row is a contiguous
+            // run in the canvas row — one memcpy per row.
+            let run = pw * out_bpp;
+            for py in 0..ph {
+                let dst_y = sr + py * rs;
+                let dst_off = (dst_y * img_w + sc) * out_bpp;
+                canvas[dst_off..dst_off + run].copy_from_slice(&expanded[py * run..(py + 1) * run]);
+            }
+        } else {
+            // Strided scatter, specialised per pixel width so the
+            // per-pixel copy is a fixed-size move instead of a
+            // variable-length memcpy call.
+            match out_bpp {
+                1 => scatter_pass::<1>(&mut canvas, &expanded, img_w, pw, ph, sr, sc, rs, cs),
+                2 => scatter_pass::<2>(&mut canvas, &expanded, img_w, pw, ph, sr, sc, rs, cs),
+                3 => scatter_pass::<3>(&mut canvas, &expanded, img_w, pw, ph, sr, sc, rs, cs),
+                4 => scatter_pass::<4>(&mut canvas, &expanded, img_w, pw, ph, sr, sc, rs, cs),
+                6 => scatter_pass::<6>(&mut canvas, &expanded, img_w, pw, ph, sr, sc, rs, cs),
+                8 => scatter_pass::<8>(&mut canvas, &expanded, img_w, pw, ph, sr, sc, rs, cs),
+                _ => {
+                    for py in 0..ph {
+                        let dst_y = sr + py * rs;
+                        for px in 0..pw {
+                            let dst_x = sc + px * cs;
+                            let src_off = (py * pw + px) * out_bpp;
+                            let dst_off = (dst_y * img_w + dst_x) * out_bpp;
+                            canvas[dst_off..dst_off + out_bpp]
+                                .copy_from_slice(&expanded[src_off..src_off + out_bpp]);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1505,6 +1538,35 @@ fn decode_adam7(decompressed: &[u8], ihdr: &Ihdr) -> Result<Vec<u8>> {
     Ok(canvas)
 }
 
+/// Scatter one Adam7 pass sub-image into the canvas with a const pixel
+/// width: `expanded` is `pw × ph` pixels of `N` bytes each; the
+/// destination pixel for pass cell `(px, py)` sits at column
+/// `sc + px * cs` of canvas row `sr + py * rs` (§A.8 grid). The
+/// fixed-size `N`-byte move compiles to a plain load/store pair per
+/// pixel instead of a variable-length `memcpy` call.
+#[allow(clippy::too_many_arguments)]
+fn scatter_pass<const N: usize>(
+    canvas: &mut [u8],
+    expanded: &[u8],
+    img_w: usize,
+    pw: usize,
+    ph: usize,
+    sr: usize,
+    sc: usize,
+    rs: usize,
+    cs: usize,
+) {
+    for py in 0..ph {
+        let dst_y = sr + py * rs;
+        let src_row = &expanded[py * pw * N..(py + 1) * pw * N];
+        let dst_row = &mut canvas[dst_y * img_w * N..(dst_y * img_w + sc + (pw - 1) * cs + 1) * N];
+        for (px, src) in src_row.chunks_exact(N).enumerate() {
+            let dst_off = (sc + px * cs) * N;
+            dst_row[dst_off..dst_off + N].copy_from_slice(src);
+        }
+    }
+}
+
 /// Given a raw (unfiltered) PNG byte plane at native bit depth, expand it to
 /// the byte layout consumed by `build_png_image`. For sub-byte gray/pal,
 /// this means unpacking 2/4/8 pixels per byte and (for grayscale) scaling
@@ -1513,9 +1575,11 @@ fn decode_adam7(decompressed: &[u8], ihdr: &Ihdr) -> Result<Vec<u8>> {
 /// `w`/`h` are the logical pixel dimensions of the image the raw bytes
 /// represent (the *pass* dimensions for an Adam7 pass, or the full image
 /// dimensions otherwise).
-fn expand_byte_plane(raw: &[u8], ihdr: &Ihdr, w: usize, h: usize) -> Result<Vec<u8>> {
+fn expand_byte_plane(raw: Vec<u8>, ihdr: &Ihdr, w: usize, h: usize) -> Result<Vec<u8>> {
     if ihdr.bit_depth >= 8 {
-        // Sanity check — caller passed us matching-sized data.
+        // Sanity check — caller passed us matching-sized data. The plane
+        // is already in the output layout, so it passes through untouched
+        // (no re-copy).
         let bpp = ihdr.decoded_bytes_per_pixel()?;
         let expected = w * h * bpp;
         if raw.len() != expected {
@@ -1524,7 +1588,7 @@ fn expand_byte_plane(raw: &[u8], ihdr: &Ihdr, w: usize, h: usize) -> Result<Vec<
                 raw.len()
             )));
         }
-        return Ok(raw.to_vec());
+        return Ok(raw);
     }
 
     // Sub-byte: only colour type 0 (grayscale) or 3 (indexed) allowed.
@@ -1535,8 +1599,6 @@ fn expand_byte_plane(raw: &[u8], ihdr: &Ihdr, w: usize, h: usize) -> Result<Vec<
             ihdr.colour_type, bd
         )));
     }
-    let mask: u8 = (1u16 << bd) as u8 - 1;
-    let pixels_per_byte = 8 / bd;
     let row_bytes_packed = (w * bd).div_ceil(8);
     let expected = row_bytes_packed * h;
     if raw.len() != expected {
@@ -1547,29 +1609,70 @@ fn expand_byte_plane(raw: &[u8], ihdr: &Ihdr, w: usize, h: usize) -> Result<Vec<
     }
 
     // Scale table for grayscale: 1-bit → ×255, 2-bit → ×85, 4-bit → ×17.
-    // (PNG spec §13.12.)
+    // (PNG spec §13.12.) Indexed leaves the raw index (×1).
     let scale = match (ihdr.colour_type, bd) {
         (0, 1) => 255,
         (0, 2) => 85,
         (0, 4) => 17,
-        _ => 1, // indexed: raw index (not scaled)
+        _ => 1,
     };
 
     let mut out = vec![0u8; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let byte_idx = y * row_bytes_packed + x / pixels_per_byte;
-            // Pixels in a byte are MSB-first per PNG spec.
-            let shift_in_byte = (pixels_per_byte - 1 - (x % pixels_per_byte)) * bd;
-            let v = (raw[byte_idx] >> shift_in_byte) & mask;
-            out[y * w + x] = if ihdr.colour_type == 0 {
-                v.wrapping_mul(scale)
-            } else {
-                v
-            };
+    // IHDR validation (§11.2.1 Table 12) admits exactly 1 / 2 / 4 here;
+    // the const-depth instantiations let the per-byte unpack unroll to
+    // straight shifts with no per-pixel division.
+    match bd {
+        1 => expand_subbyte_plane::<1>(&raw, &mut out, w, row_bytes_packed, scale),
+        2 => expand_subbyte_plane::<2>(&raw, &mut out, w, row_bytes_packed, scale),
+        4 => expand_subbyte_plane::<4>(&raw, &mut out, w, row_bytes_packed, scale),
+        other => {
+            return Err(Error::invalid(format!(
+                "PNG: expand_byte_plane: unexpected sub-byte depth {other}"
+            )))
         }
     }
     Ok(out)
+}
+
+/// Unpack one MSB-first sub-byte plane (`BD` ∈ {1, 2, 4} bits per
+/// sample, RFC 2083 §2.3 packing order) into one byte per pixel,
+/// multiplying by `scale` (§13.12 gray promotion, or ×1 for palette
+/// indices). Walks each row byte-at-a-time and emits its
+/// `8 / BD` pixels with compile-time shifts — no per-pixel `x /
+/// pixels_per_byte` arithmetic — with the row's final partial byte
+/// handled separately so padding bits (§2.3 "wasted bits") never reach
+/// the output.
+fn expand_subbyte_plane<const BD: usize>(
+    raw: &[u8],
+    out: &mut [u8],
+    w: usize,
+    row_bytes_packed: usize,
+    scale: u8,
+) {
+    let ppb = 8 / BD; // pixels per packed byte
+    let mask: u8 = ((1u16 << BD) - 1) as u8;
+    for (src_row, dst_row) in raw
+        .chunks_exact(row_bytes_packed)
+        .zip(out.chunks_exact_mut(w))
+    {
+        let mut dst = dst_row.chunks_exact_mut(ppb);
+        let mut src = src_row.iter();
+        for chunk in &mut dst {
+            // Full byte: emit all 8/BD samples, leftmost pixel in the
+            // high-order bits.
+            let byte = *src.next().expect("packed row shorter than pixel count");
+            for (k, d) in chunk.iter_mut().enumerate() {
+                *d = ((byte >> (8 - BD * (k + 1))) & mask).wrapping_mul(scale);
+            }
+        }
+        let rem = dst.into_remainder();
+        if !rem.is_empty() {
+            let byte = *src.next().expect("packed row shorter than pixel count");
+            for (k, d) in rem.iter_mut().enumerate() {
+                *d = ((byte >> (8 - BD * (k + 1))) & mask).wrapping_mul(scale);
+            }
+        }
+    }
 }
 
 /// Apply the 5 per-row filters, returning a flat raw-pixel buffer of
@@ -1983,7 +2086,7 @@ pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
         let frame_raw = decode_image_pixels(&decompressed, &sub_ihdr)?;
         let sub_frame = build_png_image(
             &sub_ihdr,
-            &frame_raw,
+            frame_raw,
             info.plte.as_deref(),
             info.trns.as_deref(),
         )?;
@@ -2075,6 +2178,29 @@ fn blit_sub_into_canvas(
     trns_key: &TransparencyKey,
 ) {
     let sub_stride = sub.stride;
+    if blend == Blend::Source {
+        // SOURCE replaces the destination region outright (W3C PNG3
+        // §11.3.6.2 "all color components of the frame, including alpha,
+        // overwrite the current contents") — each clipped frame row is
+        // one contiguous memcpy instead of a per-pixel copy loop.
+        let row_cap = (canvas_w - x_off.min(canvas_w)).min(sub_w);
+        if row_cap == 0 {
+            // Fully clipped horizontally (x_off ≥ canvas width): nothing
+            // visible, and `x_off * bpp` may lie past the row end — match
+            // the per-pixel path's behaviour of touching nothing.
+            return;
+        }
+        for sy in 0..sub_h {
+            let dy = y_off + sy;
+            if dy >= canvas_h {
+                break;
+            }
+            let src = &sub.data[sy * sub_stride..sy * sub_stride + row_cap * bpp];
+            let dst_start = dy * stride_canvas + x_off * bpp;
+            canvas[dst_start..dst_start + row_cap * bpp].copy_from_slice(src);
+        }
+        return;
+    }
     for sy in 0..sub_h {
         let dy = y_off + sy;
         if dy >= canvas_h {
@@ -2192,8 +2318,6 @@ fn clear_region(
     for dy in y..(y + h).min(canvas_h) {
         let row_start = dy * stride_canvas + x * bpp;
         let row_end = row_start + visible_w * bpp;
-        for b in &mut canvas[row_start..row_end] {
-            *b = 0;
-        }
+        canvas[row_start..row_end].fill(0);
     }
 }
