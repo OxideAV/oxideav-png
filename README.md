@@ -759,6 +759,19 @@ Each scenario synthesises a fresh input on the fly with the public
 encoder API — no committed fixture files — so the benches reproduce
 from a clean checkout.
 
+Recorded numbers live in [`BENCHMARKS.md`](BENCHMARKS.md), most
+recently the round-448 profile pass: decode geo-mean **+28.7 %**
+across the 14 decode scenarios (rgba 1080p 237 → 281 MiB/s, rgb48
+511 → 683 MiB/s, rgba64 593 → 847 MiB/s, pal8 → RGBA promotion
+897 → 1721 MiB/s, APNG +30 %) and encode geo-mean +6.2 % (gray16
+357 → 417 MiB/s; the level-6 zlib pixel stream dominates the
+noise-content scenarios), with output verified byte-identical to the
+pre-round build across 74 encode + 77 decode configurations. The §6
+filter-reconstruction kernels run on register-carried lane arrays
+(unfilter gray8 0.63 → 1.48 GiB/s, rgba64 2.29 → 5.15 GiB/s) and the
+§12.8 heuristic evaluates its five candidate sums without
+materialising filtered bytes.
+
 ```sh
 cargo bench -p oxideav-png --bench decode
 cargo bench -p oxideav-png --bench encode

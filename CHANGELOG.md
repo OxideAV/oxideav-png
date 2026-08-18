@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round 448 profile/bench depth pass — decode and encode are
+  measurably faster with **zero behaviour change** (output verified
+  byte-identical to the previous build across 74 encode and 77 decode
+  configurations spanning every colour type, bit depth, interlace
+  mode, filter strategy, and the APNG / RGBA-promotion paths):
+  - §6.3/§6.5/§6.6 filter reconstruction now runs on const-generic
+    register-lane kernels (bpp 1..=8) that carry the left / upper-left
+    neighbours in registers instead of re-reading just-written row
+    bytes; the Paeth predictor uses the algebraically identical
+    `pa=|b−c|, pb=|a−c|, pc=|a+b−2c|` distance form (same §6.6
+    selection order). Unfilter kernel throughput roughly doubles
+    (gray8 0.63 → 1.48 GiB/s, rgba64 2.29 → 5.15 GiB/s).
+  - The §12.8 min-sum-abs filter heuristic evaluates all five
+    candidate sums read-only from the raw row — filtered bytes are
+    produced once, for the winning filter only (+12–22 %).
+  - Single-allocation decode pipeline: the reconstruction buffer
+    passes through sub-byte expansion and image assembly by value,
+    16-bit BE→LE conversion swaps in place, a lone IDAT chunk is
+    borrowed instead of concatenated, and `decode_png_to_rgba` /
+    `decode_png_over_background` share one CRC-validating chunk walk
+    with the pixel decode instead of walking the file twice.
+  - Lockstep loops for RGBA promotion (256-entry PLTE+tRNS table for
+    `Pal8`, hoisted tRNS keys), const-depth 1/2/4-bit sub-byte
+    expand/pack, Adam7 scatter (contiguous pass-7 rows, const-width
+    strided moves), APNG SOURCE-blend row blits, and the encoder's
+    whole-plane / paired-byte flatten fast paths.
+  - Measured on the crate's Criterion suites as a paired same-sitting
+    A/B vs the pre-round tree: decode geo-mean **+28.7 %** across 14
+    scenarios (rgba 1080p 237 → 281 MiB/s, rgb48 511 → 683 MiB/s,
+    rgba64 593 → 847 MiB/s, pal8→RGBA 897 → 1721 MiB/s, APNG +30 %),
+    encode geo-mean +6.2 % across 10 scenarios (gray16 357 → 417
+    MiB/s; the level-6 zlib pixel stream dominates the rest). Full
+    tables in the new `BENCHMARKS.md`.
+  - New unit tests pin the optimised kernels bit-exact against
+    literal-spec reference loops (every filter × bpp 1..=9 × lane-
+    boundary-crossing lengths) and the read-only heuristic against a
+    materialise-then-sum trial.
+
 ### Added
 
 - Every zlib inflate in the crate is now **output-bounded** — the
