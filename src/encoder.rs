@@ -605,7 +605,6 @@ fn flatten_and_normalise_pixels(
     row_bytes: usize,
 ) -> Result<Vec<u8>> {
     let h = image.height as usize;
-    let w = image.width as usize;
     let stride = image.stride;
 
     // Sub-byte: source is Gray8 / Pal8 (one byte per pixel in
@@ -622,42 +621,29 @@ fn flatten_and_normalise_pixels(
         | PngPixelFormat::Rgba
         | PngPixelFormat::Pal8
         | PngPixelFormat::Ya8 => {
-            // Row-by-row copy; honour source stride.
-            for y in 0..h {
-                let sstart = y * stride;
-                let dstart = y * row_bytes;
-                out[dstart..dstart + row_bytes]
-                    .copy_from_slice(&image.data[sstart..sstart + row_bytes]);
-            }
-        }
-        PngPixelFormat::Gray16Le => {
-            // Source is LE per sample; PNG needs BE.
-            for y in 0..h {
-                for x in 0..w {
-                    let lo = image.data[y * stride + x * 2];
-                    let hi = image.data[y * stride + x * 2 + 1];
-                    out[y * row_bytes + x * 2] = hi;
-                    out[y * row_bytes + x * 2 + 1] = lo;
+            if stride == row_bytes {
+                // Tightly-packed source: one whole-plane memcpy.
+                out.copy_from_slice(&image.data[..row_bytes * h]);
+            } else {
+                // Row-by-row copy; honour source stride.
+                for y in 0..h {
+                    let sstart = y * stride;
+                    let dstart = y * row_bytes;
+                    out[dstart..dstart + row_bytes]
+                        .copy_from_slice(&image.data[sstart..sstart + row_bytes]);
                 }
             }
         }
-        PngPixelFormat::Rgb48Le => {
+        // 16-bit formats: source is LE per sample; PNG needs BE
+        // (RFC 2083 §2.1). Paired-byte lockstep walk per row — no
+        // per-sample index arithmetic.
+        PngPixelFormat::Gray16Le | PngPixelFormat::Rgb48Le | PngPixelFormat::Rgba64Le => {
             for y in 0..h {
-                for i in 0..(w * 3) {
-                    let lo = image.data[y * stride + i * 2];
-                    let hi = image.data[y * stride + i * 2 + 1];
-                    out[y * row_bytes + i * 2] = hi;
-                    out[y * row_bytes + i * 2 + 1] = lo;
-                }
-            }
-        }
-        PngPixelFormat::Rgba64Le => {
-            for y in 0..h {
-                for i in 0..(w * 4) {
-                    let lo = image.data[y * stride + i * 2];
-                    let hi = image.data[y * stride + i * 2 + 1];
-                    out[y * row_bytes + i * 2] = hi;
-                    out[y * row_bytes + i * 2 + 1] = lo;
+                let src = &image.data[y * stride..y * stride + row_bytes];
+                let dst = &mut out[y * row_bytes..(y + 1) * row_bytes];
+                for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)) {
+                    d[0] = s[1];
+                    d[1] = s[0];
                 }
             }
         }
@@ -760,8 +746,8 @@ fn filter_image_stream(
         let dst_off = y * (1 + row_bytes);
         filtered[dst_off] = ft as u8;
         let data_slot = &mut filtered[dst_off + 1..dst_off + 1 + row_bytes];
-        // The heuristic's scratch buffer holds whichever filter it tried
-        // last, not necessarily the winner — re-filter into the output slot.
+        // The heuristic evaluates candidate sums without materialising
+        // filtered bytes — this is the single pass that produces them.
         filter_row(ft, row, prev, bpp, data_slot);
     }
     filtered
