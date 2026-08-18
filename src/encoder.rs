@@ -667,32 +667,72 @@ fn flatten_and_normalise_pixels(
 /// A sample whose top bits exceed the `bit_depth` cap is rejected so
 /// a malformed payload cannot reach the wire.
 fn pack_subbyte_rows(image: &PngImage, bit_depth: u8, row_bytes: usize) -> Result<Vec<u8>> {
-    debug_assert!(bit_depth == 1 || bit_depth == 2 || bit_depth == 4);
+    match bit_depth {
+        1 => pack_subbyte_rows_const::<1>(image, row_bytes),
+        2 => pack_subbyte_rows_const::<2>(image, row_bytes),
+        4 => pack_subbyte_rows_const::<4>(image, row_bytes),
+        other => Err(Error::invalid(format!(
+            "PNG encoder: pack_subbyte_rows: unexpected sub-byte depth {other}"
+        ))),
+    }
+}
+
+/// [`pack_subbyte_rows`] at a compile-time bit depth: each group of
+/// `8 / BD` source samples folds into one output byte with constant
+/// shifts (no per-pixel division), the row's trailing partial group
+/// padding the low-order bits with zeros. Sample range validation is
+/// unchanged — the first out-of-range sample in row-major order errors
+/// with its pixel coordinates.
+fn pack_subbyte_rows_const<const BD: usize>(image: &PngImage, row_bytes: usize) -> Result<Vec<u8>> {
     let h = image.height as usize;
     let w = image.width as usize;
     let stride = image.stride;
-    let bd = bit_depth as usize;
-    let max: u8 = ((1u16 << bd) - 1) as u8;
-    let pixels_per_byte = 8 / bd;
+    let max: u8 = ((1u16 << BD) - 1) as u8;
+    let ppb = 8 / BD; // pixels per packed byte
 
     let mut out = vec![0u8; row_bytes * h];
     for y in 0..h {
         let src_row = &image.data[y * stride..y * stride + w];
         let dst_row = &mut out[y * row_bytes..(y + 1) * row_bytes];
-        for (x, &v) in src_row.iter().enumerate() {
-            if v > max {
-                return Err(Error::invalid(format!(
-                    "PNG encoder: sub-byte sample {v} at pixel ({x},{y}) exceeds \
-                     2^{bit_depth} - 1 ({max}) — callers supplying sub-byte input \
-                     must pre-quantize source samples to the target bit depth"
-                )));
+        let mut groups = src_row.chunks_exact(ppb);
+        let mut dst = dst_row.iter_mut();
+        let mut x_base = 0usize;
+        for (g, slot) in (&mut groups).zip(&mut dst) {
+            let mut byte = 0u8;
+            for (k, &v) in g.iter().enumerate() {
+                if v > max {
+                    return Err(subbyte_range_error::<BD>(v, x_base + k, y, max));
+                }
+                byte |= v << (8 - BD * (k + 1));
             }
-            let byte_idx = x / pixels_per_byte;
-            let shift_in_byte = (pixels_per_byte - 1 - (x % pixels_per_byte)) * bd;
-            dst_row[byte_idx] |= v << shift_in_byte;
+            *slot = byte;
+            x_base += ppb;
+        }
+        let rem = groups.remainder();
+        if !rem.is_empty() {
+            let slot = dst.next().expect("wire row shorter than pixel count");
+            let mut byte = 0u8;
+            for (k, &v) in rem.iter().enumerate() {
+                if v > max {
+                    return Err(subbyte_range_error::<BD>(v, x_base + k, y, max));
+                }
+                byte |= v << (8 - BD * (k + 1));
+            }
+            *slot = byte;
         }
     }
     Ok(out)
+}
+
+/// The out-of-range-sample encode error shared by the packed-group and
+/// remainder halves of [`pack_subbyte_rows_const`]; same wording (and
+/// same first-offending-pixel-in-row-major-order trigger) as always.
+fn subbyte_range_error<const BD: usize>(v: u8, x: usize, y: usize, max: u8) -> Error {
+    Error::invalid(format!(
+        "PNG encoder: sub-byte sample {v} at pixel ({x},{y}) exceeds \
+         2^{BD} - 1 ({max}) — callers supplying sub-byte input \
+         must pre-quantize source samples to the target bit depth"
+    ))
 }
 
 /// Filter each row according to `strategy` (W3C PNG3 §12.7), prepend the

@@ -835,6 +835,16 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
 /// point: works whether or not the `registry` feature is enabled.
 pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
     let chunks = parse_all_chunks(buf)?;
+    decode_png_chunks(&chunks)
+}
+
+/// [`decode_png`] over an already-walked chunk list. Factored out so
+/// the RGBA-promotion entry points ([`decode_png_to_rgba`] /
+/// [`decode_png_over_background`]), which need their own look at the
+/// `PLTE` / `tRNS` / `bKGD` chunk bytes, can share one chunk walk —
+/// the walk re-validates every chunk CRC, so doing it once instead of
+/// twice halves the whole-file CRC pass.
+fn decode_png_chunks(chunks: &[ChunkRef<'_>]) -> Result<PngImage> {
     let ihdr_chunk = chunks
         .iter()
         .find(|c| c.is_type(b"IHDR"))
@@ -855,7 +865,7 @@ pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
     // rejected. Unknown *ancillary* chunks are ignored here (the
     // standalone decode path produces pixels only); a PNG editor that
     // wants to carry them forward uses `parse_metadata`'s `unknowns`.
-    for c in &chunks {
+    for c in chunks {
         let ty = c.type_code();
         if ty.is_critical() && !matches!(&c.chunk_type, b"IHDR" | b"PLTE" | b"IDAT" | b"IEND") {
             return Err(Error::invalid(format!(
@@ -867,13 +877,13 @@ pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
 
     // W3C PNG3 §5.6 / §11.2.3: the IDAT run shall be consecutive (the
     // decoder concatenates IDAT payloads into one zlib stream).
-    validate_idat_consecutive(&chunks)?;
+    validate_idat_consecutive(chunks)?;
 
     let mut plte: Option<&[u8]> = None;
     let mut trns: Option<&[u8]> = None;
     let mut idat_slices: Vec<&[u8]> = Vec::new();
     let mut idat_total_len = 0usize;
-    for c in &chunks {
+    for c in chunks {
         if c.is_type(b"PLTE") {
             plte = Some(c.data);
         } else if c.is_type(b"tRNS") {
@@ -1044,9 +1054,11 @@ fn validate_trns(ihdr: &Ihdr, trns: Option<&[u8]>, plte: Option<&[u8]>) -> Resul
 /// Standalone (no `oxideav-core`) entry point: works whether or not
 /// the `registry` feature is enabled.
 pub fn decode_png_to_rgba(buf: &[u8]) -> Result<RgbaBitmap> {
-    // Re-walk chunks so we can read the original PLTE / tRNS lengths
-    // separately. `decode_png` collapses them into a single
-    // `palette = PLTE || tRNS` blob with no explicit split point.
+    // Walk the chunks once, both to read the original PLTE / tRNS
+    // lengths separately (`decode_png` collapses them into a single
+    // `palette = PLTE || tRNS` blob with no explicit split point) and
+    // to feed the shared chunk-level decode — re-walking would repeat
+    // the whole-file CRC validation pass.
     let chunks = parse_all_chunks(buf)?;
     let mut plte: Option<&[u8]> = None;
     let mut trns: Option<&[u8]> = None;
@@ -1058,7 +1070,7 @@ pub fn decode_png_to_rgba(buf: &[u8]) -> Result<RgbaBitmap> {
         }
     }
 
-    let img = decode_png(buf)?;
+    let img = decode_png_chunks(&chunks)?;
     png_image_to_rgba(&img, plte, trns)
 }
 
@@ -1120,7 +1132,9 @@ pub fn decode_png_over_background(buf: &[u8], override_bg: Option<[u8; 3]>) -> R
     }
 
     let mut bitmap = {
-        let img = decode_png(buf)?;
+        // Shared chunk walk — same reasoning as `decode_png_to_rgba`:
+        // one CRC-validating pass over the file, not two.
+        let img = decode_png_chunks(&chunks)?;
         png_image_to_rgba(&img, plte, trns)?
     };
 
