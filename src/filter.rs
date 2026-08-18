@@ -41,23 +41,28 @@ pub fn unfilter_row(filter: FilterType, row: &mut [u8], prev_row: &[u8], bpp: us
             "PNG unfilter: prev_row length must match row length",
         ));
     }
-    let len = row.len();
-    // `bpp` is clamped to the row length so the head/body split below is
-    // always valid even on degenerate sub-`bpp` rows (interlaced passes
-    // can produce rows shorter than `bpp`).
-    let bpp = bpp.min(len);
+    // PNG's only legal byte-distances are 1..=8 (§7.2: at most 4
+    // channels × 2 bytes); those take the register-lane kernels below.
+    // Any other `bpp` (reachable through the public API only) falls
+    // back to the index-walking reference loops.
     match filter {
         FilterType::None => {}
-        FilterType::Sub => {
-            // First `bpp` bytes have no left neighbour (left == 0), so they
-            // are unchanged. The body reconstructs each byte from the
-            // already-reconstructed byte `bpp` positions earlier. Splitting
-            // off the head lets the loop run with no per-iteration
-            // `i >= bpp` branch.
-            for i in bpp..len {
-                row[i] = row[i].wrapping_add(row[i - bpp]);
+        FilterType::Sub => match bpp {
+            1 => unfilter_sub_lanes::<1>(row),
+            2 => unfilter_sub_lanes::<2>(row),
+            3 => unfilter_sub_lanes::<3>(row),
+            4 => unfilter_sub_lanes::<4>(row),
+            5 => unfilter_sub_lanes::<5>(row),
+            6 => unfilter_sub_lanes::<6>(row),
+            7 => unfilter_sub_lanes::<7>(row),
+            8 => unfilter_sub_lanes::<8>(row),
+            _ => {
+                let bpp = bpp.min(row.len());
+                for i in bpp..row.len() {
+                    row[i] = row[i].wrapping_add(row[i - bpp]);
+                }
             }
-        }
+        },
         FilterType::Up => {
             // Pure vertical add — no left dependency at all. Iterating in
             // lockstep over equal-length slices lets the optimiser drop the
@@ -66,42 +71,125 @@ pub fn unfilter_row(filter: FilterType, row: &mut [u8], prev_row: &[u8], bpp: us
                 *r = r.wrapping_add(p);
             }
         }
-        FilterType::Average => {
-            // Head: left == 0, so avg = up / 2.
-            for (r, &up) in row[..bpp].iter_mut().zip(prev_row[..bpp].iter()) {
-                *r = r.wrapping_add(up >> 1);
+        FilterType::Average => match bpp {
+            1 => unfilter_avg_lanes::<1>(row, prev_row),
+            2 => unfilter_avg_lanes::<2>(row, prev_row),
+            3 => unfilter_avg_lanes::<3>(row, prev_row),
+            4 => unfilter_avg_lanes::<4>(row, prev_row),
+            5 => unfilter_avg_lanes::<5>(row, prev_row),
+            6 => unfilter_avg_lanes::<6>(row, prev_row),
+            7 => unfilter_avg_lanes::<7>(row, prev_row),
+            8 => unfilter_avg_lanes::<8>(row, prev_row),
+            _ => {
+                let len = row.len();
+                let bpp = bpp.min(len);
+                for (r, &up) in row[..bpp].iter_mut().zip(prev_row[..bpp].iter()) {
+                    *r = r.wrapping_add(up >> 1);
+                }
+                let up_tail = &prev_row[bpp..];
+                let (done, rest) = row.split_at_mut(bpp);
+                average_body(done, rest, up_tail, bpp);
             }
-            // Body: `left` is the byte `bpp` back (already reconstructed),
-            // `up` is the byte directly above. Splitting `row` at `bpp`
-            // gives `done` (the already-reconstructed bytes, where the
-            // `left` neighbour lives) and `rest`, paired in lockstep so
-            // index `j` of `rest` reads `done[j]` as its left — a single
-            // forward-walking window with no `i - bpp` recomputation and
-            // bounds the optimiser can hoist. `(left + up) / 2` widened to
-            // u16, per RFC 2083 §6.5.
-            let up_tail = &prev_row[bpp..];
-            let (done, rest) = row.split_at_mut(bpp);
-            // First `bpp` lefts come from `done`; subsequent lefts come
-            // from `rest` itself `bpp` positions back. Process in chunks
-            // so each source slice is a clean borrow.
-            average_body(done, rest, up_tail, bpp);
-        }
-        FilterType::Paeth => {
-            // Head: left == up_left == 0, so the predictor reduces to `up`
-            // (paeth_predictor(0, b, 0) == b).
-            for (r, &up) in row[..bpp].iter_mut().zip(prev_row[..bpp].iter()) {
-                *r = r.wrapping_add(up);
+        },
+        FilterType::Paeth => match bpp {
+            1 => unfilter_paeth_lanes::<1>(row, prev_row),
+            2 => unfilter_paeth_lanes::<2>(row, prev_row),
+            3 => unfilter_paeth_lanes::<3>(row, prev_row),
+            4 => unfilter_paeth_lanes::<4>(row, prev_row),
+            5 => unfilter_paeth_lanes::<5>(row, prev_row),
+            6 => unfilter_paeth_lanes::<6>(row, prev_row),
+            7 => unfilter_paeth_lanes::<7>(row, prev_row),
+            8 => unfilter_paeth_lanes::<8>(row, prev_row),
+            _ => {
+                let len = row.len();
+                let bpp = bpp.min(len);
+                for (r, &up) in row[..bpp].iter_mut().zip(prev_row[..bpp].iter()) {
+                    *r = r.wrapping_add(up);
+                }
+                let up_tail = &prev_row[bpp..];
+                let up_left_tail = &prev_row[..len - bpp];
+                let (done, rest) = row.split_at_mut(bpp);
+                paeth_body(done, rest, up_tail, up_left_tail, bpp);
             }
-            // Body: all three neighbours present; same split-window trick
-            // as Average. `up` and `up_left` come from `prev_row`
-            // tails zipped in lockstep; `left` walks `done` then `rest`.
-            let up_tail = &prev_row[bpp..];
-            let up_left_tail = &prev_row[..len - bpp];
-            let (done, rest) = row.split_at_mut(bpp);
-            paeth_body(done, rest, up_tail, up_left_tail, bpp);
-        }
+        },
     }
     Ok(())
+}
+
+/// Sub reconstruction with the previous pixel carried in an `N`-byte
+/// register array instead of re-read from the row buffer. The serial
+/// recurrence `Recon(x) = Filt(x) + Recon(x - bpp)` (RFC 2083 §6.3)
+/// makes the loop a dependency chain per byte-lane; re-reading
+/// `row[i - bpp]` right after writing it stalls on store-to-load
+/// forwarding, while a register-carried lane array keeps the chain in
+/// registers. The first (zero-initialised) iteration reproduces the
+/// "no left neighbour → left == 0" head rule; a trailing sub-`N`
+/// remainder (possible only on degenerate rows shorter than `bpp`)
+/// keeps the same lane discipline.
+#[inline]
+fn unfilter_sub_lanes<const N: usize>(row: &mut [u8]) {
+    let mut left = [0u8; N];
+    let mut chunks = row.chunks_exact_mut(N);
+    for px in &mut chunks {
+        for k in 0..N {
+            let v = px[k].wrapping_add(left[k]);
+            px[k] = v;
+            left[k] = v;
+        }
+    }
+    for (k, b) in chunks.into_remainder().iter_mut().enumerate() {
+        *b = b.wrapping_add(left[k]);
+    }
+}
+
+/// Average reconstruction with register-carried left lanes (see
+/// [`unfilter_sub_lanes`]). `(left + up) / 2` widened to u16 per
+/// RFC 2083 §6.5; the zero-initialised first iteration reproduces the
+/// head rule `avg = up / 2`.
+#[inline]
+fn unfilter_avg_lanes<const N: usize>(row: &mut [u8], prev_row: &[u8]) {
+    let mut left = [0u8; N];
+    let mut rc = row.chunks_exact_mut(N);
+    let mut pc = prev_row.chunks_exact(N);
+    for (px, up) in (&mut rc).zip(&mut pc) {
+        for k in 0..N {
+            let v = px[k].wrapping_add(((left[k] as u16 + up[k] as u16) >> 1) as u8);
+            px[k] = v;
+            left[k] = v;
+        }
+    }
+    let rem = rc.into_remainder();
+    let prem = pc.remainder();
+    for k in 0..rem.len() {
+        rem[k] = rem[k].wrapping_add(((left[k] as u16 + prem[k] as u16) >> 1) as u8);
+    }
+}
+
+/// Paeth reconstruction with register-carried left / upper-left lanes
+/// (see [`unfilter_sub_lanes`]). The zero-initialised first iteration
+/// reproduces the head rule `paeth_predictor(0, up, 0) == up`.
+#[inline]
+fn unfilter_paeth_lanes<const N: usize>(row: &mut [u8], prev_row: &[u8]) {
+    let mut left = [0u8; N];
+    let mut up_left = [0u8; N];
+    let mut rc = row.chunks_exact_mut(N);
+    let mut pc = prev_row.chunks_exact(N);
+    for (px, up) in (&mut rc).zip(&mut pc) {
+        for k in 0..N {
+            let b = up[k];
+            let p = paeth_predictor(left[k] as i16, b as i16, up_left[k] as i16) as u8;
+            let v = px[k].wrapping_add(p);
+            px[k] = v;
+            left[k] = v;
+            up_left[k] = b;
+        }
+    }
+    let rem = rc.into_remainder();
+    let prem = pc.remainder();
+    for k in 0..rem.len() {
+        let p = paeth_predictor(left[k] as i16, prem[k] as i16, up_left[k] as i16) as u8;
+        rem[k] = rem[k].wrapping_add(p);
+    }
 }
 
 /// Filter one row. `row` holds the raw pixel bytes; output is written to
@@ -119,8 +207,16 @@ pub fn filter_row(filter: FilterType, row: &[u8], prev_row: &[u8], bpp: usize, o
         FilterType::Sub => {
             // Head: no left neighbour, so the output equals the raw byte.
             out[..bpp].copy_from_slice(&row[..bpp]);
-            for i in bpp..len {
-                out[i] = row[i].wrapping_sub(row[i - bpp]);
+            // Body: unlike reconstruction, the filter direction has no
+            // serial dependency — every output reads only the immutable
+            // `row` — so lockstep zips over the shifted slices expose a
+            // bounds-check-free, auto-vectorisable loop.
+            for ((o, &r), &left) in out[bpp..]
+                .iter_mut()
+                .zip(row[bpp..].iter())
+                .zip(row[..len - bpp].iter())
+            {
+                *o = r.wrapping_sub(left);
             }
         }
         FilterType::Up => {
@@ -137,10 +233,15 @@ pub fn filter_row(filter: FilterType, row: &[u8], prev_row: &[u8], bpp: usize, o
             {
                 *o = r.wrapping_sub(up >> 1);
             }
-            for i in bpp..len {
-                let left = row[i - bpp] as u16;
-                let up = prev_row[i] as u16;
-                out[i] = row[i].wrapping_sub(((left + up) >> 1) as u8);
+            // Body: same shifted-slice lockstep as Sub; `(left + up) / 2`
+            // widened to u16 per RFC 2083 §6.5.
+            for (((o, &r), &left), &up) in out[bpp..]
+                .iter_mut()
+                .zip(row[bpp..].iter())
+                .zip(row[..len - bpp].iter())
+                .zip(prev_row[bpp..].iter())
+            {
+                *o = r.wrapping_sub(((left as u16 + up as u16) >> 1) as u8);
             }
         }
         FilterType::Paeth => {
@@ -152,12 +253,17 @@ pub fn filter_row(filter: FilterType, row: &[u8], prev_row: &[u8], bpp: usize, o
             {
                 *o = r.wrapping_sub(up);
             }
-            for i in bpp..len {
-                let left = row[i - bpp] as i16;
-                let up = prev_row[i] as i16;
-                let up_left = prev_row[i - bpp] as i16;
-                let p = paeth_predictor(left, up, up_left) as u8;
-                out[i] = row[i].wrapping_sub(p);
+            // Body: four shifted source slices in lockstep — all reads
+            // from immutable inputs, no index arithmetic in the loop.
+            for ((((o, &r), &left), &up), &up_left) in out[bpp..]
+                .iter_mut()
+                .zip(row[bpp..].iter())
+                .zip(row[..len - bpp].iter())
+                .zip(prev_row[bpp..].iter())
+                .zip(prev_row[..len - bpp].iter())
+            {
+                let p = paeth_predictor(left as i16, up as i16, up_left as i16) as u8;
+                *o = r.wrapping_sub(p);
             }
         }
     }
@@ -210,11 +316,18 @@ fn paeth_body(done: &[u8], rest: &mut [u8], up_tail: &[u8], up_left_tail: &[u8],
     }
 }
 
+#[inline(always)]
 fn paeth_predictor(a: i16, b: i16, c: i16) -> i16 {
-    let p = a + b - c;
-    let pa = (p - a).abs();
-    let pb = (p - b).abs();
-    let pc = (p - c).abs();
+    // RFC 2083 §6.6 defines p = a + b - c and the distances
+    // pa = |p - a|, pb = |p - b|, pc = |p - c|. Substituting p gives
+    // the algebraically identical pa = |b - c|, pb = |a - c|,
+    // pc = |a + b - 2c| — three independent subtract/abs chains with
+    // no shared `p` intermediate, which shortens the dependency chain
+    // in the serial reconstruction loop. Selection order (a, then b,
+    // then c on ties) is exactly the §6.6 rule.
+    let pa = (b - c).abs();
+    let pb = (a - c).abs();
+    let pc = (a + b - 2 * c).abs();
     if pa <= pb && pa <= pc {
         a
     } else if pb <= pc {
@@ -225,34 +338,98 @@ fn paeth_predictor(a: i16, b: i16, c: i16) -> i16 {
 }
 
 /// Pick a filter for `row` using the sum-of-absolute-deltas heuristic from
-/// the PNG specification (§12.8). Tries all five filters and picks the one
-/// whose filtered bytes have the lowest absolute sum (treating bytes as
-/// signed i8).
+/// the PNG specification (§12.8). Evaluates all five filters and picks the
+/// one whose filtered bytes have the lowest absolute sum (treating bytes
+/// as signed i8).
+///
+/// The five candidate sums are computed read-only, directly from `row` /
+/// `prev_row` — the filtered bytes are never materialised, so the five
+/// full-row scratch writes (and their re-reads) the trial used to cost
+/// are gone. `scratch` is kept in the signature for call-site
+/// compatibility but is no longer written; the winning filter's bytes are
+/// produced by the caller's own [`filter_row`] pass.
 pub fn choose_filter_heuristic(
     row: &[u8],
     prev_row: &[u8],
     bpp: usize,
-    scratch: &mut [u8],
+    _scratch: &mut [u8],
 ) -> FilterType {
+    let len = row.len();
+    let bpp = bpp.min(len);
+
+    // §12.8 min-sum-abs term: the filtered byte interpreted as signed
+    // i8, absolute value. Each sum below reproduces exactly the bytes
+    // `filter_row` would emit for that filter type (same wrapping
+    // arithmetic, same head/body split) and folds them straight into
+    // the accumulator. Per-byte terms are ≤ 128 and a PNG scanline
+    // fits a u32 length, so u64 never saturates.
+    #[inline(always)]
+    fn abs_i8(b: u8) -> u64 {
+        (b as i8).unsigned_abs() as u64
+    }
+
+    // None: the raw bytes.
+    let sum_none: u64 = row.iter().map(|&b| abs_i8(b)).sum();
+
+    // Sub: head = raw bytes, body = row[i] - row[i - bpp].
+    let head_raw: u64 = row[..bpp].iter().map(|&b| abs_i8(b)).sum();
+    let sum_sub: u64 = head_raw
+        + row[bpp..]
+            .iter()
+            .zip(row[..len - bpp].iter())
+            .map(|(&r, &left)| abs_i8(r.wrapping_sub(left)))
+            .sum::<u64>();
+
+    // Up: row[i] - prev_row[i] across the whole row.
+    let sum_up: u64 = row
+        .iter()
+        .zip(prev_row.iter())
+        .map(|(&r, &p)| abs_i8(r.wrapping_sub(p)))
+        .sum();
+
+    // Average: head = row[i] - (up >> 1), body widened to u16 (§6.5).
+    let sum_avg: u64 = row[..bpp]
+        .iter()
+        .zip(prev_row[..bpp].iter())
+        .map(|(&r, &up)| abs_i8(r.wrapping_sub(up >> 1)))
+        .sum::<u64>()
+        + row[bpp..]
+            .iter()
+            .zip(row[..len - bpp].iter())
+            .zip(prev_row[bpp..].iter())
+            .map(|((&r, &left), &up)| {
+                abs_i8(r.wrapping_sub(((left as u16 + up as u16) >> 1) as u8))
+            })
+            .sum::<u64>();
+
+    // Paeth: head = row[i] - up (predictor(0, b, 0) == b), body = §6.6.
+    let sum_paeth: u64 = row[..bpp]
+        .iter()
+        .zip(prev_row[..bpp].iter())
+        .map(|(&r, &up)| abs_i8(r.wrapping_sub(up)))
+        .sum::<u64>()
+        + row[bpp..]
+            .iter()
+            .zip(row[..len - bpp].iter())
+            .zip(prev_row[bpp..].iter())
+            .zip(prev_row[..len - bpp].iter())
+            .map(|(((&r, &left), &up), &up_left)| {
+                let p = paeth_predictor(left as i16, up as i16, up_left as i16) as u8;
+                abs_i8(r.wrapping_sub(p))
+            })
+            .sum::<u64>();
+
+    // Same candidate order and strict-less-than tie-breaking as the
+    // materialising trial loop: on equal sums the earlier filter type
+    // (None < Sub < Up < Average < Paeth) wins.
     let mut best = FilterType::None;
-    let mut best_sum = u64::MAX;
-    for f in [
-        FilterType::None,
-        FilterType::Sub,
-        FilterType::Up,
-        FilterType::Average,
-        FilterType::Paeth,
+    let mut best_sum = sum_none;
+    for (f, sum) in [
+        (FilterType::Sub, sum_sub),
+        (FilterType::Up, sum_up),
+        (FilterType::Average, sum_avg),
+        (FilterType::Paeth, sum_paeth),
     ] {
-        filter_row(f, row, prev_row, bpp, scratch);
-        // Sum of absolute signed bytes (§12.8 min-sum-abs heuristic). The
-        // per-byte term is at most 128 and a PNG scanline fits in a u32
-        // length, so the running total stays far below u64::MAX — no
-        // saturating add needed, which keeps the inner loop a plain
-        // auto-vectorisable accumulate.
-        let mut sum: u64 = 0;
-        for &b in scratch.iter() {
-            sum += (b as i8).unsigned_abs() as u64;
-        }
         if sum < best_sum {
             best_sum = sum;
             best = f;
@@ -581,6 +758,135 @@ mod tests {
         let a = FilterStrategy::Adaptive.pick(&row, &prev, 1, &mut s1);
         let b = choose_filter_heuristic(&row, &prev, 1, &mut s2);
         assert_eq!(a, b);
+    }
+
+    /// Reference reconstruction: the RFC 2083 §6 recurrences written as
+    /// the plainest possible index loops (the shape the lane kernels
+    /// replaced). Used to prove the optimised `unfilter_row` bit-exact.
+    fn unfilter_reference(filter: FilterType, row: &mut [u8], prev: &[u8], bpp: usize) {
+        let len = row.len();
+        for i in 0..len {
+            let left = if i >= bpp { row[i - bpp] } else { 0 };
+            let up = prev[i];
+            let up_left = if i >= bpp { prev[i - bpp] } else { 0 };
+            row[i] = match filter {
+                FilterType::None => row[i],
+                FilterType::Sub => row[i].wrapping_add(left),
+                FilterType::Up => row[i].wrapping_add(up),
+                FilterType::Average => row[i].wrapping_add(((left as u16 + up as u16) >> 1) as u8),
+                FilterType::Paeth => {
+                    // Literal §6.6 formulation with the shared p.
+                    let (a, b, c) = (left as i16, up as i16, up_left as i16);
+                    let p = a + b - c;
+                    let (pa, pb, pc) = ((p - a).abs(), (p - b).abs(), (p - c).abs());
+                    let pred = if pa <= pb && pa <= pc {
+                        a
+                    } else if pb <= pc {
+                        b
+                    } else {
+                        c
+                    };
+                    row[i].wrapping_add(pred as u8)
+                }
+            };
+        }
+    }
+
+    #[test]
+    fn unfilter_lane_kernels_match_reference() {
+        // Sweep every filter type × bpp 1..=8 (plus an out-of-range 9
+        // hitting the fallback arm) × row lengths crossing the lane
+        // boundaries — including lengths shorter than bpp and lengths
+        // that are not a multiple of bpp — on pseudo-random content.
+        let mut state = 0x9e37_79b9u32;
+        let mut fill = |buf: &mut [u8]| {
+            for b in buf.iter_mut() {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                *b = (state & 0xff) as u8;
+            }
+        };
+        for f in [
+            FilterType::None,
+            FilterType::Sub,
+            FilterType::Up,
+            FilterType::Average,
+            FilterType::Paeth,
+        ] {
+            for bpp in 1..=9usize {
+                for len in [0usize, 1, 2, 3, 5, 7, 8, 9, 15, 16, 17, 33, 64, 100] {
+                    let mut row = vec![0u8; len];
+                    let mut prev = vec![0u8; len];
+                    fill(&mut row);
+                    fill(&mut prev);
+                    let mut fast = row.clone();
+                    unfilter_row(f, &mut fast, &prev, bpp).unwrap();
+                    let mut reference = row;
+                    unfilter_reference(f, &mut reference, &prev, bpp);
+                    assert_eq!(fast, reference, "filter {f:?} bpp {bpp} len {len}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn heuristic_matches_materialised_sums() {
+        // The read-only sum evaluation must pick exactly the filter the
+        // materialise-then-sum trial would (same §12.8 metric, same
+        // first-wins tie-breaking on the None,Sub,Up,Average,Paeth order).
+        let mut state = 0x243f_6a88u32;
+        let mut fill = |buf: &mut [u8]| {
+            for b in buf.iter_mut() {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                *b = (state & 0xff) as u8;
+            }
+        };
+        for bpp in 1..=8usize {
+            for len in [1usize, 2, 4, 7, 8, 9, 31, 48, 96] {
+                let mut row = vec![0u8; len];
+                let mut prev = vec![0u8; len];
+                fill(&mut row);
+                fill(&mut prev);
+                // Flat / gradient variants too — ties are where the
+                // ordering rule matters.
+                for variant in 0..3 {
+                    let (row, prev) = match variant {
+                        0 => (row.clone(), prev.clone()),
+                        1 => (vec![0u8; len], vec![0u8; len]),
+                        _ => (
+                            (0..len).map(|i| (i * 3) as u8).collect(),
+                            (0..len).map(|i| (i * 3) as u8).collect(),
+                        ),
+                    };
+                    let mut scratch = vec![0u8; len];
+                    let fast = choose_filter_heuristic(&row, &prev, bpp, &mut scratch);
+                    // Materialising reference trial.
+                    let mut best = FilterType::None;
+                    let mut best_sum = u64::MAX;
+                    for f in [
+                        FilterType::None,
+                        FilterType::Sub,
+                        FilterType::Up,
+                        FilterType::Average,
+                        FilterType::Paeth,
+                    ] {
+                        filter_row(f, &row, &prev, bpp, &mut scratch);
+                        let sum: u64 = scratch
+                            .iter()
+                            .map(|&b| (b as i8).unsigned_abs() as u64)
+                            .sum();
+                        if sum < best_sum {
+                            best_sum = sum;
+                            best = f;
+                        }
+                    }
+                    assert_eq!(fast, best, "bpp {bpp} len {len} variant {variant}");
+                }
+            }
+        }
     }
 
     #[test]
