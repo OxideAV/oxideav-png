@@ -15,7 +15,9 @@
 //! change the repetition count (default 3, min-of-n reported),
 //! `PNG_BENCH_LEVELS=1,3,6` to pick the DEFLATE levels, and
 //! `PNG_BENCH_THREADS=1,8` to pick the thread budgets,
-//! `PNG_BENCH_FILTERS=adaptive,paeth` to pick the filter strategies, and
+//! `PNG_BENCH_FILTERS=adaptive,paeth` to pick the filter strategies,
+//! `PNG_BENCH_OUT=dir` to also write every emitted PNG to `dir` (for
+//! black-box reader checks), and
 //! `PNG_BENCH_RAW=/path/to/4032x3024.rgb` to replace the synthetic
 //! "photo" content with a real 8-bit RGB24 raster (the other layouts
 //! are derived from it: alpha = 255, gray = BT.601 luma, 16-bit =
@@ -281,6 +283,14 @@ fn main() {
                                 encode_png_image_threaded(&img, &opts, threads).expect("encode");
                             best_enc = best_enc.min(t.elapsed().as_secs_f64() * 1e3);
                             bytes = png.len();
+                            if let Ok(dir) = std::env::var("PNG_BENCH_OUT") {
+                                let file = format!(
+                                    "{dir}/{name}_{}_l{}_{fname}_t{threads}.png",
+                                    if photo { photo_label } else { "flat" },
+                                    level.unwrap_or(0)
+                                );
+                                std::fs::write(&file, &png).expect("write PNG_BENCH_OUT file");
+                            }
                             let t = Instant::now();
                             let back = decode_png(&png).expect("decode");
                             best_dec = best_dec.min(t.elapsed().as_secs_f64() * 1e3);

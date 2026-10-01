@@ -147,7 +147,7 @@ pub use depth::{
 pub use encoder::{
     encode_apng, encode_apng_frames, encode_apng_frames_threaded, encode_apng_frames_with_options,
     encode_apng_threaded, encode_apng_with_options, encode_png_image, encode_png_image_threaded,
-    encode_png_image_with_options, ApngFrameSpec, PngEncoderOptions,
+    encode_png_image_with_options, ApngFrameSpec, PngEncoderOptions, DEFAULT_COMPRESSION_LEVEL,
 };
 pub use error::{PngError, Result};
 pub use filter::{FilterStrategy, FilterType};

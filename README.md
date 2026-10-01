@@ -177,8 +177,11 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   compression *method* — "compression method 0 (deflate/inflate)" per
   RFC 2083 §5 — and says nothing about the DEFLATE effort level, so the
   knob is spec-neutral and produces a conformant stream at every value.
-  `None` (the default) selects level `6` — the conventional default
-  effort level; an out-of-`1..=9` value is an encode
+  `None` (the default) selects `DEFAULT_COMPRESSION_LEVEL` = `2`,
+  chosen by measurement in round 464 (table below: the knee that keeps
+  a 12 MP frame under half a second on one thread within ~10 % of the
+  level-6 size; `Some(6)` restores the pre-464 bytes on small images);
+  an out-of-`1..=9` value is an encode
   error ahead of the wire. Registry-side `CodecOptions` exposes a
   `compression_level` u32 key with `0` mapping to the default, plus
   `level` and `compression` as aliases (the framework-wide dial name:
@@ -319,8 +322,8 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   presently defined for it is 0") + zlib-compressed Latin-1 text. The
   decoder inflates the body and applies the same no-`NUL`-in-text
   rule as `tEXt`; the encoder validates the keyword, the per-codepoint
-  Latin-1 / no-`NUL` text rules, and deflates the body at the
-  project's default level (6). Multiple `zTXt` chunks are permitted,
+  Latin-1 / no-`NUL` text rules, and deflates the body at a
+  fixed level 6 (metadata chunks are small and byte-layout-pinned). Multiple `zTXt` chunks are permitted,
   including with identical keywords (§4.2.10 ¶6 "Any number of zTXt
   and tEXt chunks can appear in the same file"). Emitted before `IDAT`
   alongside `tEXt`; the encoder writes `tEXt` ahead of `zTXt` so a
@@ -785,7 +788,7 @@ optimisation changes against a stable baseline:
   Markdown table, on synthetic photographic + flat content or on a
   real RGB24 raster (`PNG_BENCH_RAW=/path/4032x3024.rgb`), with
   `PNG_BENCH_LEVELS` / `PNG_BENCH_THREADS` / `PNG_BENCH_FILTERS` /
-  `PNG_BENCH_REPS` selectors and a `PNG_BENCH_STAGES` breakdown
+  `PNG_BENCH_REPS` / `PNG_BENCH_OUT` selectors and a `PNG_BENCH_STAGES` breakdown
   (heuristic / `filter_row` / deflate) so encode time can be
   attributed. Every emitted stream is decoded back and compared
   byte-for-byte.
@@ -806,6 +809,12 @@ ms by thread budget (bytes are identical across budgets):
 | 2 | 13 190 488 | 36.1 % | 412 | 112 | 69 | 65 | 226 |
 | 4 | 12 812 543 | 35.0 % | 592 | 159 | 103 | 79 | 209 |
 | 6 | 12 199 325 | 33.4 % | 3 301 | 857 | 516 | 398 | 187 |
+
+The default is level 2: on one thread it is the only level that
+lands under ~0.5 s within ~10 % of the level-6 size (level 4 is
+0.59 s / +5.0 %, level 1 0.35 s / +10.0 %; level 9 takes 19.4 s for
+−3.9 %). `--opt level=4` buys −3 % size for +45 % time, `level=6`
+−8 % for 8× the time (0.4 s at 16 threads).
 
 Stage attribution (1 thread, same image): §12.8 heuristic 8 ms,
 `Paeth` `filter_row` 6 ms, deflate of the filtered stream 334 ms

@@ -11,8 +11,9 @@
 //! buffered and an APNG is produced on `flush`.
 //!
 //! The IDAT / fdAT pixel stream is zlib-compressed at the level set by
-//! [`PngEncoderOptions::compression_level`] (`1..=9`); `None` selects 6
-//! — the zlib default and the historical encoder default. All rows use
+//! [`PngEncoderOptions::compression_level`] (`1..=9`); `None` selects
+//! [`DEFAULT_COMPRESSION_LEVEL`] (2 — chosen by measurement in round
+//! 464, see the field docs). All rows use
 //! the PNG §12.8 "minimum sum of absolute differences" heuristic by
 //! default (i.e. try all 5 filters, pick the one with the smallest
 //! absolute byte sum) unless [`PngEncoderOptions::filter_strategy`]
@@ -81,7 +82,8 @@ pub struct PngEncoderOptions {
     /// * `zTXt` — before `IDAT`; emitted after `tEXt` so plain text
     ///   precedes compressed text in the chunk stream. Multiple
     ///   instances with identical keywords are permitted (§4.2.10 ¶6).
-    ///   Body is zlib-compressed at the encoder default (level 6).
+    ///   Body is zlib-compressed at a fixed level 6 (metadata chunks
+    ///   are small and their byte layout is pinned by tests).
     /// * `iTXt` — before `IDAT`; emitted after `zTXt` so the
     ///   non-international text chunks lead the textual stream.
     ///   Multiple instances with identical keywords are permitted
@@ -147,10 +149,23 @@ pub struct PngEncoderOptions {
     /// effort level, so every value here produces a conformant stream.
     /// `1` is fastest / largest, `9` is slowest / smallest.
     ///
-    /// `None` (the default) uses level `6`, the historical encoder
-    /// default and zlib's own default — so an unset option reproduces
-    /// the pre-r312 byte stream exactly. Any value outside `1..=9` is
-    /// an encode error ahead of the wire.
+    /// `None` (the default) uses [`DEFAULT_COMPRESSION_LEVEL`] = `2`.
+    /// The default was chosen by measurement (round 464) on a 12 MP
+    /// RGB24 photograph with the `Adaptive` filter, single thread:
+    ///
+    /// | level | encode | size vs level 6 |
+    /// |---:|---:|---:|
+    /// | 1 | 0.35 s | +10.0 % |
+    /// | 2 | 0.41 s | +8.1 % |
+    /// | 4 | 0.59 s | +5.0 % |
+    /// | 6 | 3.30 s | — |
+    /// | 9 | 19.4 s | −3.9 % |
+    ///
+    /// Level 2 is the knee that keeps a production-scale frame under
+    /// half a second on one thread (65 ms at 16) within ~10 % of the
+    /// level-6 size; `Some(6)` restores the pre-round-464 output
+    /// byte-for-byte on single-segment (small) images. Any value
+    /// outside `1..=9` is an encode error ahead of the wire.
     ///
     /// The level applies to the pixel stream only; the compressed
     /// metadata chunks (`zTXt` / `iTXt` / `iCCP`) keep their own fixed
@@ -159,15 +174,21 @@ pub struct PngEncoderOptions {
     pub compression_level: Option<u8>,
 }
 
+/// DEFLATE level the pixel stream uses when
+/// [`PngEncoderOptions::compression_level`] is `None`. See the field
+/// docs for the measurement behind the value.
+pub const DEFAULT_COMPRESSION_LEVEL: u8 = 2;
+
 /// Resolve and validate the DEFLATE level for the pixel stream:
-/// `None` → the encoder default (6); `Some(n)` must be `1..=9`.
+/// `None` → [`DEFAULT_COMPRESSION_LEVEL`]; `Some(n)` must be `1..=9`.
 fn resolve_compression_level(opts: &PngEncoderOptions) -> Result<u8> {
     match opts.compression_level {
-        None => Ok(6),
+        None => Ok(DEFAULT_COMPRESSION_LEVEL),
         Some(level @ 1..=9) => Ok(level),
         Some(other) => Err(Error::invalid(format!(
             "PNG encoder: compression_level {other} out of range — \
-             DEFLATE levels are 1..=9 (RFC 1951); None selects the default (6)"
+             DEFLATE levels are 1..=9 (RFC 1951); None selects the default \
+             ({DEFAULT_COMPRESSION_LEVEL})"
         ))),
     }
 }

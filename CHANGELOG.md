@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Default DEFLATE level is now 2** (`DEFAULT_COMPRESSION_LEVEL`, a
+  new public constant) instead of 6. Chosen by measurement on a 12 MP
+  RGB24 photograph, `Adaptive` filter, one thread: level 1 0.35 s /
+  +10.0 % size vs level 6, **level 2 0.41 s / +8.1 %**, level 4
+  0.59 s / +5.0 %, level 6 3.30 s, level 9 19.4 s / −3.9 % — level 2
+  is the only level under ~0.5 s within ~10 % of the level-6 size
+  (65 ms at 16 threads). `compression_level: Some(6)` (registry
+  `level=6`) restores the previous output; on single-segment (small)
+  images it is byte-identical to the pre-round-464 encoder. The
+  compressed metadata chunks (`zTXt` / `iTXt` / `iCCP`) keep their
+  fixed level 6.
 - Round 464 — the encoder streams instead of materialising. The
   non-interlaced ≥ 8-bit path (every RGB / RGBA / Gray / Ya /
   16-bit encode, APNG frames included) now filters rows one at a
@@ -97,6 +108,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PNG encoder's speed / size dial.
 - The framework encoder moves the buffered frame's plane into the
   encode instead of cloning it (one copy fewer per frame).
+- `tests/blackbox_readers.rs` — the round-trip gate: 142 option
+  combinations (7 layouts × levels 1/2/6 × `adaptive` / `paeth` /
+  `sub` / `none` × rows / Adam7, plus `Brute`), each spanning several
+  DEFLATE segments, are decoded byte-exact by the crate's decoder and
+  — when the binaries are present — by ImageMagick (`magick identify`
+  + raw sample dump compared byte-for-byte) and macOS `sips`. The
+  12 MP real-photo output was additionally inflated by an independent
+  zlib and compared byte-exact against the source raster.
 - `benches/encode_12mp.rs` — a plain-`main` harness that prints a
   Markdown table of encode ms / bytes / decode ms for every
   (layout × level × filter × thread budget) at 4032×3024, on

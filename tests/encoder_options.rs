@@ -15,7 +15,7 @@ use oxideav_png::PngEncoderOptions;
 /// 8 = no-op for those sources), `filter` (string;
 /// `adaptive` / `none` / `sub` / `up` / `average` / `paeth`, default
 /// `adaptive` per W3C PNG3 §12.7), and `compression_level` (u32;
-/// 0 = default 6, 1..=9 = explicit DEFLATE level).
+/// 0 = encoder default `DEFAULT_COMPRESSION_LEVEL`, 1..=9 = explicit DEFLATE level).
 #[test]
 fn schema_advertises_interlace_bit_depth_and_filter() {
     let schema = <PngEncoderOptions as CodecOptionsStruct>::SCHEMA;
@@ -58,7 +58,7 @@ fn level_and_compression_aliases_set_compression_level() {
 
 /// `compression_level` threads through into
 /// `PngEncoderOptions::compression_level: Option<u8>`. The `0` sentinel
-/// maps to `None` (= encoder default 6); every other in-range value
+/// maps to `None` (= `DEFAULT_COMPRESSION_LEVEL`); every other in-range value
 /// becomes `Some(value)`. Range validation (1..=9) is deferred to
 /// encode time, so a parse here accepts the raw integer.
 #[test]
@@ -125,6 +125,18 @@ fn compression_level_roundtrips_and_validates_range() {
         sizes[9],
         sizes[1]
     );
+    // `None` is exactly `Some(DEFAULT_COMPRESSION_LEVEL)` — the default
+    // is a named level, not a separate code path.
+    let explicit = PngEncoderOptions {
+        compression_level: Some(oxideav_png::DEFAULT_COMPRESSION_LEVEL),
+        ..Default::default()
+    };
+    let default_bytes = encode_png_image_with_options(&img, &PngEncoderOptions::default()).unwrap();
+    assert_eq!(
+        default_bytes,
+        encode_png_image_with_options(&img, &explicit).unwrap()
+    );
+    assert_eq!(oxideav_png::DEFAULT_COMPRESSION_LEVEL, 2);
 
     // Out-of-range level is rejected before any bytes are emitted.
     for bad in [10u8, 11, 255] {

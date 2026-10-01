@@ -172,8 +172,10 @@ impl CodecOptionsStruct for PngEncoderOptions {
             default: OptionValue::U32(0),
             help: "DEFLATE level for the IDAT / fdAT pixel stream (1..=9). \
                    1 is fastest / largest, 9 is slowest / smallest. \
-                   0 (the default) selects the encoder default level \
-                   (see PngEncoderOptions::compression_level).",
+                   0 (the default) selects the encoder default level 2 — \
+                   12 MP RGB24 in ~0.4 s on one thread within ~8 % of the \
+                   level-6 size; 4 trades +45 % time for −3 %, 6 is 8× \
+                   slower for −8 % (see PngEncoderOptions::compression_level).",
         },
         OptionField {
             name: "level",
@@ -206,7 +208,7 @@ impl CodecOptionsStruct for PngEncoderOptions {
             }
             "compression_level" | "level" | "compression" => {
                 let raw = v.as_u32()?;
-                // `0` is the sentinel for "use the encoder default (6)" —
+                // `0` is the sentinel for "use the encoder default" —
                 // matches `compression_level: None`. Range validation
                 // (1..=9) happens at encode time in
                 // `resolve_compression_level`, so a bogus value surfaces
