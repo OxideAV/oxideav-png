@@ -40,6 +40,7 @@ use crate::image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitm
 pub use crate::registry::{decode_png_to_frame, make_decoder};
 
 use crate::zlibvec::decompress_to_vec_zlib_capped;
+use compcol::{Decoder as _, Status};
 
 use crate::apng::{parse_fdat, Actl, Blend, Disposal, Fctl};
 use crate::chunk::{read_chunk, ChunkRef, PNG_MAGIC};
@@ -914,23 +915,116 @@ fn decode_png_chunks(chunks: &[ChunkRef<'_>]) -> Result<PngImage> {
         &idat_concat
     };
 
-    // Cap the inflate at the IHDR-implied filtered-stream size (+1 so an
-    // overlong stream is detected as such): a bomb-shaped IDAT behind a
-    // small declared canvas errors at the bound instead of committing
-    // attacker-chosen memory (W3C PNG3 §13.3).
-    let expected = ihdr.expected_filtered_len()?;
-    let pixels = decompress_to_vec_zlib_capped(idat_stream, expected.saturating_add(1)).map_err(
-        |e| match e {
-            compcol::Error::OutputLimitExceeded => Error::invalid(format!(
-                "PNG: IDAT inflates past the {expected}-byte filtered-stream size \
-                 implied by IHDR (decompression bomb, W3C PNG3 §13.3)"
-            )),
-            e => Error::invalid(format!("PNG: zlib decompress failed: {e:?}")),
-        },
-    )?;
-
-    let frame_pixels = decode_image_pixels(&pixels, &ihdr)?;
+    let frame_pixels = inflate_image_pixels(idat_stream, &ihdr, "PNG: IDAT", "IHDR")?;
     build_png_image(&ihdr, frame_pixels, plte, trns)
+}
+
+/// Inflate a zlib pixel stream and reconstruct it into the decoded byte
+/// plane (`decoded_bytes_per_pixel × width × height`, or the packed
+/// sub-byte plane expanded as [`expand_byte_plane`] does).
+///
+/// Non-interlaced images stream: the inflater fills one wire row
+/// (filter byte + `row_bytes`) at a time, which is reconstructed in
+/// place into the output plane against the previous reconstructed row
+/// — the whole filtered image is never materialised, so a decode holds
+/// the compressed bytes and the output plane only. Interlaced images
+/// keep the inflate-then-scatter path (the passes are strided
+/// gathers, not output rows).
+///
+/// Both paths enforce the same bound: the stream must inflate to
+/// exactly the filtered-stream size the header implies. A longer
+/// stream — a bomb-shaped payload behind a small declared canvas — is
+/// rejected the moment the first excess byte appears, never buffered
+/// (W3C PNG3 §13.3); a shorter one is a truncation error. `what` /
+/// `header` name the chunk and the dimension source in messages
+/// ("PNG: IDAT" / "IHDR", "APNG: frame data" / "fcTL").
+fn inflate_image_pixels(stream: &[u8], ihdr: &Ihdr, what: &str, header: &str) -> Result<Vec<u8>> {
+    let expected = ihdr.expected_filtered_len()?;
+    let bomb = || {
+        Error::invalid(format!(
+            "{what} inflates past the {expected}-byte filtered-stream size \
+             implied by {header} (decompression bomb, W3C PNG3 §13.3)"
+        ))
+    };
+    if ihdr.interlace != 0 {
+        // Cap the inflate at the implied size (+1 so an overlong stream
+        // is detected as such) instead of committing attacker-chosen
+        // memory.
+        let pixels = decompress_to_vec_zlib_capped(stream, expected.saturating_add(1)).map_err(
+            |e| match e {
+                compcol::Error::OutputLimitExceeded => bomb(),
+                e => Error::invalid(format!("{what}: zlib decompress failed: {e:?}")),
+            },
+        )?;
+        return decode_image_pixels(&pixels, ihdr);
+    }
+
+    let row_bytes = ihdr.row_bytes()?;
+    let bpp = ihdr.bpp_for_filter()?;
+    let height = ihdr.height as usize;
+    let wire_row = 1 + row_bytes;
+    let mut raw = vec![0u8; row_bytes * height];
+    let mut wire = vec![0u8; wire_row];
+    let zero_row = vec![0u8; row_bytes];
+    let mut dec = compcol::zlib::Decoder::new();
+    let mut consumed = 0usize;
+    let zerr = |e: compcol::Error| Error::invalid(format!("{what}: zlib decompress failed: {e:?}"));
+    let truncated = || {
+        Error::invalid(format!(
+            "{what}: zlib stream ends before the {expected}-byte filtered-stream \
+             size implied by {header}"
+        ))
+    };
+    for y in 0..height {
+        // Fill one wire row.
+        let mut filled = 0usize;
+        while filled < wire_row {
+            let (p, status) = dec
+                .decode(&stream[consumed..], &mut wire[filled..])
+                .map_err(zerr)?;
+            consumed += p.consumed;
+            filled += p.written;
+            match status {
+                Status::StreamEnd if filled < wire_row => return Err(truncated()),
+                Status::InputEmpty if p.written == 0 && consumed >= stream.len() => {
+                    return Err(truncated())
+                }
+                _ => {}
+            }
+        }
+        let filter_type = FilterType::from_u8(wire[0])?;
+        let dst_start = y * row_bytes;
+        let (prev_rows, curr_rows) = raw.split_at_mut(dst_start);
+        let curr = &mut curr_rows[..row_bytes];
+        curr.copy_from_slice(&wire[1..]);
+        // RFC 2083 §6.3: the prior scanline of the first row is all
+        // zeros.
+        let prev: &[u8] = if y == 0 {
+            &zero_row
+        } else {
+            &prev_rows[(y - 1) * row_bytes..(y - 1) * row_bytes + row_bytes]
+        };
+        unfilter_row(filter_type, curr, prev, bpp)?;
+    }
+    // Everything the header implies has been produced. The stream must
+    // now end: one more byte of output is a bomb, and a stream that
+    // never reaches its trailer is truncated.
+    let mut scratch = [0u8; 1];
+    loop {
+        let (p, status) = dec
+            .decode(&stream[consumed..], &mut scratch)
+            .map_err(zerr)?;
+        consumed += p.consumed;
+        if p.written > 0 {
+            return Err(bomb());
+        }
+        match status {
+            Status::StreamEnd => break,
+            _ if p.consumed == 0 => return Err(truncated()),
+            _ => {}
+        }
+    }
+    expand_byte_plane(raw, ihdr, ihdr.width as usize, height)
 }
 
 /// Enforce the per-IHDR rules RFC 2083 §4.2.9 places on a `tRNS` chunk.
@@ -2086,18 +2180,8 @@ pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
         // dimensions imply the exact filtered-stream size, so cap the
         // inflate there (+1 to detect overlong) rather than
         // materialising an unbounded hostile stream (W3C PNG3 §13.3).
-        let frame_expected = sub_ihdr.expected_filtered_len()?;
-        let decompressed =
-            decompress_to_vec_zlib_capped(&frame.compressed, frame_expected.saturating_add(1))
-                .map_err(|e| match e {
-                    compcol::Error::OutputLimitExceeded => Error::invalid(format!(
-                        "APNG: frame data inflates past the {frame_expected}-byte \
-                         filtered-stream size implied by fcTL (decompression bomb, \
-                         W3C PNG3 §13.3)"
-                    )),
-                    e => Error::invalid(format!("APNG: zlib failed: {e:?}")),
-                })?;
-        let frame_raw = decode_image_pixels(&decompressed, &sub_ihdr)?;
+        let frame_raw =
+            inflate_image_pixels(&frame.compressed, &sub_ihdr, "APNG: frame data", "fcTL")?;
         let sub_frame = build_png_image(
             &sub_ihdr,
             frame_raw,

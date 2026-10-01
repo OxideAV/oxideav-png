@@ -816,6 +816,15 @@ lands under ~0.5 s within ~10 % of the level-6 size (level 4 is
 −3.9 %). `--opt level=4` buys −3 % size for +45 % time, `level=6`
 −8 % for 8× the time (0.4 s at 16 threads).
 
+Decode of the same 12 MP file: 216 ms (level-2 file) / 181 ms
+(level-6 file), of which compcol's inflate is 206 / 170 ms — the
+decoder streams one wire row at a time into the output plane, so
+reconstruction is ~10 ms and peak RSS is the file plus the plane
+(51.8 MB for 13.2 MB → 36.6 MB). Encode peak RSS, 1 thread, level 2:
+input 36.6 MB + output 13.2 MB + ~4 MB of row buffers and deflate
+state (90.6 MB measured with the source raster still resident); 8
+threads add ~20 MB of per-segment output held until assembly.
+
 Stage attribution (1 thread, same image): §12.8 heuristic 8 ms,
 `Paeth` `filter_row` 6 ms, deflate of the filtered stream 334 ms
 (level 1) / 393 (2) / 579 (4) / ≈ 3 200 (6) — the filter side is

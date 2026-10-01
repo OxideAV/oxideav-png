@@ -52,6 +52,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   photo: +0.01 % (level 1) to +0.04 % (level 6).
 - A `plane` shorter than `height × stride` (or a `stride` shorter
   than the row) is now an encode error instead of a panic.
+- The decoder streams too: for non-interlaced images (and APNG
+  frames) the inflater fills one wire row at a time, which is
+  reconstructed in place into the output plane against the previous
+  reconstructed row — the `(1 + row_bytes) × height` filtered
+  intermediate and its row-copy pass are gone, so a 12 MP decode
+  holds the file bytes and the output plane (peak RSS 51.8 MB for a
+  13.2 MB file → 36.6 MB plane). The bomb bound is enforced per byte:
+  the first byte past the header-implied size is rejected on the spot
+  (`inflates past …`, same message as before), a stream that ends
+  early is a truncation error, and bytes after the zlib trailer are
+  ignored as before. Interlaced images keep the capped
+  inflate-then-scatter path. Attribution on the 12 MP RGB24 photo:
+  compcol's inflate 206 ms of a 216 ms decode (level-2 file; 170 /
+  181 ms for level 6) — the remaining ~10 ms is reconstruction, so
+  further decode speed would have to come from the inflater.
 
 - Round 448 profile/bench depth pass — decode and encode are
   measurably faster with **zero behaviour change** (output verified

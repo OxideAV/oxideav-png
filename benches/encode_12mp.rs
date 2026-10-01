@@ -17,7 +17,11 @@
 //! `PNG_BENCH_THREADS=1,8` to pick the thread budgets,
 //! `PNG_BENCH_FILTERS=adaptive,paeth` to pick the filter strategies,
 //! `PNG_BENCH_OUT=dir` to also write every emitted PNG to `dir` (for
-//! black-box reader checks), and
+//! black-box reader checks), `PNG_BENCH_RSS=encode|decode` to run a
+//! single encode (or encode + decode) of the first selected layout and
+//! exit — for `/usr/bin/time -l` peak-RSS measurement; with
+//! `PNG_BENCH_RSS=decode PNG_BENCH_PNG=file.png` only that file is
+//! decoded — and
 //! `PNG_BENCH_RAW=/path/to/4032x3024.rgb` to replace the synthetic
 //! "photo" content with a real 8-bit RGB24 raster (the other layouts
 //! are derived from it: alpha = 255, gray = BT.601 luma, 16-bit =
@@ -213,6 +217,28 @@ fn stages(name: &str, img: &PngImage, levels: &[Option<u8>]) {
             "| {name} | stages | zlib level {level} over paeth stream | {ms:.0} ms | {} bytes |",
             z.len()
         );
+        // Decode side: inflate alone vs the whole decode_png.
+        let t = Instant::now();
+        let back = compcol::vec::decompress_to_vec_capped::<Zlib>(&z, filtered.len() as u64 + 1)
+            .expect("inflate");
+        let inflate_ms = t.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(back.len(), filtered.len());
+        let png = encode_png_image_threaded(
+            img,
+            &PngEncoderOptions {
+                compression_level: Some(level),
+                ..Default::default()
+            },
+            8,
+        )
+        .expect("encode");
+        let t = Instant::now();
+        let dec = decode_png(&png).expect("decode");
+        let decode_ms = t.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(dec.data, img.data);
+        println!(
+            "| {name} | stages | level {level}: inflate alone {inflate_ms:.0} ms | decode_png total {decode_ms:.0} ms |"
+        );
     }
 }
 
@@ -252,6 +278,54 @@ fn main() {
     .collect();
     let raw = load_raw();
     let photo_label = if raw.is_some() { "real" } else { "photo" };
+    if let (Ok("decode"), Ok(path)) = (
+        std::env::var("PNG_BENCH_RSS").as_deref(),
+        std::env::var("PNG_BENCH_PNG"),
+    ) {
+        // Decode-only peak-RSS probe: the file bytes plus the output
+        // plane are the only large buffers that should be resident.
+        let png = std::fs::read(&path).expect("read PNG_BENCH_PNG");
+        let t = Instant::now();
+        let back = decode_png(&png).expect("decode");
+        eprintln!(
+            "rss probe: decoded {} B from {} B in {:.0} ms",
+            back.data.len(),
+            png.len(),
+            t.elapsed().as_secs_f64() * 1e3
+        );
+        return;
+    }
+    if let Ok(mode) = std::env::var("PNG_BENCH_RSS") {
+        // Peak-RSS probe: one image, one encode (+ one decode), nothing
+        // else resident. The source raster is dropped before encoding
+        // so the input plane is the only input-sized buffer.
+        let (name, pf) = layouts
+            .iter()
+            .find(|(n, _)| args.is_empty() || args.iter().any(|a| n.contains(a.as_str())))
+            .copied()
+            .expect("layout");
+        let img = build(pf, true, raw.as_deref());
+        drop(raw);
+        let opts = PngEncoderOptions {
+            compression_level: levels[0],
+            filter_strategy: filters[0].1,
+            ..Default::default()
+        };
+        let png = encode_png_image_threaded(&img, &opts, thread_budgets[0]).expect("encode");
+        eprintln!(
+            "rss probe: {name} input {} B -> png {} B (level {:?}, threads {})",
+            img.data.len(),
+            png.len(),
+            levels[0],
+            thread_budgets[0]
+        );
+        if mode == "decode" {
+            drop(img);
+            let back = decode_png(&png).expect("decode");
+            eprintln!("rss probe: decoded {} B", back.data.len());
+        }
+        return;
+    }
     println!(
         "| layout | content | level | filter | threads | encode ms | bytes | ratio | decode ms |"
     );

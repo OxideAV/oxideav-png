@@ -395,3 +395,88 @@ fn iccp_truncated_after_name_rejected() {
     // stream, not an empty profile — zlib needs its 2-byte header).
     assert!(Iccp::parse(b"profile\0\0").is_err());
 }
+
+// ---- Streaming row inflate (round 464) edge cases ---------------------
+
+/// Replace the IDAT payload of a valid file with `idat`.
+fn with_idat(good: &[u8], idat: &[u8]) -> Vec<u8> {
+    let mut tampered = good[..8].to_vec();
+    for (ty, range) in chunk_ranges(good) {
+        if &ty == b"IDAT" {
+            let mut chunk = Vec::new();
+            write_chunk(&mut chunk, b"IDAT", idat);
+            tampered.extend_from_slice(&chunk);
+        } else {
+            tampered.extend_from_slice(&good[range]);
+        }
+    }
+    tampered
+}
+
+fn rgb_16x9() -> PngImage {
+    let (w, h) = (16u32, 9u32);
+    let data: Vec<u8> = (0..w * h * 3).map(|i| (i * 37 % 251) as u8).collect();
+    PngImage {
+        width: w,
+        height: h,
+        pixel_format: PngPixelFormat::Rgb24,
+        stride: (w * 3) as usize,
+        data,
+        palette: Vec::new(),
+    }
+}
+
+/// The non-interlaced decoder inflates one wire row at a time straight
+/// into the output plane; a zlib stream that stops mid-row (or before
+/// its trailer) is a truncation error, not a panic or a silent
+/// partial image.
+#[test]
+fn idat_truncated_mid_stream_is_an_error() {
+    let img = rgb_16x9();
+    let good = encode_png_image(&img).expect("encode");
+    let idat: Vec<u8> = chunk_ranges(&good)
+        .into_iter()
+        .find(|(ty, _)| ty == b"IDAT")
+        .map(|(_, r)| good[r.start + 8..r.end - 4].to_vec())
+        .expect("IDAT");
+    for cut in [1usize, idat.len() / 2, idat.len() - 5, idat.len() - 1] {
+        let err = decode_png(&with_idat(&good, &idat[..cut])).expect_err("truncated");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("ends before") || msg.contains("decompress failed"),
+            "cut {cut}: {msg}"
+        );
+    }
+}
+
+/// Exactly one byte past the IHDR-implied size is already a bomb: the
+/// excess byte is detected on the spot, never buffered.
+#[test]
+fn idat_one_byte_overlong_is_rejected_as_bomb() {
+    let img = rgb_16x9();
+    let good = encode_png_image(&img).expect("encode");
+    let expected = (1 + 16 * 3) * 9;
+    let overlong = deflate(&vec![0u8; expected + 1]);
+    let err = decode_png(&with_idat(&good, &overlong)).expect_err("overlong");
+    assert!(format!("{err}").contains("inflates past"), "{err}");
+    // And exactly the implied size decodes (all-None rows of zeros).
+    let exact = deflate(&vec![0u8; expected]);
+    let back = decode_png(&with_idat(&good, &exact)).expect("exact-size stream");
+    assert!(back.data.iter().all(|&b| b == 0));
+}
+
+/// Bytes after the zlib trailer inside the IDAT run are ignored, as the
+/// whole-buffer inflate did before (the stream ends at its trailer).
+#[test]
+fn idat_trailing_bytes_after_stream_are_ignored() {
+    let img = rgb_16x9();
+    let good = encode_png_image(&img).expect("encode");
+    let mut idat: Vec<u8> = chunk_ranges(&good)
+        .into_iter()
+        .find(|(ty, _)| ty == b"IDAT")
+        .map(|(_, r)| good[r.start + 8..r.end - 4].to_vec())
+        .expect("IDAT");
+    idat.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    let back = decode_png(&with_idat(&good, &idat)).expect("trailing bytes tolerated");
+    assert_eq!(back.data, img.data);
+}
