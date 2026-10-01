@@ -24,12 +24,15 @@ use oxideav_core::Encoder;
 use oxideav_core::RuntimeContext;
 use oxideav_core::{
     parse_options, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters,
-    CodecRegistry, ContainerRegistry, Frame, MediaType, OptionField, OptionKind, OptionValue,
-    Packet, PixelFormat, Rational, TimeBase, VideoFrame, VideoPlane,
+    CodecRegistry, ContainerRegistry, ExecutionContext, Frame, MediaType, OptionField, OptionKind,
+    OptionValue, Packet, PixelFormat, Rational, TimeBase, VideoFrame, VideoPlane,
 };
 
 use crate::decoder::{decode_png, CODEC_ID_STR};
-use crate::encoder::{encode_apng_with_options, encode_png_image_with_options, PngEncoderOptions};
+use crate::encoder::{
+    encode_apng_threaded, encode_png_image_threaded, encode_png_image_with_options,
+    PngEncoderOptions,
+};
 use crate::error::PngError;
 use crate::image::{PngImage, PngPixelFormat};
 
@@ -92,6 +95,32 @@ fn video_frame_to_png_image(
     })
 }
 
+/// [`video_frame_to_png_image`] for a frame the encoder owns: the first
+/// plane's buffer moves into the [`PngImage`] instead of being copied,
+/// so the buffered frame is the only pixel copy the trait path holds.
+fn video_frame_into_png_image(
+    mut frame: VideoFrame,
+    width: u32,
+    height: u32,
+    pix: PngPixelFormat,
+    palette: &[u8],
+) -> oxideav_core::Result<PngImage> {
+    if frame.planes.is_empty() {
+        return Err(oxideav_core::Error::invalid(
+            "PNG encoder: frame has no planes",
+        ));
+    }
+    let plane = frame.planes.swap_remove(0);
+    Ok(PngImage {
+        width,
+        height,
+        pixel_format: pix,
+        stride: plane.stride,
+        data: plane.data,
+        palette: palette.to_vec(),
+    })
+}
+
 /// Convert a [`PngImage`] into a framework `VideoFrame`.
 fn png_image_to_video_frame(image: &PngImage, pts: Option<i64>) -> VideoFrame {
     VideoFrame {
@@ -143,8 +172,23 @@ impl CodecOptionsStruct for PngEncoderOptions {
             default: OptionValue::U32(0),
             help: "DEFLATE level for the IDAT / fdAT pixel stream (1..=9). \
                    1 is fastest / largest, 9 is slowest / smallest. \
-                   0 (the default) selects the encoder default level 6 — \
-                   zlib's own default — reproducing the pre-r312 byte stream.",
+                   0 (the default) selects the encoder default level \
+                   (see PngEncoderOptions::compression_level).",
+        },
+        OptionField {
+            name: "level",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(0),
+            help: "Alias of `compression_level` (the framework-wide \
+                   speed / size dial name): DEFLATE level 1..=9, \
+                   0 = encoder default.",
+        },
+        OptionField {
+            name: "compression",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(0),
+            help: "Alias of `compression_level`: DEFLATE level 1..=9, \
+                   0 = encoder default.",
         },
     ];
     fn apply(&mut self, key: &str, v: &OptionValue) -> oxideav_core::Result<()> {
@@ -160,7 +204,7 @@ impl CodecOptionsStruct for PngEncoderOptions {
                 // rather than getting silently rewritten.
                 self.bit_depth = if raw == 0 { None } else { Some(raw as u8) };
             }
-            "compression_level" => {
+            "compression_level" | "level" | "compression" => {
                 let raw = v.as_u32()?;
                 // `0` is the sentinel for "use the encoder default (6)" —
                 // matches `compression_level: None`. Range validation
@@ -303,6 +347,7 @@ pub fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn En
         animated_hint,
         eof: false,
         opts,
+        threads: 1,
     }))
 }
 
@@ -323,6 +368,9 @@ pub struct PngEncoder {
     animated_hint: bool,
     eof: bool,
     opts: PngEncoderOptions,
+    /// Thread budget granted through `set_execution_context`; `1`
+    /// (serial) until the executor says otherwise.
+    threads: usize,
 }
 
 impl Encoder for PngEncoder {
@@ -370,11 +418,19 @@ impl Encoder for PngEncoder {
         }
         Ok(())
     }
+
+    /// The IDAT / fdAT DEFLATE pass is cut into independent segments
+    /// that `ctx.threads` workers compress concurrently (the emitted
+    /// bytes do not depend on the budget). Serial until granted.
+    fn set_execution_context(&mut self, ctx: &ExecutionContext) {
+        self.threads = ctx.threads.max(1);
+    }
 }
 
 impl PngEncoder {
     fn finalize(&mut self) -> oxideav_core::Result<()> {
         let is_animated = self.frames.len() > 1 || self.animated_hint;
+        let first_pts = self.frames[0].pts;
         let bytes = if is_animated {
             // Default delay per frame: derived from frame_rate or
             // 10cs = 10Hz.
@@ -382,30 +438,32 @@ impl PngEncoder {
                 Some(r) if r.num > 0 && r.den > 0 => (100 * r.den as u32 / r.num as u32) as u16,
                 _ => 10,
             };
-            let frames: Vec<PngImage> = self
-                .frames
-                .iter()
+            let frames: Vec<PngImage> = std::mem::take(&mut self.frames)
+                .into_iter()
                 .map(|f| {
-                    video_frame_to_png_image(f, self.width, self.height, self.pix, &self.palette)
+                    video_frame_into_png_image(f, self.width, self.height, self.pix, &self.palette)
                 })
                 .collect::<oxideav_core::Result<_>>()?;
-            encode_apng_with_options(&frames, delay_cs, 0, &self.opts)?
+            encode_apng_threaded(&frames, delay_cs, 0, &self.opts, self.threads)?
         } else {
-            let img = video_frame_to_png_image(
-                &self.frames[0],
+            // Move the buffered frame's plane into the image (no copy)
+            // and stream it straight into the PNG.
+            let frame = self.frames.swap_remove(0);
+            self.frames.clear();
+            let img = video_frame_into_png_image(
+                frame,
                 self.width,
                 self.height,
                 self.pix,
                 &self.palette,
             )?;
-            encode_png_image_with_options(&img, &self.opts)?
+            encode_png_image_threaded(&img, &self.opts, self.threads)?
         };
         let mut pkt = Packet::new(0, self.time_base, bytes);
-        pkt.pts = self.frames[0].pts;
+        pkt.pts = first_pts;
         pkt.dts = pkt.pts;
         pkt.flags.keyframe = true;
         self.pending_out.push_back(pkt);
-        self.frames.clear();
         Ok(())
     }
 }

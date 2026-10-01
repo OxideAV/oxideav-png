@@ -167,8 +167,8 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   the dispose / blend / offset matrix, and the `apng_region_encode`
   fuzz target drives the encoder directly with fuzz-derived regions /
   offsets / delays / operators (215k+ executions, zero crashes).
-- DEFLATE/zlib (RFC 1950/1951) framing for IDAT / fdAT and the
-  `zTXt` / `iTXt` / `iCCP` chunk bodies is provided by
+- DEFLATE (RFC 1951) for IDAT / fdAT and the `zTXt` / `iTXt` / `iCCP`
+  chunk bodies is provided by
   [`compcol`](https://crates.io/crates/compcol) (the workspace-wide
   pure-Rust compression collection). The IDAT / fdAT pixel stream's
   DEFLATE level is caller-selectable via
@@ -180,9 +180,33 @@ Part of the [oxideav](https://github.com/OxideAV/oxideav-workspace) framework �
   `None` (the default) selects level `6` — the conventional default
   effort level; an out-of-`1..=9` value is an encode
   error ahead of the wire. Registry-side `CodecOptions` exposes a
-  `compression_level` u32 key with `0` mapping to the default. The
+  `compression_level` u32 key with `0` mapping to the default, plus
+  `level` and `compression` as aliases (the framework-wide dial name:
+  `oxideav convert --opt level=…`). The
   compressed metadata chunks (`zTXt` / `iTXt` / `iCCP`) keep their own
   fixed level since their payloads are small and byte-layout-pinned.
+- **Streaming, segmented, optionally parallel pixel stream.** The
+  non-interlaced path filters rows one at a time straight out of the
+  caller's plane (honouring `stride`; 16-bit rows byte-swapped into a
+  two-row ring) and deflates them directly into the `IDAT` / `fdAT`
+  chunk — no filtered-image intermediate, no flattened copy, no
+  separate compressed buffer. The stream is cut into independent
+  DEFLATE segments of about 1 MiB of filtered rows; each segment is a
+  run of RFC 1951 blocks closed by a sync flush (byte-aligned,
+  `BFINAL = 0`) so the segments concatenate into one deflate stream,
+  and the crate writes the RFC 1950 container around them (`CMF` /
+  `FLG` header, the `01 00 00 FF FF` final empty stored block, the
+  Adler-32 trailer folded from per-segment sums). The grid depends
+  only on the image, so the bytes are identical at any thread count;
+  a stream that fits one segment goes through compcol's zlib encoder
+  with a normal `finish` and is byte-identical to the previous
+  one-shot output. `encode_png_image_threaded` /
+  `encode_apng_threaded` / `encode_apng_frames_threaded` take a thread
+  budget (`std::thread::scope` workers over the segments); the
+  framework encoder maps `ExecutionContext::threads` onto it via
+  `set_execution_context`, so `oxideav convert` gets the parallel path
+  while the un-threaded API stays serial. Segmenting costs +0.01 %
+  (level 1) to +0.04 % (level 6) on a 12 MP photo.
 
 ## Metadata round-trip
 
@@ -755,9 +779,43 @@ optimisation changes against a stable baseline:
   cost so a change to the per-sample linear equation is visible on its
   own.
 
+- `encode_12mp` — a plain-`main` production-scale harness (not
+  Criterion): 4032×3024 encode ms / output bytes / decode ms for every
+  (layout × DEFLATE level × filter strategy × thread budget) as a
+  Markdown table, on synthetic photographic + flat content or on a
+  real RGB24 raster (`PNG_BENCH_RAW=/path/4032x3024.rgb`), with
+  `PNG_BENCH_LEVELS` / `PNG_BENCH_THREADS` / `PNG_BENCH_FILTERS` /
+  `PNG_BENCH_REPS` selectors and a `PNG_BENCH_STAGES` breakdown
+  (heuristic / `filter_row` / deflate) so encode time can be
+  attributed. Every emitted stream is decoded back and compared
+  byte-for-byte.
+
 Each scenario synthesises a fresh input on the fly with the public
 encoder API — no committed fixture files — so the benches reproduce
 from a clean checkout.
+
+### 12 MP encode (round 464)
+
+4032×3024 RGB24, a real photograph (a system wallpaper decoded to raw
+RGB), M4 Max, release build, `Adaptive` filter. Encode wall-clock in
+ms by thread budget (bytes are identical across budgets):
+
+| level | bytes | ratio | 1 thread | 4 | 8 | 16 | decode |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 13 410 064 | 36.7 % | 345 | 97 | 73 | 54 | 241 |
+| 2 | 13 190 488 | 36.1 % | 412 | 112 | 69 | 65 | 226 |
+| 4 | 12 812 543 | 35.0 % | 592 | 159 | 103 | 79 | 209 |
+| 6 | 12 199 325 | 33.4 % | 3 301 | 857 | 516 | 398 | 187 |
+
+Stage attribution (1 thread, same image): §12.8 heuristic 8 ms,
+`Paeth` `filter_row` 6 ms, deflate of the filtered stream 334 ms
+(level 1) / 393 (2) / 579 (4) / ≈ 3 200 (6) — the filter side is
+noise, the level is the dial. Before this round the same encode was
+3.3 s at level 6 (the previous default) with three full-plane
+intermediates. Other layouts at 8 threads, level 2 / 6: RGBA 74 /
+567 ms, Gray8 24 / 192, Rgb48 87 / 511, Gray16 28 / 166; flat
+(screenshot-like) content encodes a 12 MP RGB24 frame in 11–17 ms at
+any level.
 
 Recorded numbers live in [`BENCHMARKS.md`](BENCHMARKS.md), most
 recently the round-448 profile pass: decode geo-mean **+28.7 %**
@@ -779,6 +837,7 @@ cargo bench -p oxideav-png --bench roundtrip
 cargo bench -p oxideav-png --bench filter
 cargo bench -p oxideav-png --bench crc
 cargo bench -p oxideav-png --bench depth
+PNG_BENCH_THREADS=1,8 cargo bench -p oxideav-png --bench encode_12mp -- rgb24
 ```
 
 ## Usage

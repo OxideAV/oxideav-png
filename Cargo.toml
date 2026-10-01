@@ -79,3 +79,7 @@ harness = false
 [[bench]]
 name = "depth"
 harness = false
+
+[[bench]]
+name = "encode_12mp"
+harness = false

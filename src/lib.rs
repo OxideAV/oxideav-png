@@ -130,6 +130,7 @@ pub mod registry;
 pub mod srgb;
 mod srgb_tables;
 mod zlibvec;
+mod zstream;
 
 // Public unconditional API — works whether or not `registry` is enabled.
 pub use apng::{Blend as ApngBlend, Disposal as ApngDisposal};
@@ -144,8 +145,9 @@ pub use depth::{
     rescale_sample, scale_up_bit_replication, scale_up_zero_fill,
 };
 pub use encoder::{
-    encode_apng, encode_apng_frames, encode_apng_frames_with_options, encode_apng_with_options,
-    encode_png_image, encode_png_image_with_options, ApngFrameSpec, PngEncoderOptions,
+    encode_apng, encode_apng_frames, encode_apng_frames_threaded, encode_apng_frames_with_options,
+    encode_apng_threaded, encode_apng_with_options, encode_png_image, encode_png_image_threaded,
+    encode_png_image_with_options, ApngFrameSpec, PngEncoderOptions,
 };
 pub use error::{PngError, Result};
 pub use filter::{FilterStrategy, FilterType};

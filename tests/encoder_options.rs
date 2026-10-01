@@ -19,11 +19,41 @@ use oxideav_png::PngEncoderOptions;
 #[test]
 fn schema_advertises_interlace_bit_depth_and_filter() {
     let schema = <PngEncoderOptions as CodecOptionsStruct>::SCHEMA;
-    assert_eq!(schema.len(), 4);
+    assert_eq!(schema.len(), 6);
     assert_eq!(schema[0].name, "interlace");
     assert_eq!(schema[1].name, "bit_depth");
     assert_eq!(schema[2].name, "filter");
     assert_eq!(schema[3].name, "compression_level");
+    // Round 464: `level` / `compression` are aliases of
+    // `compression_level` so the framework-wide dial name
+    // (`oxideav convert --opt level=…`) reaches the PNG encoder.
+    assert_eq!(schema[4].name, "level");
+    assert_eq!(schema[5].name, "compression");
+}
+
+/// `level` and `compression` are pure aliases: they land in the same
+/// `compression_level` field with the same `0 = default` sentinel.
+#[test]
+fn level_and_compression_aliases_set_compression_level() {
+    for key in ["level", "compression"] {
+        for (raw, expected) in [
+            ("0", None),
+            ("1", Some(1u8)),
+            ("4", Some(4)),
+            ("9", Some(9)),
+        ] {
+            let opts = CodecOptions::new().set(key, raw);
+            let parsed = parse_options::<PngEncoderOptions>(&opts).expect("parse");
+            assert_eq!(parsed.compression_level, expected, "{key} = {raw}");
+        }
+    }
+    // Last key wins when both spellings are present — the bag is
+    // applied in insertion order.
+    let opts = CodecOptions::new()
+        .set("compression_level", "2")
+        .set("level", "7");
+    let parsed = parse_options::<PngEncoderOptions>(&opts).expect("parse");
+    assert_eq!(parsed.compression_level, Some(7));
 }
 
 /// `compression_level` threads through into

@@ -387,6 +387,60 @@ pub fn write_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&c.to_be_bytes());
 }
 
+/// Incremental chunk emitter: opens a chunk on `out`, lets the caller
+/// append the data portion piecewise (a streaming compressor's output,
+/// for instance), then patches the length and appends the CRC on
+/// `finish`. The data never sits in a separate buffer before landing in
+/// the file — an IDAT written this way costs exactly its own bytes.
+///
+/// `begin` writes a zero length placeholder + the type; every `write`
+/// extends the data and threads the CRC register; `finish` back-patches
+/// the 4-byte length (an error if the data exceeds the RFC 2083 §3.2
+/// `2^31 - 1` limit) and appends the CRC. Dropping a writer without
+/// `finish` leaves a malformed chunk, so callers always finish.
+#[doc(hidden)]
+pub struct ChunkWriter<'a> {
+    out: &'a mut Vec<u8>,
+    len_pos: usize,
+    crc: u32,
+}
+
+impl<'a> ChunkWriter<'a> {
+    /// Open a chunk of type `chunk_type` at the end of `out`.
+    pub fn begin(out: &'a mut Vec<u8>, chunk_type: &[u8; 4]) -> Self {
+        let len_pos = out.len();
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        out.extend_from_slice(chunk_type);
+        let crc = crc32_update(CRC32_INIT, chunk_type);
+        Self { out, len_pos, crc }
+    }
+
+    /// Append `data` to the chunk's data portion.
+    pub fn write(&mut self, data: &[u8]) {
+        self.out.extend_from_slice(data);
+        self.crc = crc32_update(self.crc, data);
+    }
+
+    /// Bytes of data written so far.
+    pub fn data_len(&self) -> usize {
+        self.out.len() - self.len_pos - 8
+    }
+
+    /// Patch the length and append the CRC.
+    pub fn finish(self) -> Result<()> {
+        let len = self.data_len();
+        if len > MAX_CHUNK_LEN as usize {
+            return Err(Error::invalid(format!(
+                "PNG: chunk data of {len} bytes exceeds the 2^31 - 1 limit (RFC 2083 §3.2)"
+            )));
+        }
+        self.out[self.len_pos..self.len_pos + 4].copy_from_slice(&(len as u32).to_be_bytes());
+        self.out
+            .extend_from_slice(&(self.crc ^ 0xFFFF_FFFF).to_be_bytes());
+        Ok(())
+    }
+}
+
 /// Iterator over chunks in a PNG file buffer (starting after the magic).
 pub struct ChunkIter<'a> {
     buf: &'a [u8],
@@ -429,6 +483,29 @@ impl<'a> Iterator for ChunkIter<'a> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chunk_writer_matches_write_chunk_byte_for_byte() {
+        let data: Vec<u8> = (0..1000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let mut one_shot = Vec::new();
+        super::write_chunk(&mut one_shot, b"IDAT", &data);
+        let mut streamed = vec![0xAA, 0xBB]; // pre-existing bytes stay put
+        let mut w = super::ChunkWriter::begin(&mut streamed, b"IDAT");
+        for piece in data.chunks(37) {
+            w.write(piece);
+        }
+        assert_eq!(w.data_len(), data.len());
+        w.finish().unwrap();
+        assert_eq!(&streamed[2..], &one_shot[..]);
+        // An empty chunk round-trips too.
+        let mut empty = Vec::new();
+        super::ChunkWriter::begin(&mut empty, b"IEND")
+            .finish()
+            .unwrap();
+        let mut expect = Vec::new();
+        super::write_chunk(&mut expect, b"IEND", &[]);
+        assert_eq!(empty, expect);
+    }
+
     use super::*;
 
     #[test]

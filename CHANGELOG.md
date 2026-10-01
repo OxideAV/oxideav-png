@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Round 464 — the encoder streams instead of materialising. The
+  non-interlaced ≥ 8-bit path (every RGB / RGBA / Gray / Ya /
+  16-bit encode, APNG frames included) now filters rows one at a
+  time straight out of the caller's plane (honouring `stride`;
+  16-bit rows are byte-swapped into a two-row ring) and deflates
+  them directly into the `IDAT` / `fdAT` chunk through a new
+  incremental chunk writer. The `(1 + row_bytes) × height` filtered
+  image, the flattened copy of the source plane, and the separate
+  compressed-stream buffer are gone — a 12 MP RGB24 encode holds
+  the input, the output, and a few row buffers. Sub-byte (1/2/4-bit)
+  non-interlaced encodes stream from their packed rows the same way;
+  the Adam7 paths keep their pass-concatenated stream (they are
+  strided gathers, not source rows) but compress it through the same
+  machinery. The §12.8 `Adaptive` heuristic short-circuits a row
+  identical to the previous one (`Up`, or `None` for an all-zero
+  row — exactly what the five sums would pick) with a zero fill.
+- The IDAT / fdAT pixel stream is cut into independent DEFLATE
+  segments of about 1 MiB of filtered rows. Each segment is a run of
+  RFC 1951 blocks closed by a sync flush (byte-aligned, `BFINAL = 0`),
+  so the segments concatenate into one deflate stream; the crate
+  writes the RFC 1950 container around them — `CMF` / `FLG` header,
+  the `01 00 00 FF FF` final empty stored block, and the Adler-32
+  trailer folded from the per-segment sums. The segment grid depends
+  only on the image, never on the thread budget, so the emitted
+  bytes are identical at any thread count (pinned by tests across
+  every layout, stride, depth, interlace, `Brute` and APNG). A stream
+  that fits one segment goes through compcol's zlib encoder with a
+  normal `finish` — byte-identical to the previous one-shot output,
+  so small images are unchanged. Ratio cost of segmenting on a 12 MP
+  photo: +0.01 % (level 1) to +0.04 % (level 6).
+- A `plane` shorter than `height × stride` (or a `stride` shorter
+  than the row) is now an encode error instead of a panic.
+
 - Round 448 profile/bench depth pass — decode and encode are
   measurably faster with **zero behaviour change** (output verified
   byte-identical to the previous build across 74 encode and 77 decode
@@ -48,6 +81,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     materialise-then-sum trial.
 
 ### Added
+
+- `encode_png_image_threaded` / `encode_apng_threaded` /
+  `encode_apng_frames_threaded` — the existing entry points plus a
+  thread budget: up to `threads` workers deflate the independent
+  segments concurrently (`std::thread::scope`, no new dependency).
+  The framework encoder implements `Encoder::set_execution_context`
+  and maps `ExecutionContext::threads` onto it, so
+  `oxideav convert` (which grants the host budget) gets the parallel
+  path while the un-threaded API stays serial per the core threading
+  contract. 12 MP RGB24 photo, M4 Max, level 6: 3.30 s → 0.40 s at
+  16 threads; level 2: 0.41 s → 65 ms; level 1: 0.35 s → 54 ms.
+- `level` and `compression` registry option keys as aliases of
+  `compression_level`, so `oxideav convert --opt level=…` reaches the
+  PNG encoder's speed / size dial.
+- The framework encoder moves the buffered frame's plane into the
+  encode instead of cloning it (one copy fewer per frame).
+- `benches/encode_12mp.rs` — a plain-`main` harness that prints a
+  Markdown table of encode ms / bytes / decode ms for every
+  (layout × level × filter × thread budget) at 4032×3024, on
+  synthetic photographic and flat content or on a real RGB24 raster
+  (`PNG_BENCH_RAW`), with a `PNG_BENCH_STAGES` breakdown
+  (heuristic / filter / deflate) so encode time can be attributed.
 
 - Every zlib inflate in the crate is now **output-bounded** — the
   decompression-bomb defence W3C PNG3 §13.3 motivates ("chunks can be

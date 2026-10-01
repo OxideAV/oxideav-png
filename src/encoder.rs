@@ -29,12 +29,13 @@ use crate::metadata::PngMetadata;
 #[cfg(feature = "registry")]
 pub use crate::registry::make_encoder;
 
-use crate::zlibvec::compress_to_vec_zlib;
-
 use crate::apng::{Blend, Disposal};
-use crate::chunk::{write_chunk, PNG_MAGIC};
+use crate::chunk::{write_chunk, ChunkWriter, PNG_MAGIC};
 use crate::decoder::{adam7_pass_dims, Ihdr, ADAM7};
-use crate::filter::{filter_row, FilterStrategy};
+use crate::filter::{choose_filter_heuristic, filter_row, FilterStrategy, FilterType};
+use crate::zstream::{
+    compress_bytes_to_vec, compress_zlib, rows_per_segment, SegmentSource, SEGMENT_TARGET_BYTES,
+};
 
 /// PNG encoder tuning knobs, attached via
 /// `CodecParameters::options` (when the `registry` feature is on) or
@@ -181,10 +182,29 @@ pub fn encode_png_image(image: &PngImage) -> Result<Vec<u8>> {
 
 /// Encode one [`PngImage`] as a standalone PNG, honouring the supplied
 /// options (e.g. `interlace: true` for Adam7). Standalone (no
-/// `oxideav-core`) entry point.
+/// `oxideav-core`) entry point. Runs on the calling thread only — see
+/// [`encode_png_image_threaded`] for a thread budget.
 pub fn encode_png_image_with_options(
     image: &PngImage,
     opts: &PngEncoderOptions,
+) -> Result<Vec<u8>> {
+    encode_png_image_threaded(image, opts, 1)
+}
+
+/// [`encode_png_image_with_options`] with a thread budget: the IDAT
+/// pixel stream is cut into independent DEFLATE segments (about 1 MiB
+/// of filtered rows each) that up to `threads` workers compress
+/// concurrently. The emitted bytes are identical for every budget —
+/// the segment grid depends only on the image — so `threads` is purely
+/// a wall-clock knob. `threads ≤ 1` runs serially on the calling
+/// thread, exactly like [`encode_png_image_with_options`].
+///
+/// The framework-side encoder maps `ExecutionContext::threads` onto
+/// this parameter; standalone callers pick their own budget.
+pub fn encode_png_image_threaded(
+    image: &PngImage,
+    opts: &PngEncoderOptions,
+    threads: usize,
 ) -> Result<Vec<u8>> {
     let (mut ihdr, row_bytes, plte_bytes, trns_bytes) = ihdr_and_row_bytes(image, opts)?;
     if opts.interlace {
@@ -200,41 +220,12 @@ pub fn encode_png_image_with_options(
     // present.
     let trns_bytes = resolve_trns_bytes(&ihdr, trns_bytes.as_deref(), opts.metadata.as_ref())?;
     let level = resolve_compression_level(opts)?;
-    let idat = if opts.interlace && ihdr.bit_depth < 8 {
-        // Sub-byte (ct=0 / ct=3, depth 1/2/4) Adam7: each pass is laid
-        // out as an independent sub-image (RFC 2083 §A.8 / §2.6
-        // "The data within each pass is laid out as though it were a
-        // complete image of the appropriate dimensions … each such
-        // scanline is padded as needed to fill an integral number of
-        // bytes"), so we gather each pass from the source `Gray8` /
-        // `Pal8` plane, pack its rows MSB-first into the pass's own
-        // wire row_bytes, then filter + concatenate exactly like the
-        // ≥8-bit Adam7 path.
-        deflate_encode_pixels_adam7_subbyte(image, &ihdr, opts.filter_strategy, level)?
-    } else {
-        let raw_pixels = flatten_and_normalise_pixels(image, &ihdr, row_bytes)?;
-        if opts.interlace {
-            deflate_encode_pixels_adam7(
-                &raw_pixels,
-                image.width as usize,
-                image.height as usize,
-                &ihdr,
-                opts.filter_strategy,
-                level,
-            )?
-        } else {
-            deflate_encode_pixels(
-                &raw_pixels,
-                row_bytes,
-                image.height as usize,
-                &ihdr,
-                opts.filter_strategy,
-                level,
-            )?
-        }
-    };
 
-    let mut out = Vec::with_capacity(64 + idat.len());
+    // Reserve for the headers plus a typical photographic IDAT (about a
+    // third of the raw plane); the reservation is virtual until touched,
+    // so highly compressible content does not pay for it.
+    let raw_len = row_bytes.saturating_mul(image.height as usize);
+    let mut out = Vec::with_capacity(1024 + raw_len / 3);
     out.extend_from_slice(&PNG_MAGIC);
     write_chunk(&mut out, b"IHDR", &ihdr.to_bytes());
     // sBIT must precede PLTE + IDAT (RFC 2083 §4.3 / §4.2.6).
@@ -249,10 +240,84 @@ pub fn encode_png_image_with_options(
     // IDAT per RFC 2083 §4.2.5; tIME has no ordering constraint but we
     // bucket it here for determinism). sPLT also rides here.
     write_metadata_before_idat(&mut out, opts.metadata.as_ref())?;
-    write_chunk(&mut out, b"IDAT", &idat);
+    // The pixel stream is filtered row by row and deflated straight
+    // into the IDAT chunk — no filtered-image intermediate, no
+    // compressed-stream intermediate.
+    write_pixel_stream(
+        &mut out,
+        b"IDAT",
+        &[],
+        image,
+        &ihdr,
+        row_bytes,
+        opts,
+        level,
+        threads,
+    )?;
     write_metadata_after_idat(&mut out, opts.metadata.as_ref());
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
+}
+
+/// Compress `image`'s pixels under `ihdr` (whose `width` / `height`
+/// describe `image` — a frame sub-region for APNG) into a freshly
+/// opened `chunk_type` chunk on `out`, after `prefix` (the `fdAT`
+/// sequence number; empty for `IDAT`). Dispatches on the four filter
+/// sites: the non-interlaced path streams rows directly from the
+/// source plane; the Adam7 paths build their pass-concatenated stream
+/// first (the passes are strided gathers, not rows of the source).
+#[allow(clippy::too_many_arguments)]
+fn write_pixel_stream(
+    out: &mut Vec<u8>,
+    chunk_type: &[u8; 4],
+    prefix: &[u8],
+    image: &PngImage,
+    ihdr: &Ihdr,
+    row_bytes: usize,
+    opts: &PngEncoderOptions,
+    level: u8,
+    threads: usize,
+) -> Result<()> {
+    let mut chunk = ChunkWriter::begin(out, chunk_type);
+    chunk.write(prefix);
+    if opts.interlace {
+        let compressed = if ihdr.bit_depth < 8 {
+            // Sub-byte (ct=0 / ct=3, depth 1/2/4) Adam7: each pass is
+            // laid out as an independent sub-image (RFC 2083 §A.8 /
+            // §2.6 "The data within each pass is laid out as though it
+            // were a complete image of the appropriate dimensions …
+            // each such scanline is padded as needed to fill an
+            // integral number of bytes"), so we gather each pass from
+            // the source `Gray8` / `Pal8` plane, pack its rows MSB-first
+            // into the pass's own wire row_bytes, then filter +
+            // concatenate exactly like the ≥8-bit Adam7 path.
+            deflate_encode_pixels_adam7_subbyte(image, ihdr, opts.filter_strategy, level, threads)?
+        } else {
+            let raw_pixels = flatten_and_normalise_pixels(image, ihdr, row_bytes)?;
+            deflate_encode_pixels_adam7(
+                &raw_pixels,
+                image.width as usize,
+                image.height as usize,
+                ihdr,
+                opts.filter_strategy,
+                level,
+                threads,
+            )?
+        };
+        chunk.write(&compressed);
+    } else {
+        let plane = RowPlane::new(image, ihdr, row_bytes)?;
+        let bpp = ihdr.bpp_for_filter()?;
+        deflate_encode_rows(
+            &plane,
+            bpp,
+            opts.filter_strategy,
+            level,
+            threads,
+            &mut |b| chunk.write(b),
+        )?;
+    }
+    chunk.finish()
 }
 
 /// Emit the metadata chunks the PNG spec places "before PLTE and IDAT":
@@ -735,79 +800,221 @@ fn subbyte_range_error<const BD: usize>(v: u8, x: usize, y: usize, max: u8) -> E
     ))
 }
 
-/// Filter each row according to `strategy` (W3C PNG3 §12.7), prepend the
-/// filter-type byte, then zlib compress. Returns the compressed IDAT bytes.
-pub(crate) fn deflate_encode_pixels(
-    raw: &[u8],
+/// The source rows of a non-interlaced encode, in wire row order and
+/// — bar the 16-bit byte order — wire byte layout. For 8-bit layouts
+/// it borrows the caller's plane as is (honouring `stride`); for 16-bit
+/// layouts it borrows the little-endian plane and the row streamer
+/// swaps each row into big-endian on its way out (RFC 2083 §2.1); for
+/// sub-byte depths it owns the MSB-packed rows [`pack_subbyte_rows`]
+/// produces. Nothing larger than this is ever materialised on the
+/// non-interlaced path.
+pub(crate) struct RowPlane<'a> {
+    data: std::borrow::Cow<'a, [u8]>,
+    stride: usize,
     row_bytes: usize,
     height: usize,
-    ihdr: &Ihdr,
-    strategy: FilterStrategy,
-    level: u8,
-) -> Result<Vec<u8>> {
-    let bpp = ihdr.bpp_for_filter()?;
-    if strategy == FilterStrategy::Brute {
-        // Build + compress the filtered stream once per candidate
-        // row-strategy and keep the smallest DEFLATE output (W3C PNG3
-        // §12.7 "try every combination … find what compresses best",
-        // reduced to the tractable per-image-fixed search).
-        return brute_compress(level, |cand| {
-            Ok(filter_image_stream(raw, row_bytes, height, bpp, cand))
-        });
-    }
-    let filtered = filter_image_stream(raw, row_bytes, height, bpp, strategy);
-    compress_to_vec_zlib(&filtered, level)
+    swap16: bool,
 }
 
-/// Filter every row of a contiguous `height × row_bytes` raw pixel plane
-/// under `strategy`, returning the `(1 + row_bytes) * height` filtered
-/// byte stream (each row prefixed with its filter-type byte). The shared
-/// core of [`deflate_encode_pixels`]; factored out so the
-/// [`FilterStrategy::Brute`] search can build one stream per candidate
-/// strategy without duplicating the per-row loop.
-fn filter_image_stream(
-    raw: &[u8],
-    row_bytes: usize,
-    height: usize,
+impl<'a> RowPlane<'a> {
+    pub(crate) fn new(image: &'a PngImage, ihdr: &Ihdr, row_bytes: usize) -> Result<Self> {
+        let height = image.height as usize;
+        if ihdr.bit_depth < 8 {
+            let packed = pack_subbyte_rows(image, ihdr.bit_depth, row_bytes)?;
+            return Ok(Self {
+                data: std::borrow::Cow::Owned(packed),
+                stride: row_bytes,
+                row_bytes,
+                height,
+                swap16: false,
+            });
+        }
+        let stride = image.stride;
+        if stride < row_bytes {
+            return Err(Error::invalid(format!(
+                "PNG encoder: stride {stride} is shorter than the {row_bytes}-byte row"
+            )));
+        }
+        let needed = if height == 0 {
+            0
+        } else {
+            (height - 1)
+                .checked_mul(stride)
+                .and_then(|v| v.checked_add(row_bytes))
+                .ok_or_else(|| Error::invalid("PNG encoder: plane size overflows usize"))?
+        };
+        if image.data.len() < needed {
+            return Err(Error::invalid(format!(
+                "PNG encoder: pixel buffer holds {} bytes but {height} rows at stride \
+                 {stride} need {needed}",
+                image.data.len()
+            )));
+        }
+        Ok(Self {
+            data: std::borrow::Cow::Borrowed(&image.data),
+            stride,
+            row_bytes,
+            height,
+            swap16: ihdr.bit_depth == 16,
+        })
+    }
+
+    #[inline]
+    fn row(&self, y: usize) -> &[u8] {
+        &self.data[y * self.stride..y * self.stride + self.row_bytes]
+    }
+}
+
+/// Resolve the filter type for one row and write the filter-type byte
+/// plus the filtered bytes into `wire` (`1 + row_bytes` long).
+///
+/// `Adaptive` short-circuits a row identical to the previous one: the
+/// §12.8 sums are then `Up = 0`, and `None` / `Sub` are also zero only
+/// when the row is all zeros, so the heuristic's own answer is `Up`
+/// (or `None` for an all-zero row) with every data byte zero — written
+/// here as a fill without evaluating the five sums. Every other row
+/// goes through the unchanged read-only heuristic, so the emitted
+/// stream is byte-identical to the full §12.8 trial.
+#[inline]
+fn filter_row_wire(strategy: FilterStrategy, row: &[u8], prev: &[u8], bpp: usize, wire: &mut [u8]) {
+    let (ft, zero) = match strategy {
+        FilterStrategy::Fixed(f) => (f, false),
+        FilterStrategy::Adaptive | FilterStrategy::Brute => {
+            if row == prev {
+                if row.iter().all(|&b| b == 0) {
+                    (FilterType::None, true)
+                } else {
+                    (FilterType::Up, true)
+                }
+            } else {
+                (choose_filter_heuristic(row, prev, bpp, &mut []), false)
+            }
+        }
+    };
+    wire[0] = ft as u8;
+    if zero {
+        wire[1..].fill(0);
+    } else {
+        filter_row(ft, row, prev, bpp, &mut wire[1..]);
+    }
+}
+
+/// [`SegmentSource`] over a [`RowPlane`]: segment `i` is rows
+/// `[i × rows_per_segment, (i + 1) × rows_per_segment)`, each delivered
+/// as its filter-type byte plus filtered bytes. Workers on different
+/// segments share the plane read-only; the previous row a segment
+/// starts from is re-read from the plane, so segments never depend on
+/// each other.
+struct RowSource<'p, 'a> {
+    plane: &'p RowPlane<'a>,
     bpp: usize,
     strategy: FilterStrategy,
-) -> Vec<u8> {
-    let mut filtered = vec![0u8; (1 + row_bytes) * height];
-    let mut scratch = vec![0u8; row_bytes];
-    let zero_row = vec![0u8; row_bytes];
-    for y in 0..height {
-        let row = &raw[y * row_bytes..(y + 1) * row_bytes];
-        let prev: &[u8] = if y == 0 {
-            &zero_row
-        } else {
-            &raw[(y - 1) * row_bytes..y * row_bytes]
-        };
-        let ft = strategy.pick(row, prev, bpp, &mut scratch);
-        let dst_off = y * (1 + row_bytes);
-        filtered[dst_off] = ft as u8;
-        let data_slot = &mut filtered[dst_off + 1..dst_off + 1 + row_bytes];
-        // The heuristic evaluates candidate sums without materialising
-        // filtered bytes — this is the single pass that produces them.
-        filter_row(ft, row, prev, bpp, data_slot);
-    }
-    filtered
+    rows_per_segment: usize,
 }
 
-/// Run the [`FilterStrategy::Brute`] search: compress the filtered byte
-/// stream `build(cand)` for every `cand` in
-/// [`FilterStrategy::BRUTE_CANDIDATES`] and return the smallest DEFLATE
-/// output. `build` re-filters the image under each candidate
-/// row-strategy; the closure returns the uncompressed filtered stream so
-/// the interlaced + sub-byte paths can reuse the same compare loop with
-/// their own pass-aware stream builders.
-fn brute_compress(
+impl SegmentSource for RowSource<'_, '_> {
+    fn segment_count(&self) -> usize {
+        self.plane.height.div_ceil(self.rows_per_segment).max(1)
+    }
+
+    fn feed(&self, index: usize, sink: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()> {
+        let plane = self.plane;
+        let rb = plane.row_bytes;
+        let y0 = index * self.rows_per_segment;
+        let y1 = (y0 + self.rows_per_segment).min(plane.height);
+        if y0 >= y1 {
+            return Ok(());
+        }
+        let mut wire = vec![0u8; 1 + rb];
+        if !plane.swap16 {
+            let zero_row = vec![0u8; rb];
+            for y in y0..y1 {
+                let row = plane.row(y);
+                let prev = if y == 0 {
+                    &zero_row[..]
+                } else {
+                    plane.row(y - 1)
+                };
+                filter_row_wire(self.strategy, row, prev, self.bpp, &mut wire);
+                sink(&wire)?;
+            }
+        } else {
+            // 16-bit: the filter operates on wire (big-endian) bytes, so
+            // keep the previous row's swapped form in a second buffer
+            // and swap the current row in (RFC 2083 §2.1). Paired-byte
+            // lockstep walk — no per-sample index arithmetic.
+            let swap_into = |src: &[u8], dst: &mut [u8]| {
+                for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)) {
+                    d[0] = s[1];
+                    d[1] = s[0];
+                }
+            };
+            let mut prev = vec![0u8; rb];
+            let mut cur = vec![0u8; rb];
+            if y0 > 0 {
+                swap_into(plane.row(y0 - 1), &mut prev);
+            }
+            for y in y0..y1 {
+                swap_into(plane.row(y), &mut cur);
+                filter_row_wire(self.strategy, &cur, &prev, self.bpp, &mut wire);
+                sink(&wire)?;
+                std::mem::swap(&mut prev, &mut cur);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Filter every row of `plane` under `strategy` (W3C PNG3 §12.7) and
+/// deflate the `(1 + row_bytes) × height` stream into `out`, one row at
+/// a time, using up to `threads` workers for the independent segments.
+///
+/// [`FilterStrategy::Brute`] builds and compresses the stream once per
+/// candidate row-strategy (W3C PNG3 §12.7 "try every combination …
+/// find what compresses best", reduced to the tractable
+/// per-image-fixed search) and emits the smallest.
+pub(crate) fn deflate_encode_rows(
+    plane: &RowPlane<'_>,
+    bpp: usize,
+    strategy: FilterStrategy,
     level: u8,
-    mut build: impl FnMut(FilterStrategy) -> Result<Vec<u8>>,
-) -> Result<Vec<u8>> {
+    threads: usize,
+    out: &mut dyn FnMut(&[u8]),
+) -> Result<()> {
+    let rows_per_segment = rows_per_segment(1 + plane.row_bytes);
+    if strategy == FilterStrategy::Brute {
+        let best = brute_compress(|cand| {
+            let src = RowSource {
+                plane,
+                bpp,
+                strategy: cand,
+                rows_per_segment,
+            };
+            let mut v = Vec::new();
+            compress_zlib(&src, level, threads, &mut |b| v.extend_from_slice(b))?;
+            Ok(v)
+        })?;
+        out(&best);
+        return Ok(());
+    }
+    let src = RowSource {
+        plane,
+        bpp,
+        strategy,
+        rows_per_segment,
+    };
+    compress_zlib(&src, level, threads, out)
+}
+
+/// Run the [`FilterStrategy::Brute`] search: `compress(cand)` yields the
+/// finished zlib stream for every `cand` in
+/// [`FilterStrategy::BRUTE_CANDIDATES`]; the smallest wins. The closure
+/// owns the filtering + compression so the row-streaming, interlaced
+/// and sub-byte paths each plug in their own stream builder.
+fn brute_compress(mut compress: impl FnMut(FilterStrategy) -> Result<Vec<u8>>) -> Result<Vec<u8>> {
     let mut best: Option<Vec<u8>> = None;
     for &cand in FilterStrategy::BRUTE_CANDIDATES.iter() {
-        let filtered = build(cand)?;
-        let compressed = compress_to_vec_zlib(&filtered, level)?;
+        let compressed = compress(cand)?;
         let smaller = best.as_ref().map_or(true, |b| compressed.len() < b.len());
         if smaller {
             best = Some(compressed);
@@ -817,7 +1024,7 @@ fn brute_compress(
     best.ok_or_else(|| Error::other("PNG encoder: brute filter search produced no candidate"))
 }
 
-/// Adam7 counterpart to [`deflate_encode_pixels`]: gather each of the
+/// Adam7 counterpart to [`deflate_encode_rows`]: gather each of the
 /// seven passes into its own sub-image, filter its rows (per-pass
 /// heuristic), and concatenate `(1 + pass_row_bytes) * pass_height`
 /// filtered bytes from each pass. The full concatenation is zlib-
@@ -829,24 +1036,20 @@ pub(crate) fn deflate_encode_pixels_adam7(
     ihdr: &Ihdr,
     strategy: FilterStrategy,
     level: u8,
+    threads: usize,
 ) -> Result<Vec<u8>> {
     let bpp = ihdr.bpp_for_filter()?;
     let bytes_per_pixel = ihdr.decoded_bytes_per_pixel()?;
     if strategy == FilterStrategy::Brute {
-        return brute_compress(level, |cand| {
-            Ok(filter_image_stream_adam7(
-                raw,
-                width,
-                height,
-                bpp,
-                bytes_per_pixel,
-                cand,
-            ))
+        return brute_compress(|cand| {
+            let filtered =
+                filter_image_stream_adam7(raw, width, height, bpp, bytes_per_pixel, cand);
+            compress_bytes_to_vec(&filtered, SEGMENT_TARGET_BYTES, level, threads)
         });
     }
     let filtered_all =
         filter_image_stream_adam7(raw, width, height, bpp, bytes_per_pixel, strategy);
-    compress_to_vec_zlib(&filtered_all, level)
+    compress_bytes_to_vec(&filtered_all, SEGMENT_TARGET_BYTES, level, threads)
 }
 
 /// Build the concatenated Adam7 filtered byte stream for the ≥8-bit
@@ -939,6 +1142,7 @@ fn deflate_encode_pixels_adam7_subbyte(
     ihdr: &Ihdr,
     strategy: FilterStrategy,
     level: u8,
+    threads: usize,
 ) -> Result<Vec<u8>> {
     debug_assert!(ihdr.bit_depth == 1 || ihdr.bit_depth == 2 || ihdr.bit_depth == 4);
     debug_assert!(ihdr.colour_type == 0 || ihdr.colour_type == 3);
@@ -948,12 +1152,13 @@ fn deflate_encode_pixels_adam7_subbyte(
                                       // once regardless of how many filter candidates we later try).
     let packed_passes = pack_subbyte_adam7_passes(image, ihdr)?;
     if strategy == FilterStrategy::Brute {
-        return brute_compress(level, |cand| {
-            Ok(filter_subbyte_adam7_stream(&packed_passes, bpp, cand))
+        return brute_compress(|cand| {
+            let filtered = filter_subbyte_adam7_stream(&packed_passes, bpp, cand);
+            compress_bytes_to_vec(&filtered, SEGMENT_TARGET_BYTES, level, threads)
         });
     }
     let filtered_all = filter_subbyte_adam7_stream(&packed_passes, bpp, strategy);
-    compress_to_vec_zlib(&filtered_all, level)
+    compress_bytes_to_vec(&filtered_all, SEGMENT_TARGET_BYTES, level, threads)
 }
 
 /// One Adam7 pass after MSB-packing: `(pass_row_bytes, ph, pass_raw)`.
@@ -1085,7 +1290,20 @@ pub fn encode_apng_with_options(
     num_plays: u32,
     opts: &PngEncoderOptions,
 ) -> Result<Vec<u8>> {
-    use crate::apng::{build_fdat, Actl, Fctl};
+    encode_apng_threaded(frames, delay_centiseconds, num_plays, opts, 1)
+}
+
+/// [`encode_apng_with_options`] with a thread budget for each frame's
+/// pixel stream — see [`encode_png_image_threaded`] for the contract
+/// (`threads ≤ 1` is serial; the bytes do not depend on the budget).
+pub fn encode_apng_threaded(
+    frames: &[PngImage],
+    delay_centiseconds: u16,
+    num_plays: u32,
+    opts: &PngEncoderOptions,
+    threads: usize,
+) -> Result<Vec<u8>> {
+    use crate::apng::{Actl, Fctl};
 
     if frames.is_empty() {
         return Err(Error::invalid("PNG encoder: no frames for APNG"));
@@ -1147,40 +1365,34 @@ pub fn encode_apng_with_options(
         write_chunk(&mut out, b"fcTL", &fctl.to_bytes());
         seq += 1;
 
-        let compressed = if opts.interlace && ihdr.bit_depth < 8 {
-            // Sub-byte (ct=0/ct=3) interlaced: same per-pass pack +
-            // filter path the standalone encoder uses (RFC 2083 §A.8
-            // sub-image-per-pass rule).
-            deflate_encode_pixels_adam7_subbyte(frame, &ihdr, opts.filter_strategy, level)?
-        } else {
-            let raw = flatten_and_normalise_pixels(frame, &ihdr, row_bytes)?;
-            if opts.interlace {
-                deflate_encode_pixels_adam7(
-                    &raw,
-                    ihdr.width as usize,
-                    ihdr.height as usize,
-                    &ihdr,
-                    opts.filter_strategy,
-                    level,
-                )?
-            } else {
-                deflate_encode_pixels(
-                    &raw,
-                    row_bytes,
-                    ihdr.height as usize,
-                    &ihdr,
-                    opts.filter_strategy,
-                    level,
-                )?
-            }
-        };
-
+        // Same four filter sites as the standalone encoder (RFC 2083
+        // §A.8 sub-image-per-pass rule for the interlaced forms),
+        // streamed straight into the IDAT / fdAT chunk.
         if idx == 0 {
             // First frame is the default image → IDAT.
-            write_chunk(&mut out, b"IDAT", &compressed);
+            write_pixel_stream(
+                &mut out,
+                b"IDAT",
+                &[],
+                frame,
+                &ihdr,
+                row_bytes,
+                opts,
+                level,
+                threads,
+            )?;
         } else {
-            let payload = build_fdat(seq, &compressed);
-            write_chunk(&mut out, b"fdAT", &payload);
+            write_pixel_stream(
+                &mut out,
+                b"fdAT",
+                &seq.to_be_bytes(),
+                frame,
+                &ihdr,
+                row_bytes,
+                opts,
+                level,
+                threads,
+            )?;
             seq += 1;
         }
     }
@@ -1322,7 +1534,32 @@ pub fn encode_apng_frames_with_options(
     num_plays: u32,
     opts: &PngEncoderOptions,
 ) -> Result<Vec<u8>> {
-    use crate::apng::{build_fdat, Actl, Fctl};
+    encode_apng_frames_threaded(
+        canvas_width,
+        canvas_height,
+        default_image,
+        frames,
+        num_plays,
+        opts,
+        1,
+    )
+}
+
+/// [`encode_apng_frames_with_options`] with a thread budget for each
+/// frame's pixel stream — see [`encode_png_image_threaded`] for the
+/// contract (`threads ≤ 1` is serial; the bytes do not depend on the
+/// budget).
+#[allow(clippy::too_many_arguments)]
+pub fn encode_apng_frames_threaded(
+    canvas_width: u32,
+    canvas_height: u32,
+    default_image: Option<&PngImage>,
+    frames: &[ApngFrameSpec],
+    num_plays: u32,
+    opts: &PngEncoderOptions,
+    threads: usize,
+) -> Result<Vec<u8>> {
+    use crate::apng::{Actl, Fctl};
 
     if frames.is_empty() {
         return Err(Error::invalid("PNG encoder: no frames for APNG"));
@@ -1437,47 +1674,27 @@ pub fn encode_apng_frames_with_options(
     }
     write_metadata_before_idat(&mut out, opts.metadata.as_ref())?;
 
-    // Compress one frame's sub-region pixels into a zlib stream using the
-    // frame's own dimensions (the fcTL extent) as a synthetic IHDR.
-    let compress_region = |img: &PngImage| -> Result<Vec<u8>> {
-        let sub_ihdr = Ihdr {
-            width: img.width,
-            height: img.height,
-            ..ihdr
+    // Compress one frame's sub-region pixels straight into an IDAT /
+    // fdAT chunk using the frame's own dimensions (the fcTL extent) as
+    // a synthetic IHDR.
+    let write_region =
+        |out: &mut Vec<u8>, chunk_type: &[u8; 4], prefix: &[u8], img: &PngImage| -> Result<()> {
+            let sub_ihdr = Ihdr {
+                width: img.width,
+                height: img.height,
+                ..ihdr
+            };
+            let row_bytes = region_row_bytes(&sub_ihdr, img.width);
+            write_pixel_stream(
+                out, chunk_type, prefix, img, &sub_ihdr, row_bytes, opts, level, threads,
+            )
         };
-        let row_bytes = region_row_bytes(&sub_ihdr, img.width);
-        if opts.interlace && sub_ihdr.bit_depth < 8 {
-            deflate_encode_pixels_adam7_subbyte(img, &sub_ihdr, opts.filter_strategy, level)
-        } else {
-            let raw = flatten_and_normalise_pixels(img, &sub_ihdr, row_bytes)?;
-            if opts.interlace {
-                deflate_encode_pixels_adam7(
-                    &raw,
-                    sub_ihdr.width as usize,
-                    sub_ihdr.height as usize,
-                    &sub_ihdr,
-                    opts.filter_strategy,
-                    level,
-                )
-            } else {
-                deflate_encode_pixels(
-                    &raw,
-                    row_bytes,
-                    sub_ihdr.height as usize,
-                    &sub_ihdr,
-                    opts.filter_strategy,
-                    level,
-                )
-            }
-        }
-    };
 
     // When a separate default image is supplied, its full-canvas pixels
     // fill the IDAT *before* the first fcTL — it is the still image
     // non-APNG viewers show and is not part of the animation.
     if let Some(d) = default_image {
-        let idat = compress_region(d)?;
-        write_chunk(&mut out, b"IDAT", &idat);
+        write_region(&mut out, b"IDAT", &[], d)?;
     }
 
     let mut seq: u32 = 0;
@@ -1496,15 +1713,13 @@ pub fn encode_apng_frames_with_options(
         write_chunk(&mut out, b"fcTL", &fctl.to_bytes());
         seq += 1;
 
-        let compressed = compress_region(&f.image)?;
         if idx == 0 && default_image.is_none() {
             // No separate default image: the first frame *is* the default
             // image, so its full-canvas pixels ride in IDAT (after its
             // fcTL → first_frame_is_default).
-            write_chunk(&mut out, b"IDAT", &compressed);
+            write_region(&mut out, b"IDAT", &[], &f.image)?;
         } else {
-            let payload = build_fdat(seq, &compressed);
-            write_chunk(&mut out, b"fdAT", &payload);
+            write_region(&mut out, b"fdAT", &seq.to_be_bytes(), &f.image)?;
             seq += 1;
         }
     }
