@@ -118,6 +118,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path while the un-threaded API stays serial per the core threading
   contract. 12 MP RGB24 photo, M4 Max, level 6: 3.30 s → 0.40 s at
   16 threads; level 2: 0.41 s → 65 ms; level 1: 0.35 s → 54 ms.
+- End to end, `oxideav convert x.heic out.png` on a 12 MP image is
+  0.22 s wall at the default (HEIF decode + conversion + PNG encode,
+  host thread budget) against ≈ 3.4 s before; the CLI's explicit
+  `--opt` frame-tap path does not yet grant a thread budget and runs
+  the encoder serially (0.48–1.95 s depending on the level).
 - `level` and `compression` registry option keys as aliases of
   `compression_level`, so `oxideav convert --opt level=…` reaches the
   PNG encoder's speed / size dial.

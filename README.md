@@ -828,7 +828,19 @@ threads add ~20 MB of per-segment output held until assembly.
 Stage attribution (1 thread, same image): §12.8 heuristic 8 ms,
 `Paeth` `filter_row` 6 ms, deflate of the filtered stream 334 ms
 (level 1) / 393 (2) / 579 (4) / ≈ 3 200 (6) — the filter side is
-noise, the level is the dial. Before this round the same encode was
+noise, the level is the dial. The heuristic is already read-only
+(five sums, no filtered bytes), allocation-free per row, and skips
+rows identical to the previous one; a row-sampling variant would save
+at most ~2 % of a 12 MP encode, so none is offered.
+
+End to end, `oxideav convert` on a 4032×3024 HEIC (release, M4 Max,
+host thread budget): **0.22 s wall** for HEIF decode + colour
+conversion + PNG encode at the default level (8.2 MB output), against
+≈ 3.4 s before this round. With an explicit `--opt` the CLI's
+frame-tap writer currently builds the encoder without granting a
+thread budget, so those runs are serial: `--opt level=1` 0.48 s /
+8.7 MB, `--opt level=4` 0.63 s / 7.8 MB, `--opt level=6` 1.95 s /
+7.1 MB, `--opt filter=none` 0.52 s / 9.2 MB. Before this round the same encode was
 3.3 s at level 6 (the previous default) with three full-plane
 intermediates. Other layouts at 8 threads, level 2 / 6: RGBA 74 /
 567 ms, Gray8 24 / 192, Rgb48 87 / 511, Gray16 28 / 166; flat
