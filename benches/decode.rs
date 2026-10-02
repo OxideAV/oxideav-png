@@ -105,14 +105,7 @@ fn build_rgba(width: u32, height: u32) -> PngImage {
             data[idx + 3] = 0xff;
         }
     }
-    PngImage {
-        width,
-        height,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: w * 4,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(width, height, PngPixelFormat::Rgba, w * 4, data).with_palette(Vec::new())
 }
 
 fn build_rgb24(width: u32, height: u32) -> PngImage {
@@ -130,14 +123,7 @@ fn build_rgb24(width: u32, height: u32) -> PngImage {
             data[idx + 2] = base_x.min(255) as u8;
         }
     }
-    PngImage {
-        width,
-        height,
-        pixel_format: PngPixelFormat::Rgb24,
-        stride: w * 3,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(width, height, PngPixelFormat::Rgb24, w * 3, data).with_palette(Vec::new())
 }
 
 fn build_gray8(width: u32, height: u32) -> PngImage {
@@ -150,14 +136,7 @@ fn build_gray8(width: u32, height: u32) -> PngImage {
             data[r * w + c] = natural_pattern_byte(r, c, h, w, &mut state);
         }
     }
-    PngImage {
-        width,
-        height,
-        pixel_format: PngPixelFormat::Gray8,
-        stride: w,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(width, height, PngPixelFormat::Gray8, w, data).with_palette(Vec::new())
 }
 
 fn build_gray16(width: u32, height: u32) -> PngImage {
@@ -173,14 +152,7 @@ fn build_gray16(width: u32, height: u32) -> PngImage {
             data[idx + 1] = (base >> 8) as u8;
         }
     }
-    PngImage {
-        width,
-        height,
-        pixel_format: PngPixelFormat::Gray16Le,
-        stride: w * 2,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(width, height, PngPixelFormat::Gray16Le, w * 2, data).with_palette(Vec::new())
 }
 
 fn build_rgb48(width: u32, height: u32) -> PngImage {
@@ -201,14 +173,7 @@ fn build_rgb48(width: u32, height: u32) -> PngImage {
             data[idx + 5] = (bb >> 8) as u8;
         }
     }
-    PngImage {
-        width,
-        height,
-        pixel_format: PngPixelFormat::Rgb48Le,
-        stride: w * 6,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(width, height, PngPixelFormat::Rgb48Le, w * 6, data).with_palette(Vec::new())
 }
 
 fn build_rgba64(width: u32, height: u32) -> PngImage {
@@ -231,14 +196,7 @@ fn build_rgba64(width: u32, height: u32) -> PngImage {
             data[idx + 7] = 0xff;
         }
     }
-    PngImage {
-        width,
-        height,
-        pixel_format: PngPixelFormat::Rgba64Le,
-        stride: w * 8,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(width, height, PngPixelFormat::Rgba64Le, w * 8, data).with_palette(Vec::new())
 }
 
 fn build_pal8(width: u32, height: u32) -> PngImage {
@@ -256,44 +214,19 @@ fn build_pal8(width: u32, height: u32) -> PngImage {
         palette.push((i ^ 0x55) as u8);
         palette.push((i ^ 0xaa) as u8);
     }
-    PngImage {
-        width,
-        height,
-        pixel_format: PngPixelFormat::Pal8,
-        stride: w,
-        data,
-        palette,
-    }
+    PngImage::new(width, height, PngPixelFormat::Pal8, w, data).with_palette(palette)
 }
 
 fn encode_with_metadata(image: &PngImage) -> Vec<u8> {
     use oxideav_png::{PngEncoderOptions, PngMetadata};
-    let metadata = PngMetadata {
-        sbit: Some(Sbit::Rgba(8, 8, 8, 8)),
-        phys: Some(Phys {
-            pixels_per_unit_x: 2835,
-            pixels_per_unit_y: 2835,
-            unit: PhysUnit::Metre,
-        }),
-        time: Some(Time {
-            year: 2026,
-            month: 5,
-            day: 26,
-            hour: 12,
-            minute: 0,
-            second: 0,
-        }),
-        srgb: Some(Srgb {
-            rendering_intent: RenderingIntent::Perceptual,
-        }),
-        ..Default::default()
-    };
-    let opts = PngEncoderOptions {
-        interlace: false,
-        metadata: Some(metadata),
-        bit_depth: None,
-        ..Default::default()
-    };
+    let metadata = PngMetadata::default()
+        .with_sbit(Some(Sbit::Rgba(8, 8, 8, 8)))
+        .with_phys(Some(Phys::new(2835, 2835, PhysUnit::Metre)))
+        .with_time(Some(Time::new(2026, 5, 26, 12, 0, 0)))
+        .with_srgb(Some(Srgb::new(RenderingIntent::Perceptual)));
+    let opts = PngEncoderOptions::default()
+        .with_interlace(false)
+        .with_metadata(Some(metadata));
     oxideav_png::encode_png_image_with_options(image, &opts).expect("encode_png_image_with_options")
 }
 

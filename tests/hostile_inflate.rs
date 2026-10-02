@@ -27,14 +27,7 @@ fn deflate(data: &[u8]) -> Vec<u8> {
 }
 
 fn gray_1x1() -> PngImage {
-    PngImage {
-        width: 1,
-        height: 1,
-        pixel_format: PngPixelFormat::Gray8,
-        stride: 1,
-        data: vec![0x7F],
-        palette: Vec::new(),
-    }
+    PngImage::new(1, 1, PngPixelFormat::Gray8, 1, vec![0x7F]).with_palette(Vec::new())
 }
 
 /// Walk a PNG datastream's chunks, returning `(type, whole-chunk byte
@@ -131,10 +124,7 @@ fn large_but_legitimate_compressed_text_still_parses() {
     // Just *under* the bound must keep working — the cap is a bomb
     // defence, not a functional limit on real annotations.
     let text = "x".repeat(4 * 1024 * 1024); // 4 MiB, well under 64 MiB
-    let z = Ztxt {
-        keyword: "Comment".into(),
-        text: text.clone(),
-    };
+    let z = Ztxt::new("Comment".into(), text.clone());
     let wire = z.to_bytes().expect("encode");
     let back = Ztxt::parse(&wire).expect("parse");
     assert_eq!(back.text.len(), text.len());
@@ -144,20 +134,20 @@ fn large_but_legitimate_compressed_text_still_parses() {
 
 #[test]
 fn oversized_ztxt_text_rejected_on_encode() {
-    let z = Ztxt {
-        keyword: "Comment".into(),
-        text: "y".repeat(MAX_INFLATED_METADATA_LEN as usize + 1),
-    };
+    let z = Ztxt::new(
+        "Comment".into(),
+        "y".repeat(MAX_INFLATED_METADATA_LEN as usize + 1),
+    );
     let err = z.to_bytes().expect_err("over-bound text must be rejected");
     assert!(format!("{err}").contains("exceeds"));
 }
 
 #[test]
 fn oversized_iccp_profile_rejected_on_encode() {
-    let p = Iccp {
-        name: "big".into(),
-        profile: vec![0u8; MAX_INFLATED_METADATA_LEN as usize + 1],
-    };
+    let p = Iccp::new(
+        "big".into(),
+        vec![0u8; MAX_INFLATED_METADATA_LEN as usize + 1],
+    );
     let err = p
         .to_bytes()
         .expect_err("over-bound profile must be rejected");
@@ -166,13 +156,13 @@ fn oversized_iccp_profile_rejected_on_encode() {
 
 #[test]
 fn oversized_itxt_text_rejected_on_encode() {
-    let t = Itxt {
-        keyword: "Comment".into(),
-        compressed: true,
-        language_tag: String::new(),
-        translated_keyword: String::new(),
-        text: "z".repeat(MAX_INFLATED_METADATA_LEN as usize + 1),
-    };
+    let t = Itxt::new(
+        "Comment".into(),
+        "z".repeat(MAX_INFLATED_METADATA_LEN as usize + 1),
+    )
+    .with_compressed(true)
+    .with_language_tag(String::new())
+    .with_translated_keyword(String::new());
     let err = t.to_bytes().expect_err("over-bound text must be rejected");
     assert!(format!("{err}").contains("exceeds"));
 }
@@ -232,14 +222,7 @@ fn fdat_bomb_behind_small_fctl_rejected() {
     // Build a valid 2-frame 2x2 APNG, then swell the second frame's
     // fdAT into a stream that inflates far past the fcTL-implied
     // filtered size. The per-frame capped inflate must reject it.
-    let f = PngImage {
-        width: 2,
-        height: 2,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: 8,
-        data: vec![0x40; 16],
-        palette: Vec::new(),
-    };
+    let f = PngImage::new(2, 2, PngPixelFormat::Rgba, 8, vec![0x40; 16]).with_palette(Vec::new());
     let good = encode_apng(&[f.clone(), f], 10, 0).expect("encode apng");
     let bomb = deflate(&vec![0u8; 64 * 1024]);
     let mut tampered = good[..8].to_vec();
@@ -269,55 +252,35 @@ fn fdat_bomb_behind_small_fctl_rejected() {
 #[test]
 fn expected_filtered_len_matches_hand_computed_shapes() {
     // Non-interlaced 1x1 Gray8: 1 row x (1 filter byte + 1 sample).
-    let ihdr = Ihdr {
-        width: 1,
-        height: 1,
-        bit_depth: 8,
-        colour_type: 0,
-        compression: 0,
-        filter: 0,
-        interlace: 0,
-    };
+    let ihdr = Ihdr::new(1, 1, 8, 0)
+        .with_compression(0)
+        .with_filter(0)
+        .with_interlace(0);
     assert_eq!(ihdr.expected_filtered_len().unwrap(), 2);
 
     // Non-interlaced 3x2 RGBA16: 2 rows x (1 + 3*8).
-    let ihdr = Ihdr {
-        width: 3,
-        height: 2,
-        bit_depth: 16,
-        colour_type: 6,
-        compression: 0,
-        filter: 0,
-        interlace: 0,
-    };
+    let ihdr = Ihdr::new(3, 2, 16, 6)
+        .with_compression(0)
+        .with_filter(0)
+        .with_interlace(0);
     assert_eq!(ihdr.expected_filtered_len().unwrap(), 2 * (1 + 24));
 
     // Adam7 7x7 Gray8 — hand-summed per-pass (W3C PNG3 §8.1: each pass
     // serialized as a complete image of its own dimensions):
     //   p1 1x1:2  p2 1x1:2  p3 2x1:3  p4 2x2:6  p5 4x2:10
     //   p6 3x4:16 p7 7x3:24  = 63.
-    let ihdr = Ihdr {
-        width: 7,
-        height: 7,
-        bit_depth: 8,
-        colour_type: 0,
-        compression: 0,
-        filter: 0,
-        interlace: 1,
-    };
+    let ihdr = Ihdr::new(7, 7, 8, 0)
+        .with_compression(0)
+        .with_filter(0)
+        .with_interlace(1);
     assert_eq!(ihdr.expected_filtered_len().unwrap(), 63);
 
     // Adam7 sub-8x8 shapes exercise the empty-pass arms: a 1x1
     // interlaced image has pixels only in pass 1.
-    let ihdr = Ihdr {
-        width: 1,
-        height: 1,
-        bit_depth: 8,
-        colour_type: 0,
-        compression: 0,
-        filter: 0,
-        interlace: 1,
-    };
+    let ihdr = Ihdr::new(1, 1, 8, 0)
+        .with_compression(0)
+        .with_filter(0)
+        .with_interlace(1);
     assert_eq!(ihdr.expected_filtered_len().unwrap(), 2);
 }
 
@@ -326,15 +289,10 @@ fn expected_filtered_len_saturates_on_max_dimensions() {
     // 2^31-1 x 2^31-1 RGBA16 overflows u64 in the naive multiply; the
     // helper must saturate, not wrap (a wrapped small value would
     // wrongly cap a legitimate inflate).
-    let ihdr = Ihdr {
-        width: u32::MAX >> 1,
-        height: u32::MAX >> 1,
-        bit_depth: 16,
-        colour_type: 6,
-        compression: 0,
-        filter: 0,
-        interlace: 0,
-    };
+    let ihdr = Ihdr::new(u32::MAX >> 1, u32::MAX >> 1, 16, 6)
+        .with_compression(0)
+        .with_filter(0)
+        .with_interlace(0);
     let v = ihdr.expected_filtered_len().unwrap();
     assert!(v >= (u32::MAX >> 1) as u64 * 24);
 }
@@ -416,14 +374,7 @@ fn with_idat(good: &[u8], idat: &[u8]) -> Vec<u8> {
 fn rgb_16x9() -> PngImage {
     let (w, h) = (16u32, 9u32);
     let data: Vec<u8> = (0..w * h * 3).map(|i| (i * 37 % 251) as u8).collect();
-    PngImage {
-        width: w,
-        height: h,
-        pixel_format: PngPixelFormat::Rgb24,
-        stride: (w * 3) as usize,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(w, h, PngPixelFormat::Rgb24, (w * 3) as usize, data).with_palette(Vec::new())
 }
 
 /// The non-interlaced decoder inflates one wire row at a time straight

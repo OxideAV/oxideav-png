@@ -234,21 +234,14 @@ fn solid_frame(width: u32, height: u32, format: PngPixelFormat, seed: u8) -> Png
             0xFF,
         ],
         // We exclude Pal8 from `pixel_format_for`, so this arm is dead;
-        // a fall-through to an empty pixel is fine if the enum ever
-        // grows another variant.
-        PngPixelFormat::Pal8 => vec![seed],
+        // `PngPixelFormat` is `#[non_exhaustive]`, so the wildcard also
+        // covers any variant a future crate version adds.
+        _ => vec![seed],
     };
     for _ in 0..(width as usize * height as usize) {
         data.extend_from_slice(&pixel);
     }
-    PngImage {
-        width,
-        height,
-        pixel_format: format,
-        stride,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(width, height, format, stride, data).with_palette(Vec::new())
 }
 
 enum Plan {

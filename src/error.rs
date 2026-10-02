@@ -22,6 +22,7 @@ pub type Result<T> = std::result::Result<T, PngError>;
 /// or framework-specific (`FormatNotFound`, `CodecNotFound`) errors —
 /// those originate in callers that are already linking `oxideav-core`.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum PngError {
     /// The input bitstream / chunk stream is malformed (bad magic,
     /// truncated chunk, CRC mismatch, etc.).

@@ -391,6 +391,7 @@ impl Sbit {
 /// `pixels_per_unit_x` and `_y` are unsigned. `unit` selects the
 /// interpretation per [`PhysUnit`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Phys {
     pub pixels_per_unit_x: u32,
     pub pixels_per_unit_y: u32,
@@ -407,6 +408,15 @@ pub enum PhysUnit {
 }
 
 impl Phys {
+    /// Build a `pHYs` record (pixels per unit along X and Y, unit specifier).
+    pub fn new(pixels_per_unit_x: u32, pixels_per_unit_y: u32, unit: PhysUnit) -> Self {
+        Self {
+            pixels_per_unit_x,
+            pixels_per_unit_y,
+            unit,
+        }
+    }
+
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.len() != 9 {
             return Err(Error::invalid(format!(
@@ -461,6 +471,7 @@ impl Phys {
 /// `tIME` payload (RFC 2083 §4.2.8). UTC. `second` may legally be 60
 /// for a leap second.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Time {
     pub year: u16,
     pub month: u8,
@@ -471,6 +482,18 @@ pub struct Time {
 }
 
 impl Time {
+    /// Build a `tIME` record from its six wire fields (UTC).
+    pub fn new(year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> Self {
+        Self {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        }
+    }
+
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.len() != 7 {
             return Err(Error::invalid(format!(
@@ -851,11 +874,17 @@ impl Trns {
 /// count (any scale, RFC 2083 §4.2.4 "the exact scale factor is chosen by
 /// the encoder").
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Hist {
     pub frequencies: Vec<u16>,
 }
 
 impl Hist {
+    /// Build a `hIST` record from one frequency per palette entry.
+    pub fn new(frequencies: Vec<u16>) -> Self {
+        Self { frequencies }
+    }
+
     /// Parse an `hIST` chunk. `palette_entries` is the number of `PLTE`
     /// entries the host PNG declares; spec requires "exactly one entry
     /// for each entry in the PLTE chunk" (W3C PNG3 §11.3.4.2).
@@ -892,6 +921,7 @@ impl Hist {
 /// four bytes are validated against the two legal TIFF magic words on
 /// [`Self::parse`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Exif {
     /// Raw profile bytes, exactly as they appear in the chunk (TIFF
     /// header onward; no JPEG `APP1` marker / length / `"Exif\0"` ID).
@@ -906,6 +936,11 @@ const TIFF_LE_MAGIC: [u8; 4] = [0x49, 0x49, 0x2A, 0x00];
 const TIFF_BE_MAGIC: [u8; 4] = [0x4D, 0x4D, 0x00, 0x2A];
 
 impl Exif {
+    /// Wrap a raw TIFF-structured Exif payload (`eXIf`).
+    pub fn new(data: Vec<u8>) -> Self {
+        Self { data }
+    }
+
     /// Parse an `eXIf` chunk payload. Rejects payloads shorter than the
     /// 4-byte TIFF header and any header that is not one of the two
     /// legal byte-order magic words (W3C PNG3 §11.3.4.5.2: "all other
@@ -990,11 +1025,17 @@ impl RenderingIntent {
 /// A one-byte chunk whose presence asserts the image samples conform to
 /// the sRGB colour space; the byte selects the ICC [`RenderingIntent`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Srgb {
     pub rendering_intent: RenderingIntent,
 }
 
 impl Srgb {
+    /// Build an `sRGB` record.
+    pub fn new(rendering_intent: RenderingIntent) -> Self {
+        Self { rendering_intent }
+    }
+
     /// Parse an `sRGB` chunk payload (exactly one byte; the rendering
     /// intent). Rejects any other length and any reserved intent value.
     pub fn parse(data: &[u8]) -> Result<Self> {
@@ -1045,6 +1086,7 @@ impl Srgb {
 /// those two bytes against the H.273 registry is left to consumers that
 /// need stricter checks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Cicp {
     pub color_primaries: u8,
     pub transfer_function: u8,
@@ -1053,6 +1095,21 @@ pub struct Cicp {
 }
 
 impl Cicp {
+    /// Build a `cICP` record from its four ITU-T H.273 code points, in wire order.
+    pub fn new(
+        color_primaries: u8,
+        transfer_function: u8,
+        matrix_coefficients: u8,
+        video_full_range_flag: u8,
+    ) -> Self {
+        Self {
+            color_primaries,
+            transfer_function,
+            matrix_coefficients,
+            video_full_range_flag,
+        }
+    }
+
     /// Parse a `cICP` chunk payload. The chunk is exactly four bytes
     /// (Table 18); other lengths, `matrix_coefficients != 0`, and
     /// `video_full_range_flag` outside `0..=1` are all rejected.
@@ -1115,12 +1172,18 @@ impl Cicp {
 /// round-tripping the raw integer (any interpretation / discard is the
 /// caller's choice) and only reject a malformed *length*.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Gama {
     /// The image gamma multiplied by 100000 (so `45000` == γ 0.45).
     pub gamma_times_100000: u32,
 }
 
 impl Gama {
+    /// Build a `gAMA` record from the gamma scaled by 100 000.
+    pub fn new(gamma_times_100000: u32) -> Self {
+        Self { gamma_times_100000 }
+    }
+
     /// The one `gAMA` value W3C PNG3 §11.3.2.5 Table 17 permits
     /// alongside an `sRGB` chunk ("Only the following values shall be
     /// used"): gamma 45455, i.e. the sRGB-compatible 1/2.2 transfer
@@ -1174,6 +1237,7 @@ impl Gama {
 /// for grayscale images" (RFC 2083 §4.2.2); the codec carries it for any
 /// colour type and leaves that judgement to the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Chrm {
     pub white_point_x: u32,
     pub white_point_y: u32,
@@ -1186,6 +1250,27 @@ pub struct Chrm {
 }
 
 impl Chrm {
+    /// Build a `cHRM` record from the white point and the red / green /
+    /// blue primaries, each an `(x, y)` chromaticity pair scaled by
+    /// 100 000 (wire order: white, red, green, blue).
+    pub fn new(
+        white_point: (u32, u32),
+        red: (u32, u32),
+        green: (u32, u32),
+        blue: (u32, u32),
+    ) -> Self {
+        Self {
+            white_point_x: white_point.0,
+            white_point_y: white_point.1,
+            red_x: red.0,
+            red_y: red.1,
+            green_x: green.0,
+            green_y: green.1,
+            blue_x: blue.0,
+            blue_y: blue.1,
+        }
+    }
+
     /// The one set of `cHRM` values W3C PNG3 §11.3.2.5 Table 17 permits
     /// alongside an `sRGB` chunk ("Only the following values shall be
     /// used"): the sRGB primaries and D65 white point, each CIE 1931
@@ -1301,6 +1386,7 @@ impl Chrm {
 /// is rejected on parse. Must precede `PLTE` and `IDAT` (§11.3.2.7
 /// "The mDCV chunk MUST come before the PLTE and IDAT chunks").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Mdcv {
     /// Display primary "R" — the primary with the largest stored x
     /// chromaticity (§11.3.2.7 ordering rule). Stored integer × 0.00002
@@ -1331,6 +1417,30 @@ pub struct Mdcv {
 }
 
 impl Mdcv {
+    /// Build an `mDCV` record (W3C PNG3 §11.3.2.7) from the R / G / B
+    /// display primaries and the white point — each an `(x, y)` pair
+    /// in units of 0.00002 — plus the maximum and minimum display
+    /// luminance in units of 0.0001 cd/m².
+    pub fn new(
+        primaries_rgb: [(u16, u16); 3],
+        white_point: (u16, u16),
+        max_luminance: u32,
+        min_luminance: u32,
+    ) -> Self {
+        Self {
+            primary_r_x: primaries_rgb[0].0,
+            primary_r_y: primaries_rgb[0].1,
+            primary_g_x: primaries_rgb[1].0,
+            primary_g_y: primaries_rgb[1].1,
+            primary_b_x: primaries_rgb[2].0,
+            primary_b_y: primaries_rgb[2].1,
+            white_point_x: white_point.0,
+            white_point_y: white_point.1,
+            max_luminance,
+            min_luminance,
+        }
+    }
+
     /// On-wire size in bytes: 12 (primaries) + 4 (white point) + 4
     /// (max luminance) + 4 (min luminance) per §11.3.2.7 Table 19.
     pub const SIZE: usize = 24;
@@ -1456,6 +1566,7 @@ impl Mdcv {
 /// instance only (§5.6 Table 1, "Multiple OK? No"). Must precede
 /// `PLTE` and `IDAT`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Clli {
     /// Maximum Content Light Level — the peak single-pixel cd/m² of
     /// the playback sequence, stored × 10000.
@@ -1466,6 +1577,14 @@ pub struct Clli {
 }
 
 impl Clli {
+    /// Build a `cLLI` record (MaxCLL, MaxFALL; both × 0.0001 cd/m²).
+    pub fn new(max_content_light_level: u32, max_frame_average_light_level: u32) -> Self {
+        Self {
+            max_content_light_level,
+            max_frame_average_light_level,
+        }
+    }
+
     /// On-wire size in bytes (§11.3.2.8 Table 20: 4 + 4).
     pub const SIZE: usize = 8;
 
@@ -1522,12 +1641,26 @@ impl Clli {
 /// fraction of the pixels … for which that palette entry is the closest
 /// match", §11.3.4.4); zero is a valid value meaning "least important".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SpltEntry {
     pub red: u16,
     pub green: u16,
     pub blue: u16,
     pub alpha: u16,
     pub frequency: u16,
+}
+
+impl SpltEntry {
+    /// Build one suggested-palette entry (samples at the palette's depth, plus frequency).
+    pub fn new(red: u16, green: u16, blue: u16, alpha: u16, frequency: u16) -> Self {
+        Self {
+            red,
+            green,
+            blue,
+            alpha,
+            frequency,
+        }
+    }
 }
 
 /// `sPLT` payload (W3C PNG3 §11.3.4.4).
@@ -1538,6 +1671,7 @@ pub struct SpltEntry {
 /// the [`SpltEntry`] samples must fit in `0..=255`. The palette name
 /// obeys the `tEXt` keyword rules (§11.3.3.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Splt {
     /// Palette name (1-79 printable Latin-1 bytes; no leading / trailing
     /// / consecutive spaces). Stored as a `String`; on the wire it is
@@ -1600,6 +1734,15 @@ fn validate_keyword(name: &str, context: &str) -> Result<Vec<u8>> {
 }
 
 impl Splt {
+    /// Build an `sPLT` record (palette name, 8 or 16 sample depth, entries).
+    pub fn new(name: String, sample_depth: u8, entries: Vec<SpltEntry>) -> Self {
+        Self {
+            name,
+            sample_depth,
+            entries,
+        }
+    }
+
     /// Parse an `sPLT` chunk payload (Table 25): palette name, `NUL`,
     /// sample depth, then 6- or 10-byte entries. Rejects an invalid
     /// palette name, a sample depth other than `8` / `16`, a missing
@@ -1731,6 +1874,7 @@ impl Splt {
 /// with the same keyword is permissible"). The decoder preserves the
 /// file's order, and the encoder emits them in `Vec` order.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Text {
     /// 1-79 printable Latin-1 bytes; no leading / trailing / consecutive
     /// spaces, no null. Stored as a `String` whose codepoints all fit
@@ -1743,6 +1887,11 @@ pub struct Text {
 }
 
 impl Text {
+    /// Build a `tEXt` record (Latin-1 keyword and text).
+    pub fn new(keyword: String, text: String) -> Self {
+        Self { keyword, text }
+    }
+
     /// Parse a `tEXt` chunk payload (RFC 2083 §4.2.7): keyword bytes,
     /// `NUL` separator, then text bytes (no trailing null — chunk
     /// length is the only end marker).
@@ -1835,6 +1984,7 @@ impl Text {
 /// file" (§4.2.10 ¶6). The decoder preserves file order and the
 /// encoder replays it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Ztxt {
     /// 1-79 printable Latin-1 bytes; no leading / trailing / consecutive
     /// spaces, no `NUL`. Stored as a `String` whose codepoints all fit
@@ -1850,6 +2000,11 @@ pub struct Ztxt {
 }
 
 impl Ztxt {
+    /// Build a `zTXt` record (Latin-1 keyword and text; the body is compressed on the wire).
+    pub fn new(keyword: String, text: String) -> Self {
+        Self { keyword, text }
+    }
+
     /// `zlib`/deflate is the only compression method PNG defines for
     /// `zTXt` per RFC 2083 §4.2.10 ("The only value presently defined
     /// for it is 0 (deflate/inflate compression)"). PNG3 §11.3.3.3
@@ -1978,6 +2133,7 @@ impl Ztxt {
 /// In the §4.3 "Color Chunk Priority" table `iCCP` is rank `2`, between
 /// `cICP` (`1`) and `sRGB` (`3`).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Iccp {
     /// Profile name (1-79 printable Latin-1 bytes; no leading /
     /// trailing / consecutive spaces, no `NUL`). Stored as a `String`
@@ -1990,6 +2146,11 @@ pub struct Iccp {
 }
 
 impl Iccp {
+    /// Build an `iCCP` record (profile name and raw ICC profile bytes).
+    pub fn new(name: String, profile: Vec<u8>) -> Self {
+        Self { name, profile }
+    }
+
     /// `zlib`/deflate is the only compression method PNG defines for
     /// `iCCP` per W3C PNG3 §11.3.2.3 ("The only compression method
     /// defined in this specification is method 0").
@@ -2097,6 +2258,7 @@ impl Iccp {
 /// with identical keywords (alongside `tEXt` and `zTXt`). The decoder
 /// preserves file order and the encoder replays it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Itxt {
     /// 1-79 printable Latin-1 bytes; no leading / trailing /
     /// consecutive spaces, no `NUL`. Same predicate as `tEXt`.
@@ -2122,6 +2284,35 @@ pub struct Itxt {
 }
 
 impl Itxt {
+    /// Build an `iTXt` record with an empty language tag / translated keyword and an uncompressed body; chain `with_*` setters to adjust.
+    pub fn new(keyword: String, text: String) -> Self {
+        Self {
+            keyword,
+            text,
+            compressed: false,
+            language_tag: String::new(),
+            translated_keyword: String::new(),
+        }
+    }
+
+    /// Compress the text body on the wire.
+    pub fn with_compressed(mut self, compressed: bool) -> Self {
+        self.compressed = compressed;
+        self
+    }
+
+    /// BCP47 language tag of the text.
+    pub fn with_language_tag(mut self, language_tag: String) -> Self {
+        self.language_tag = language_tag;
+        self
+    }
+
+    /// UTF-8 translation of the keyword.
+    pub fn with_translated_keyword(mut self, translated_keyword: String) -> Self {
+        self.translated_keyword = translated_keyword;
+        self
+    }
+
     /// `zlib`/deflate is the only compression method PNG defines for
     /// `iTXt` per W3C PNG3 §11.3.3.4 ("The only compression method
     /// defined in this specification is 0").
@@ -2343,6 +2534,7 @@ impl Itxt {
 /// editor shall not move the chunk from before IDAT to after IDAT or
 /// vice versa").
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UnknownChunk {
     /// The raw 4-byte chunk type (e.g. `b"prVt"`). Always an ancillary,
     /// well-formed all-letter name by construction.
@@ -2357,6 +2549,15 @@ pub struct UnknownChunk {
 }
 
 impl UnknownChunk {
+    /// Capture an unrecognised ancillary chunk and which side of `IDAT` it sits on.
+    pub fn new(chunk_type: [u8; 4], data: Vec<u8>, after_idat: bool) -> Self {
+        Self {
+            chunk_type,
+            data,
+            after_idat,
+        }
+    }
+
     /// §5.4 fourth-letter property bit: `true` when a PNG editor may
     /// copy this chunk forward even after critical-chunk edits (§14.2).
     pub fn is_safe_to_copy(&self) -> bool {
@@ -2378,6 +2579,7 @@ impl UnknownChunk {
 /// simply omitted from the output PNG; the `splt`, `texts`, `ztxts`,
 /// `itxts`, and `unknowns` `Vec`s are omitted when empty.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PngMetadata {
     pub sbit: Option<Sbit>,
     pub phys: Option<Phys>,
@@ -2454,6 +2656,120 @@ pub struct PngMetadata {
 }
 
 impl PngMetadata {
+    /// Set (or clear with `None`) the `Sbit` record.
+    pub fn with_sbit(mut self, sbit: impl Into<Option<Sbit>>) -> Self {
+        self.sbit = sbit.into();
+        self
+    }
+
+    /// Set (or clear with `None`) the `Phys` record.
+    pub fn with_phys(mut self, phys: impl Into<Option<Phys>>) -> Self {
+        self.phys = phys.into();
+        self
+    }
+
+    /// Set (or clear with `None`) the `Time` record.
+    pub fn with_time(mut self, time: impl Into<Option<Time>>) -> Self {
+        self.time = time.into();
+        self
+    }
+
+    /// Set (or clear with `None`) the `Bkgd` record.
+    pub fn with_bkgd(mut self, bkgd: impl Into<Option<Bkgd>>) -> Self {
+        self.bkgd = bkgd.into();
+        self
+    }
+
+    /// Set (or clear with `None`) the `Hist` record.
+    pub fn with_hist(mut self, hist: impl Into<Option<Hist>>) -> Self {
+        self.hist = hist.into();
+        self
+    }
+
+    /// Set (or clear with `None`) the `Trns` record.
+    pub fn with_trns(mut self, trns: impl Into<Option<Trns>>) -> Self {
+        self.trns = trns.into();
+        self
+    }
+
+    /// Set (or clear with `None`) the `Exif` record.
+    pub fn with_exif(mut self, exif: impl Into<Option<Exif>>) -> Self {
+        self.exif = exif.into();
+        self
+    }
+
+    /// Set (or clear with `None`) the `Srgb` record.
+    pub fn with_srgb(mut self, srgb: impl Into<Option<Srgb>>) -> Self {
+        self.srgb = srgb.into();
+        self
+    }
+
+    /// Set (or clear with `None`) the `Cicp` record.
+    pub fn with_cicp(mut self, cicp: impl Into<Option<Cicp>>) -> Self {
+        self.cicp = cicp.into();
+        self
+    }
+
+    /// Set (or clear with `None`) the `Iccp` record.
+    pub fn with_iccp(mut self, iccp: impl Into<Option<Iccp>>) -> Self {
+        self.iccp = iccp.into();
+        self
+    }
+
+    /// Set (or clear with `None`) the `Gama` record.
+    pub fn with_gama(mut self, gama: impl Into<Option<Gama>>) -> Self {
+        self.gama = gama.into();
+        self
+    }
+
+    /// Set (or clear with `None`) the `Chrm` record.
+    pub fn with_chrm(mut self, chrm: impl Into<Option<Chrm>>) -> Self {
+        self.chrm = chrm.into();
+        self
+    }
+
+    /// Set (or clear with `None`) the `Mdcv` record.
+    pub fn with_mdcv(mut self, mdcv: impl Into<Option<Mdcv>>) -> Self {
+        self.mdcv = mdcv.into();
+        self
+    }
+
+    /// Set (or clear with `None`) the `Clli` record.
+    pub fn with_clli(mut self, clli: impl Into<Option<Clli>>) -> Self {
+        self.clli = clli.into();
+        self
+    }
+
+    /// Replace the `splt` list.
+    pub fn with_splt(mut self, splt: Vec<Splt>) -> Self {
+        self.splt = splt;
+        self
+    }
+
+    /// Replace the `texts` list.
+    pub fn with_texts(mut self, texts: Vec<Text>) -> Self {
+        self.texts = texts;
+        self
+    }
+
+    /// Replace the `ztxts` list.
+    pub fn with_ztxts(mut self, ztxts: Vec<Ztxt>) -> Self {
+        self.ztxts = ztxts;
+        self
+    }
+
+    /// Replace the `itxts` list.
+    pub fn with_itxts(mut self, itxts: Vec<Itxt>) -> Self {
+        self.itxts = itxts;
+        self
+    }
+
+    /// Replace the `unknowns` list.
+    pub fn with_unknowns(mut self, unknowns: Vec<UnknownChunk>) -> Self {
+        self.unknowns = unknowns;
+        self
+    }
+
     /// True when no metadata chunks are populated. Used by the encoder
     /// as a quick "nothing to emit" check.
     pub fn is_empty(&self) -> bool {
@@ -2515,6 +2831,7 @@ impl PngMetadata {
 /// The winning colour-space signal per the W3C PNG3 §4.3 "Color Chunk
 /// Priority" table — see [`PngMetadata::colour_source`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ColourSource {
     /// `cICP` (priority 1): coding-independent code points name the
     /// colour space (§11.3.2.6).

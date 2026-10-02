@@ -155,13 +155,12 @@ impl Plan {
             n => Some(n),
         };
 
-        let opts = PngEncoderOptions {
-            interlace: flags & 0b0000_0001 != 0,
-            metadata,
-            bit_depth,
-            filter_strategy,
-            compression_level,
-        };
+        let opts = PngEncoderOptions::default()
+            .with_interlace(flags & 0b0000_0001 != 0)
+            .with_metadata(metadata)
+            .with_bit_depth(bit_depth)
+            .with_filter_strategy(filter_strategy)
+            .with_compression_level(compression_level);
 
         Some((image, opts))
     }
@@ -264,6 +263,9 @@ fn solid_image(
             0xFF,
             0xFF,
         ],
+        // `PngPixelFormat` is `#[non_exhaustive]`; a future variant gets
+        // a one-byte pixel like Gray8.
+        _ => vec![sample],
     };
 
     let mut buf = Vec::with_capacity(stride * height as usize);
@@ -291,14 +293,7 @@ fn solid_image(
         Vec::new()
     };
 
-    PngImage {
-        width,
-        height,
-        pixel_format: format,
-        stride,
-        data: buf,
-        palette,
-    }
+    PngImage::new(width, height, format, stride, buf).with_palette(palette)
 }
 
 /// A small, always-valid ancillary-metadata bundle. Exercises the
@@ -308,25 +303,9 @@ fn solid_image(
 /// date ranges, ...) which would mostly land in rejection paths.
 fn sample_metadata() -> PngMetadata {
     let mut meta = PngMetadata::default();
-    meta.texts = vec![Text {
-        keyword: "Comment".to_string(),
-        text: "fuzz".to_string(),
-    }];
-    meta.phys = Some(Phys {
-        pixels_per_unit_x: 2835,
-        pixels_per_unit_y: 2835,
-        unit: PhysUnit::Metre,
-    });
-    meta.time = Some(Time {
-        year: 2026,
-        month: 6,
-        day: 14,
-        hour: 12,
-        minute: 0,
-        second: 0,
-    });
-    meta.gama = Some(Gama {
-        gamma_times_100000: 45455,
-    });
+    meta.texts = vec![Text::new("Comment".to_string(), "fuzz".to_string())];
+    meta.phys = Some(Phys::new(2835, 2835, PhysUnit::Metre));
+    meta.time = Some(Time::new(2026, 6, 14, 12, 0, 0));
+    meta.gama = Some(Gama::new(45455));
     meta
 }

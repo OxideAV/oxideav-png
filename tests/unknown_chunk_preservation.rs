@@ -15,19 +15,16 @@ use oxideav_png::{
 };
 
 fn rgba_2x2() -> PngImage {
-    PngImage {
-        width: 2,
-        height: 2,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: 8,
-        data: vec![
-            255, 0, 0, 255, // (0,0)
-            0, 255, 0, 255, // (1,0)
-            0, 0, 255, 255, // (0,1)
-            255, 255, 255, 255, // (1,1)
+    PngImage::new(
+        2,
+        2,
+        PngPixelFormat::Rgba,
+        8,
+        vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ],
-        palette: Vec::new(),
-    }
+    )
+    .with_palette(Vec::new())
 }
 
 /// Append a length|type|data|CRC chunk to `out` using the production
@@ -119,10 +116,7 @@ fn unknown_chunks_round_trip_on_correct_side_of_idat() {
     assert_eq!(meta.unknowns.len(), 2);
 
     // Re-encode carrying the captured unknowns forward.
-    let opts = PngEncoderOptions {
-        metadata: Some(meta.clone()),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta.clone()));
     let reencoded = encode_png_image_with_options(&rgba_2x2(), &opts).expect("re-encode");
 
     // The re-decoded metadata must match exactly (same types, payloads,
@@ -210,11 +204,7 @@ fn file_order_of_multiple_unknowns_is_preserved() {
     // The decoder field constructs the expected struct shape.
     assert_eq!(
         meta.unknowns[1],
-        UnknownChunk {
-            chunk_type: *b"qrVt",
-            data: b"two".to_vec(),
-            after_idat: false,
-        }
+        UnknownChunk::new(*b"qrVt", b"two".to_vec(), false)
     );
 }
 
@@ -311,26 +301,15 @@ fn unknown_round_trip_property_sweep() {
         // after-IDAT chunks in theirs).
         let mut expected: Vec<UnknownChunk> = Vec::new();
         for s in specs.iter().filter(|s| !s.2) {
-            expected.push(UnknownChunk {
-                chunk_type: s.0,
-                data: s.1.clone(),
-                after_idat: false,
-            });
+            expected.push(UnknownChunk::new(s.0, s.1.clone(), false));
         }
         for s in specs.iter().filter(|s| s.2) {
-            expected.push(UnknownChunk {
-                chunk_type: s.0,
-                data: s.1.clone(),
-                after_idat: true,
-            });
+            expected.push(UnknownChunk::new(s.0, s.1.clone(), true));
         }
         assert_eq!(meta.unknowns, expected, "captured unknowns mismatch");
 
         // Re-encode carrying them forward and re-capture.
-        let opts = PngEncoderOptions {
-            metadata: Some(meta.clone()),
-            ..Default::default()
-        };
+        let opts = PngEncoderOptions::default().with_metadata(Some(meta.clone()));
         let reencoded = encode_png_image_with_options(&rgba_2x2(), &opts).expect("re-encode");
         let meta2 = parse_metadata(&reencoded).expect("re-parse");
         assert_eq!(meta2.unknowns, meta.unknowns, "round-trip drift");

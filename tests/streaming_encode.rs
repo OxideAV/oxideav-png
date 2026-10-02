@@ -45,14 +45,7 @@ fn synth(width: u32, height: u32, pf: PngPixelFormat, stride_pad: usize) -> PngI
             cur[..row_bytes].copy_from_slice(&prev[(y - 1) * stride..(y - 1) * stride + row_bytes]);
         }
     }
-    PngImage {
-        width,
-        height,
-        pixel_format: pf,
-        stride,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(width, height, pf, stride, data).with_palette(Vec::new())
 }
 
 /// Strip stride padding so a decoded (tightly packed) plane compares.
@@ -93,11 +86,9 @@ fn threaded_output_is_identical_to_serial_and_round_trips() {
             FilterStrategy::Adaptive,
             FilterStrategy::Fixed(FilterType::Paeth),
         ] {
-            let opts = PngEncoderOptions {
-                filter_strategy: strategy,
-                compression_level: Some(1),
-                ..Default::default()
-            };
+            let opts = PngEncoderOptions::default()
+                .with_filter_strategy(strategy)
+                .with_compression_level(Some(1));
             let serial = encode_png_image_with_options(&img, &opts).expect("serial encode");
             for threads in [2usize, 8] {
                 let par = encode_png_image_threaded(&img, &opts, threads).expect("threaded");
@@ -118,22 +109,18 @@ fn threaded_output_is_identical_to_serial_and_round_trips() {
 #[test]
 fn brute_is_thread_stable_and_smallest_on_segmented_streams() {
     let img = synth(W, H / 3, PngPixelFormat::Rgb24, 0);
-    let brute_opts = PngEncoderOptions {
-        filter_strategy: FilterStrategy::Brute,
-        compression_level: Some(1),
-        ..Default::default()
-    };
+    let brute_opts = PngEncoderOptions::default()
+        .with_filter_strategy(FilterStrategy::Brute)
+        .with_compression_level(Some(1));
     let brute = encode_png_image_with_options(&img, &brute_opts).unwrap();
     assert_eq!(
         encode_png_image_threaded(&img, &brute_opts, 4).unwrap(),
         brute
     );
     for cand in FilterStrategy::BRUTE_CANDIDATES {
-        let opts = PngEncoderOptions {
-            filter_strategy: cand,
-            compression_level: Some(1),
-            ..Default::default()
-        };
+        let opts = PngEncoderOptions::default()
+            .with_filter_strategy(cand)
+            .with_compression_level(Some(1));
         let len = encode_png_image_with_options(&img, &opts).unwrap().len();
         assert!(brute.len() <= len, "brute {} > {cand:?} {len}", brute.len());
     }
@@ -145,11 +132,9 @@ fn brute_is_thread_stable_and_smallest_on_segmented_streams() {
 #[test]
 fn adam7_and_subbyte_are_thread_stable() {
     let rgb = synth(W, H / 2, PngPixelFormat::Rgb24, 0);
-    let opts = PngEncoderOptions {
-        interlace: true,
-        compression_level: Some(1),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default()
+        .with_interlace(true)
+        .with_compression_level(Some(1));
     let serial = encode_png_image_with_options(&rgb, &opts).unwrap();
     assert_eq!(encode_png_image_threaded(&rgb, &opts, 6).unwrap(), serial);
     assert_eq!(decode_png(&serial).unwrap().data, rgb.data);
@@ -163,12 +148,10 @@ fn adam7_and_subbyte_are_thread_stable() {
     }
     let scaled: Vec<u8> = gray.data.iter().map(|&v| v * 17).collect();
     for interlace in [false, true] {
-        let opts = PngEncoderOptions {
-            interlace,
-            bit_depth: Some(4),
-            compression_level: Some(1),
-            ..Default::default()
-        };
+        let opts = PngEncoderOptions::default()
+            .with_interlace(interlace)
+            .with_bit_depth(Some(4))
+            .with_compression_level(Some(1));
         let serial = encode_png_image_with_options(&gray, &opts).unwrap();
         assert_eq!(encode_png_image_threaded(&gray, &opts, 5).unwrap(), serial);
         assert_eq!(
@@ -188,10 +171,7 @@ fn apng_frames_stream_into_chunks_thread_stably() {
     for px in b.data.chunks_exact_mut(4) {
         px[0] = px[0].wrapping_add(40);
     }
-    let opts = PngEncoderOptions {
-        compression_level: Some(1),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_compression_level(Some(1));
     let serial = encode_apng_threaded(&[a.clone(), b.clone()], 5, 0, &opts, 1).unwrap();
     assert_eq!(
         encode_apng_threaded(&[a.clone(), b.clone()], 5, 0, &opts, 4).unwrap(),
@@ -206,10 +186,7 @@ fn apng_frames_stream_into_chunks_thread_stably() {
     let region = synth(W, H / 8, PngPixelFormat::Rgba, 0);
     let frames = vec![
         ApngFrameSpec::full_canvas(a.clone(), 5),
-        ApngFrameSpec {
-            y_offset: H / 8,
-            ..ApngFrameSpec::full_canvas(region.clone(), 5)
-        },
+        (ApngFrameSpec::full_canvas(region.clone(), 5)).with_y_offset(H / 8),
     ];
     let serial = encode_apng_frames_threaded(W, H / 4, None, &frames, 0, &opts, 1).unwrap();
     assert_eq!(

@@ -55,14 +55,7 @@ fn build_rgba(width: u32, height: u32) -> PngImage {
             data[idx + 3] = 0xff;
         }
     }
-    PngImage {
-        width,
-        height,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: w * 4,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(width, height, PngPixelFormat::Rgba, w * 4, data).with_palette(Vec::new())
 }
 
 fn build_rgb24(width: u32, height: u32) -> PngImage {
@@ -81,14 +74,7 @@ fn build_rgb24(width: u32, height: u32) -> PngImage {
             data[idx + 2] = base_x.min(255) as u8;
         }
     }
-    PngImage {
-        width,
-        height,
-        pixel_format: PngPixelFormat::Rgb24,
-        stride: w * 3,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(width, height, PngPixelFormat::Rgb24, w * 3, data).with_palette(Vec::new())
 }
 
 fn build_gray8(width: u32, height: u32) -> PngImage {
@@ -103,14 +89,7 @@ fn build_gray8(width: u32, height: u32) -> PngImage {
                 (base_x.min(255) as u8).wrapping_add(xorshift_byte(&mut state) & 0x07);
         }
     }
-    PngImage {
-        width,
-        height,
-        pixel_format: PngPixelFormat::Gray8,
-        stride: w,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(width, height, PngPixelFormat::Gray8, w, data).with_palette(Vec::new())
 }
 
 fn build_rgb48(width: u32, height: u32) -> PngImage {
@@ -131,14 +110,7 @@ fn build_rgb48(width: u32, height: u32) -> PngImage {
             data[idx + 5] = (bb >> 8) as u8;
         }
     }
-    PngImage {
-        width,
-        height,
-        pixel_format: PngPixelFormat::Rgb48Le,
-        stride: w * 6,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(width, height, PngPixelFormat::Rgb48Le, w * 6, data).with_palette(Vec::new())
 }
 
 fn bench_roundtrip_rgba_1920x1080(c: &mut Criterion) {
@@ -211,12 +183,7 @@ fn bench_roundtrip_rgb48_512x512(c: &mut Criterion) {
 
 fn bench_roundtrip_rgba_adam7_320x240(c: &mut Criterion) {
     let image = build_rgba(320, 240);
-    let opts = PngEncoderOptions {
-        interlace: true,
-        metadata: None,
-        bit_depth: None,
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_interlace(true);
     let mut g = c.benchmark_group("roundtrip_rgba_adam7_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
     g.bench_function(BenchmarkId::from_parameter("rgba/adam7/320x240"), |b| {

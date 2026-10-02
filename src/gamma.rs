@@ -80,6 +80,7 @@ use crate::metadata::Gama;
 /// * `user_exponent` — the optional viewer brightness control; `1.0`
 ///   (no adjustment) by default per §13.13.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct GammaParams {
     /// The image gamma from the `gAMA` chunk (a positive float).
     pub file_gamma: f64,
@@ -105,6 +106,24 @@ impl Default for GammaParams {
 }
 
 impl GammaParams {
+    /// Set the image (`gAMA`) gamma.
+    pub fn with_file_gamma(mut self, file_gamma: f64) -> Self {
+        self.file_gamma = file_gamma;
+        self
+    }
+
+    /// Set the display transfer-function exponent.
+    pub fn with_display_exponent(mut self, display_exponent: f64) -> Self {
+        self.display_exponent = display_exponent;
+        self
+    }
+
+    /// Set the user brightness exponent.
+    pub fn with_user_exponent(mut self, user_exponent: f64) -> Self {
+        self.user_exponent = user_exponent;
+        self
+    }
+
     /// Build parameters from a parsed `gAMA` chunk, keeping the default
     /// `display_exponent` (2.2) and `user_exponent` (1.0).
     ///

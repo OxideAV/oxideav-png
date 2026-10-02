@@ -122,7 +122,7 @@ fn build(pf: PngPixelFormat, photo: bool, raw: Option<&[u8]>) -> PngImage {
         PngPixelFormat::Rgba => (4, false),
         PngPixelFormat::Rgba64Le => (4, true),
         PngPixelFormat::Ya8 => (2, false),
-        PngPixelFormat::Pal8 => (1, false),
+        _ => (1, false),
     };
     let bpp = channels * if sixteen { 2 } else { 1 };
     let stride = WIDTH as usize * bpp;
@@ -157,14 +157,7 @@ fn build(pf: PngPixelFormat, photo: bool, raw: Option<&[u8]>) -> PngImage {
             }
         }
     }
-    PngImage {
-        width: WIDTH,
-        height: HEIGHT,
-        pixel_format: pf,
-        stride,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(WIDTH, HEIGHT, pf, stride, data).with_palette(Vec::new())
 }
 
 /// Stage breakdown for one layout: §12.8 heuristic alone, a fixed
@@ -225,10 +218,7 @@ fn stages(name: &str, img: &PngImage, levels: &[Option<u8>]) {
         assert_eq!(back.len(), filtered.len());
         let png = encode_png_image_threaded(
             img,
-            &PngEncoderOptions {
-                compression_level: Some(level),
-                ..Default::default()
-            },
+            &PngEncoderOptions::default().with_compression_level(Some(level)),
             8,
         )
         .expect("encode");
@@ -306,11 +296,9 @@ fn main() {
             .expect("layout");
         let img = build(pf, true, raw.as_deref());
         drop(raw);
-        let opts = PngEncoderOptions {
-            compression_level: levels[0],
-            filter_strategy: filters[0].1,
-            ..Default::default()
-        };
+        let opts = PngEncoderOptions::default()
+            .with_compression_level(levels[0])
+            .with_filter_strategy(filters[0].1);
         let png = encode_png_image_threaded(&img, &opts, thread_budgets[0]).expect("encode");
         eprintln!(
             "rss probe: {name} input {} B -> png {} B (level {:?}, threads {})",
@@ -343,11 +331,9 @@ fn main() {
             for &level in &levels {
                 for (fname, strategy) in &filters {
                     for &threads in &thread_budgets {
-                        let opts = PngEncoderOptions {
-                            compression_level: level,
-                            filter_strategy: *strategy,
-                            ..Default::default()
-                        };
+                        let opts = PngEncoderOptions::default()
+                            .with_compression_level(level)
+                            .with_filter_strategy(*strategy);
                         let mut best_enc = f64::MAX;
                         let mut best_dec = f64::MAX;
                         let mut bytes = 0usize;

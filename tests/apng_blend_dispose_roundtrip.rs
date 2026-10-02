@@ -23,14 +23,7 @@ fn solid_rgba(w: u32, h: u32, rgba: [u8; 4]) -> PngImage {
     for px in data.chunks_exact_mut(4) {
         px.copy_from_slice(&rgba);
     }
-    PngImage {
-        width: w,
-        height: h,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: w as usize * 4,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(w, h, PngPixelFormat::Rgba, w as usize * 4, data).with_palette(Vec::new())
 }
 
 fn pixel(img: &PngImage, x: u32, y: u32) -> [u8; 4] {
@@ -58,15 +51,13 @@ fn over_blend_partial_alpha_roundtrips() {
     let w = 2u32;
     let h = 2u32;
     let f0 = ApngFrameSpec::full_canvas(solid_rgba(w, h, [255, 0, 0, 255]), 10);
-    let f1 = ApngFrameSpec {
-        image: solid_rgba(w, h, [0, 255, 0, 128]),
-        x_offset: 0,
-        y_offset: 0,
-        delay_num: 5,
-        delay_den: 100,
-        dispose_op: ApngDisposal::None,
-        blend_op: ApngBlend::Over,
-    };
+    let f1 = ApngFrameSpec::new(solid_rgba(w, h, [0, 255, 0, 128]))
+        .with_x_offset(0)
+        .with_y_offset(0)
+        .with_delay_num(5)
+        .with_delay_den(100)
+        .with_dispose_op(ApngDisposal::None)
+        .with_blend_op(ApngBlend::Over);
     let bytes = encode_apng_frames(w, h, None, &[f0, f1], 0).expect("encode");
     let anim = decode_apng(&bytes).expect("decode");
     assert_eq!(anim.frames.len(), 2);
@@ -98,24 +89,20 @@ fn background_dispose_clears_region_for_next_frame() {
     // the cleared transparent black, NOT red.
     let w = 4u32;
     let h = 4u32;
-    let f0 = ApngFrameSpec {
-        image: solid_rgba(w, h, [255, 0, 0, 255]),
-        x_offset: 0,
-        y_offset: 0,
-        delay_num: 10,
-        delay_den: 100,
-        dispose_op: ApngDisposal::Background,
-        blend_op: ApngBlend::Source,
-    };
-    let f1 = ApngFrameSpec {
-        image: solid_rgba(2, 2, [0, 255, 0, 255]),
-        x_offset: 0,
-        y_offset: 0,
-        delay_num: 10,
-        delay_den: 100,
-        dispose_op: ApngDisposal::None,
-        blend_op: ApngBlend::Source,
-    };
+    let f0 = ApngFrameSpec::new(solid_rgba(w, h, [255, 0, 0, 255]))
+        .with_x_offset(0)
+        .with_y_offset(0)
+        .with_delay_num(10)
+        .with_delay_den(100)
+        .with_dispose_op(ApngDisposal::Background)
+        .with_blend_op(ApngBlend::Source);
+    let f1 = ApngFrameSpec::new(solid_rgba(2, 2, [0, 255, 0, 255]))
+        .with_x_offset(0)
+        .with_y_offset(0)
+        .with_delay_num(10)
+        .with_delay_den(100)
+        .with_dispose_op(ApngDisposal::None)
+        .with_blend_op(ApngBlend::Source);
     let bytes = encode_apng_frames(w, h, None, &[f0, f1], 0).expect("encode");
     let anim = decode_apng(&bytes).expect("decode");
     assert_eq!(anim.frames.len(), 2);
@@ -142,33 +129,27 @@ fn previous_dispose_reverts_region_for_next_frame() {
     // single blue dot.
     let w = 4u32;
     let h = 4u32;
-    let f0 = ApngFrameSpec {
-        image: solid_rgba(w, h, [200, 0, 0, 255]),
-        x_offset: 0,
-        y_offset: 0,
-        delay_num: 10,
-        delay_den: 100,
-        dispose_op: ApngDisposal::None,
-        blend_op: ApngBlend::Source,
-    };
-    let f1 = ApngFrameSpec {
-        image: solid_rgba(2, 2, [0, 200, 0, 255]),
-        x_offset: 1,
-        y_offset: 1,
-        delay_num: 10,
-        delay_den: 100,
-        dispose_op: ApngDisposal::Previous,
-        blend_op: ApngBlend::Source,
-    };
-    let f2 = ApngFrameSpec {
-        image: solid_rgba(1, 1, [0, 0, 200, 255]),
-        x_offset: 0,
-        y_offset: 0,
-        delay_num: 10,
-        delay_den: 100,
-        dispose_op: ApngDisposal::None,
-        blend_op: ApngBlend::Source,
-    };
+    let f0 = ApngFrameSpec::new(solid_rgba(w, h, [200, 0, 0, 255]))
+        .with_x_offset(0)
+        .with_y_offset(0)
+        .with_delay_num(10)
+        .with_delay_den(100)
+        .with_dispose_op(ApngDisposal::None)
+        .with_blend_op(ApngBlend::Source);
+    let f1 = ApngFrameSpec::new(solid_rgba(2, 2, [0, 200, 0, 255]))
+        .with_x_offset(1)
+        .with_y_offset(1)
+        .with_delay_num(10)
+        .with_delay_den(100)
+        .with_dispose_op(ApngDisposal::Previous)
+        .with_blend_op(ApngBlend::Source);
+    let f2 = ApngFrameSpec::new(solid_rgba(1, 1, [0, 0, 200, 255]))
+        .with_x_offset(0)
+        .with_y_offset(0)
+        .with_delay_num(10)
+        .with_delay_den(100)
+        .with_dispose_op(ApngDisposal::None)
+        .with_blend_op(ApngBlend::Source);
     let bytes = encode_apng_frames(w, h, None, &[f0, f1, f2], 0).expect("encode");
     let anim = decode_apng(&bytes).expect("decode");
     assert_eq!(anim.frames.len(), 3);
@@ -196,15 +177,13 @@ fn over_fully_opaque_equals_source() {
 
     let mk = |blend: ApngBlend| -> Vec<u8> {
         let f0 = ApngFrameSpec::full_canvas(base.clone(), 10);
-        let f1 = ApngFrameSpec {
-            image: top.clone(),
-            x_offset: 0,
-            y_offset: 0,
-            delay_num: 10,
-            delay_den: 100,
-            dispose_op: ApngDisposal::None,
-            blend_op: blend,
-        };
+        let f1 = ApngFrameSpec::new(top.clone())
+            .with_x_offset(0)
+            .with_y_offset(0)
+            .with_delay_num(10)
+            .with_delay_den(100)
+            .with_dispose_op(ApngDisposal::None)
+            .with_blend_op(blend);
         encode_apng_frames(w, h, None, &[f0, f1], 0).expect("encode")
     };
     let over = decode_apng(&mk(ApngBlend::Over)).expect("decode over");

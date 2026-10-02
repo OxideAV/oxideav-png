@@ -66,14 +66,7 @@ fn synth(width: u32, height: u32, pf: PngPixelFormat) -> PngImage {
             px[7] = 0xC0;
         }
     }
-    PngImage {
-        width,
-        height,
-        pixel_format: pf,
-        stride: row_bytes,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(width, height, pf, row_bytes, data).with_palette(Vec::new())
 }
 
 /// ImageMagick raw-dump spec for a layout: (`magick` output format,
@@ -88,7 +81,7 @@ fn magick_spec(pf: PngPixelFormat) -> Option<(&'static str, Vec<&'static str>)> 
         PngPixelFormat::Gray16Le => ("gray:-", vec!["-depth", "16", "-endian", "LSB"]),
         PngPixelFormat::Rgb48Le => ("rgb:-", vec!["-depth", "16", "-endian", "LSB"]),
         PngPixelFormat::Rgba64Le => ("rgba:-", vec!["-depth", "16", "-endian", "LSB"]),
-        PngPixelFormat::Pal8 => return None,
+        _ => return None,
     })
 }
 
@@ -204,12 +197,10 @@ fn every_option_combination_reads_back_in_black_box_readers() {
                     if interlace && level == 6 {
                         continue; // keep the matrix quick; level 1/2 cover Adam7
                     }
-                    let opts = PngEncoderOptions {
-                        interlace,
-                        filter_strategy: strategy,
-                        compression_level: Some(level),
-                        ..Default::default()
-                    };
+                    let opts = PngEncoderOptions::default()
+                        .with_interlace(interlace)
+                        .with_filter_strategy(strategy)
+                        .with_compression_level(Some(level));
                     let png = encode_png_image_threaded(&img, &opts, 8).expect("encode");
                     let label = format!(
                         "{pf:?}/l{level}/{fname}/{}",
@@ -224,11 +215,9 @@ fn every_option_combination_reads_back_in_black_box_readers() {
     // Brute once per layout family (expensive: six deflates each).
     for pf in [PngPixelFormat::Rgb24, PngPixelFormat::Gray16Le] {
         let img = synth(640, 400, pf);
-        let opts = PngEncoderOptions {
-            filter_strategy: FilterStrategy::Brute,
-            compression_level: Some(1),
-            ..Default::default()
-        };
+        let opts = PngEncoderOptions::default()
+            .with_filter_strategy(FilterStrategy::Brute)
+            .with_compression_level(Some(1));
         let png = encode_png_image_threaded(&img, &opts, 4).expect("encode");
         gate(&readers, &format!("{pf:?}/brute"), &img, &png);
         combos += 1;

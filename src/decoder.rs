@@ -80,6 +80,7 @@ pub fn decode_apng_frames(info: &ApngInfo) -> oxideav_core::Result<Vec<oxideav_c
 
 /// Parsed IHDR chunk (13 bytes).
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Ihdr {
     pub width: u32,
     pub height: u32,
@@ -91,6 +92,37 @@ pub struct Ihdr {
 }
 
 impl Ihdr {
+    /// Build an IHDR for a non-interlaced image with the only defined compression (0) and filter (0) methods; `with_interlace(1)` selects Adam7.
+    pub fn new(width: u32, height: u32, bit_depth: u8, colour_type: u8) -> Self {
+        Self {
+            width,
+            height,
+            bit_depth,
+            colour_type,
+            compression: 0,
+            filter: 0,
+            interlace: 0,
+        }
+    }
+
+    /// Set the compression method byte (only `0` is defined).
+    pub fn with_compression(mut self, compression: u8) -> Self {
+        self.compression = compression;
+        self
+    }
+
+    /// Set the filter method byte (only `0` is defined).
+    pub fn with_filter(mut self, filter: u8) -> Self {
+        self.filter = filter;
+        self
+    }
+
+    /// Set the interlace method: `0` none, `1` Adam7.
+    pub fn with_interlace(mut self, interlace: u8) -> Self {
+        self.interlace = interlace;
+        self
+    }
+
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.len() != 13 {
             return Err(Error::invalid(format!(
@@ -1830,6 +1862,7 @@ pub(crate) fn reconstruct_filtered(filtered: &[u8], ihdr: &Ihdr) -> Result<Vec<u
 /// segments ready for decompression. The demuxer uses this to split a PNG
 /// file into per-frame packets.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ApngInfo {
     pub ihdr: Ihdr,
     pub plte: Option<Vec<u8>>,
@@ -1842,12 +1875,41 @@ pub struct ApngInfo {
     pub first_frame_is_default: bool,
 }
 
+impl ApngInfo {
+    /// Assemble a parsed-APNG description from its parts.
+    pub fn new(
+        ihdr: Ihdr,
+        plte: Option<Vec<u8>>,
+        trns: Option<Vec<u8>>,
+        actl: Actl,
+        frames: Vec<ApngFrame>,
+        first_frame_is_default: bool,
+    ) -> Self {
+        Self {
+            ihdr,
+            plte,
+            trns,
+            actl,
+            frames,
+            first_frame_is_default,
+        }
+    }
+}
+
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ApngFrame {
     pub fctl: Fctl,
     /// Concatenated compressed data: IDAT payload or fdAT payloads stripped
     /// of their 4-byte sequence number.
     pub compressed: Vec<u8>,
+}
+
+impl ApngFrame {
+    /// Pair a frame control record with its concatenated compressed pixel data.
+    pub fn new(fctl: Fctl, compressed: Vec<u8>) -> Self {
+        Self { fctl, compressed }
+    }
 }
 
 /// Parse an APNG file and return metadata + per-frame compressed segments.

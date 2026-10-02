@@ -23,12 +23,18 @@ pub const MAX_CHUNK_LEN: u32 = 0x7FFF_FFFF;
 
 /// A parsed chunk borrowed from a larger buffer.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ChunkRef<'a> {
     pub chunk_type: [u8; 4],
     pub data: &'a [u8],
 }
 
 impl<'a> ChunkRef<'a> {
+    /// Borrow a chunk from its type and payload bytes.
+    pub fn new(chunk_type: [u8; 4], data: &'a [u8]) -> Self {
+        Self { chunk_type, data }
+    }
+
     pub fn type_str(&self) -> &str {
         std::str::from_utf8(&self.chunk_type).unwrap_or("????")
     }

@@ -182,10 +182,7 @@ fn encode_single_with_options_sets_interlace_flag() {
         8,
         PixelFormat::Rgba,
         &[],
-        &oxideav_png::PngEncoderOptions {
-            interlace: true,
-            ..Default::default()
-        },
+        &oxideav_png::PngEncoderOptions::default().with_interlace(true),
     )
     .expect("encode");
     // IHDR body starts at offset 8 (magic) + 8 (chunk length+type) = 16.

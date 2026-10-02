@@ -12,36 +12,19 @@ use oxideav_png::{
 };
 
 fn rgba_2x2() -> PngImage {
-    PngImage {
-        width: 2,
-        height: 2,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: 8,
-        data: vec![0x55; 16],
-        palette: Vec::new(),
-    }
+    PngImage::new(2, 2, PngPixelFormat::Rgba, 8, vec![0x55; 16]).with_palette(Vec::new())
 }
 
 fn cicp() -> Cicp {
-    Cicp {
-        color_primaries: 1,
-        transfer_function: 13,
-        matrix_coefficients: 0,
-        video_full_range_flag: 1,
-    }
+    Cicp::new(1, 13, 0, 1)
 }
 
 fn iccp() -> Iccp {
-    Iccp {
-        name: "test-profile".into(),
-        profile: vec![0u8; 128],
-    }
+    Iccp::new("test-profile".into(), vec![0u8; 128])
 }
 
 fn srgb() -> Srgb {
-    Srgb {
-        rendering_intent: RenderingIntent::Perceptual,
-    }
+    Srgb::new(RenderingIntent::Perceptual)
 }
 
 // ---- §4.3 Table 1 resolution ----------------------------------------
@@ -53,70 +36,49 @@ fn no_colour_chunks_resolves_to_none() {
 
 #[test]
 fn each_single_chunk_resolves_to_itself() {
-    let m = PngMetadata {
-        cicp: Some(cicp()),
-        ..Default::default()
-    };
+    let m = PngMetadata::default().with_cicp(Some(cicp()));
     assert_eq!(m.colour_source(), Some(ColourSource::Cicp));
 
-    let m = PngMetadata {
-        iccp: Some(iccp()),
-        ..Default::default()
-    };
+    let m = PngMetadata::default().with_iccp(Some(iccp()));
     assert_eq!(m.colour_source(), Some(ColourSource::Iccp));
 
-    let m = PngMetadata {
-        srgb: Some(srgb()),
-        ..Default::default()
-    };
+    let m = PngMetadata::default().with_srgb(Some(srgb()));
     assert_eq!(m.colour_source(), Some(ColourSource::Srgb));
 
     // §4.3 puts cHRM and gAMA on ONE shared priority row — either one
     // alone (or both together) selects the rank-4 description.
-    let m = PngMetadata {
-        gama: Some(Gama::SRGB),
-        ..Default::default()
-    };
+    let m = PngMetadata::default().with_gama(Some(Gama::SRGB));
     assert_eq!(m.colour_source(), Some(ColourSource::GamaChrm));
 
-    let m = PngMetadata {
-        chrm: Some(Chrm::SRGB),
-        ..Default::default()
-    };
+    let m = PngMetadata::default().with_chrm(Some(Chrm::SRGB));
     assert_eq!(m.colour_source(), Some(ColourSource::GamaChrm));
 }
 
 #[test]
 fn lowest_priority_number_wins_pairwise() {
     // cICP (1) beats every other signal.
-    let m = PngMetadata {
-        cicp: Some(cicp()),
-        iccp: Some(iccp()),
-        srgb: Some(srgb()),
-        gama: Some(Gama::SRGB),
-        chrm: Some(Chrm::SRGB),
-        ..Default::default()
-    };
+    let m = PngMetadata::default()
+        .with_cicp(Some(cicp()))
+        .with_iccp(Some(iccp()))
+        .with_srgb(Some(srgb()))
+        .with_gama(Some(Gama::SRGB))
+        .with_chrm(Some(Chrm::SRGB));
     assert_eq!(m.colour_source(), Some(ColourSource::Cicp));
 
     // iCCP (2) beats sRGB (3) and gAMA/cHRM (4). §11.3.2.3: the chunk
     // "is ignored unless it is the highest-precedence color chunk".
-    let m = PngMetadata {
-        iccp: Some(iccp()),
-        srgb: Some(srgb()),
-        gama: Some(Gama::SRGB),
-        ..Default::default()
-    };
+    let m = PngMetadata::default()
+        .with_iccp(Some(iccp()))
+        .with_srgb(Some(srgb()))
+        .with_gama(Some(Gama::SRGB));
     assert_eq!(m.colour_source(), Some(ColourSource::Iccp));
 
     // sRGB (3) beats gAMA/cHRM (4) — the Table 17 companion chunks are
     // compatibility fallbacks for sRGB-unaware decoders, not the signal.
-    let m = PngMetadata {
-        srgb: Some(srgb()),
-        gama: Some(Gama::SRGB),
-        chrm: Some(Chrm::SRGB),
-        ..Default::default()
-    };
+    let m = PngMetadata::default()
+        .with_srgb(Some(srgb()))
+        .with_gama(Some(Gama::SRGB))
+        .with_chrm(Some(Chrm::SRGB));
     assert_eq!(m.colour_source(), Some(ColourSource::Srgb));
 }
 
@@ -134,15 +96,12 @@ fn resolution_survives_a_real_roundtrip() {
     // at-most-one-embedded-profile is a `should`, and the §4.3 rule
     // exists precisely because several signals may coexist), re-parse
     // it, and confirm the resolver picks iCCP.
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            iccp: Some(iccp()),
-            srgb: Some(srgb()),
-            gama: Some(Gama::SRGB),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default()
+            .with_iccp(Some(iccp()))
+            .with_srgb(Some(srgb()))
+            .with_gama(Some(Gama::SRGB)),
+    ));
     let bytes = encode_png_image_with_options(&rgba_2x2(), &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.colour_source(), Some(ColourSource::Iccp));
@@ -156,15 +115,12 @@ fn resolution_survives_a_real_roundtrip() {
 
 #[test]
 fn srgb_with_matching_companions_encodes() {
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            srgb: Some(srgb()),
-            gama: Some(Gama::SRGB),
-            chrm: Some(Chrm::SRGB),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default()
+            .with_srgb(Some(srgb()))
+            .with_gama(Some(Gama::SRGB))
+            .with_chrm(Some(Chrm::SRGB)),
+    ));
     let bytes = encode_png_image_with_options(&rgba_2x2(), &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.gama, Some(Gama::SRGB));
@@ -173,16 +129,11 @@ fn srgb_with_matching_companions_encodes() {
 
 #[test]
 fn srgb_with_contradicting_gama_rejected_on_encode() {
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            srgb: Some(srgb()),
-            gama: Some(Gama {
-                gamma_times_100000: 100_000, // linear — contradicts sRGB
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default()
+            .with_srgb(Some(srgb()))
+            .with_gama(Some(Gama::new(100_000))),
+    ));
     let err = encode_png_image_with_options(&rgba_2x2(), &opts)
         .expect_err("contradicting gAMA next to sRGB must be rejected");
     assert!(format!("{err}").contains("Table 17"));
@@ -192,14 +143,11 @@ fn srgb_with_contradicting_gama_rejected_on_encode() {
 fn srgb_with_contradicting_chrm_rejected_on_encode() {
     let mut chrm = Chrm::SRGB;
     chrm.red_x = 70_800; // BT.2020 red — contradicts sRGB primaries
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            srgb: Some(srgb()),
-            chrm: Some(chrm),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default()
+            .with_srgb(Some(srgb()))
+            .with_chrm(Some(chrm)),
+    ));
     let err = encode_png_image_with_options(&rgba_2x2(), &opts)
         .expect_err("contradicting cHRM next to sRGB must be rejected");
     assert!(format!("{err}").contains("Table 17"));
@@ -209,15 +157,9 @@ fn srgb_with_contradicting_chrm_rejected_on_encode() {
 fn non_srgb_gama_without_srgb_chunk_still_encodes() {
     // The Table 17 gate is scoped to sRGB-bearing streams only — a
     // plain gAMA-described colour space may use any value.
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            gama: Some(Gama {
-                gamma_times_100000: 100_000,
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_gama(Some(Gama::new(100_000))),
+    ));
     let bytes = encode_png_image_with_options(&rgba_2x2(), &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.gama.unwrap().gamma_times_100000, 100_000);

@@ -25,14 +25,7 @@ fn gray_source(w: u32, h: u32, bit_depth: u8) -> PngImage {
             data[y * w_us + x] = ((x + y) as u8) & max;
         }
     }
-    PngImage {
-        width: w,
-        height: h,
-        pixel_format: PngPixelFormat::Gray8,
-        stride: w_us,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(w, h, PngPixelFormat::Gray8, w_us, data).with_palette(Vec::new())
 }
 
 fn pal_source(w: u32, h: u32, bit_depth: u8, palette_entries: usize) -> PngImage {
@@ -62,14 +55,7 @@ fn pal_source(w: u32, h: u32, bit_depth: u8, palette_entries: usize) -> PngImage
             }
         }
     }
-    PngImage {
-        width: w,
-        height: h,
-        pixel_format: PngPixelFormat::Pal8,
-        stride: w_us,
-        data,
-        palette,
-    }
+    PngImage::new(w, h, PngPixelFormat::Pal8, w_us, data).with_palette(palette)
 }
 
 fn gray_scale_factor(bit_depth: u8) -> u8 {
@@ -84,10 +70,7 @@ fn gray_scale_factor(bit_depth: u8) -> u8 {
 
 fn roundtrip_gray(w: u32, h: u32, bit_depth: u8) {
     let src = gray_source(w, h, bit_depth);
-    let opts = PngEncoderOptions {
-        bit_depth: Some(bit_depth),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_bit_depth(Some(bit_depth));
     let bytes =
         encode_png_image_with_options(&src, &opts).expect("encode sub-byte grayscale must succeed");
     let decoded = decode_png(&bytes).expect("decode sub-byte grayscale must succeed");
@@ -115,10 +98,7 @@ fn roundtrip_gray(w: u32, h: u32, bit_depth: u8) {
 fn roundtrip_pal(w: u32, h: u32, bit_depth: u8) {
     let palette_entries = 1 << bit_depth;
     let src = pal_source(w, h, bit_depth, palette_entries);
-    let opts = PngEncoderOptions {
-        bit_depth: Some(bit_depth),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_bit_depth(Some(bit_depth));
     let bytes =
         encode_png_image_with_options(&src, &opts).expect("encode sub-byte indexed must succeed");
     let decoded = decode_png(&bytes).expect("decode sub-byte indexed must succeed");
@@ -218,10 +198,7 @@ fn ihdr_bit_depth_is_honoured() {
     // byte of the payload is the bit-depth field per PNG §11.2.2.
     for &bd in &[1u8, 2, 4] {
         let src = gray_source(8, 4, bd);
-        let opts = PngEncoderOptions {
-            bit_depth: Some(bd),
-            ..Default::default()
-        };
+        let opts = PngEncoderOptions::default().with_bit_depth(Some(bd));
         let bytes = encode_png_image_with_options(&src, &opts).expect("encode");
         // 8 (magic) + 4 (len) + 4 (tag) = 16; IHDR payload starts at 16.
         let ihdr_payload_start = 16;
@@ -236,18 +213,9 @@ fn ihdr_bit_depth_is_honoured() {
 fn pal_1bit_packs_msb_first() {
     // Build a 1-row, 8-pixel Pal8 with alternating 0,1,0,1,...; the
     // packed wire byte must be 0b01010101 = 0x55.
-    let src = PngImage {
-        width: 8,
-        height: 1,
-        pixel_format: PngPixelFormat::Pal8,
-        stride: 8,
-        data: vec![0, 1, 0, 1, 0, 1, 0, 1],
-        palette: vec![0u8, 0, 0, 255, 255, 255],
-    };
-    let opts = PngEncoderOptions {
-        bit_depth: Some(1),
-        ..Default::default()
-    };
+    let src = PngImage::new(8, 1, PngPixelFormat::Pal8, 8, vec![0, 1, 0, 1, 0, 1, 0, 1])
+        .with_palette(vec![0u8, 0, 0, 255, 255, 255]);
+    let opts = PngEncoderOptions::default().with_bit_depth(Some(1));
     let bytes = encode_png_image_with_options(&src, &opts).expect("encode");
     let decoded = decode_png(&bytes).expect("decode");
     // Indexed: decoded.data is one byte per pixel matching the source.
@@ -258,18 +226,9 @@ fn pal_1bit_packs_msb_first() {
 fn pal_2bit_packs_two_pixels_per_byte() {
     // Four pixels per byte at 2-bit packing. Source 0,1,2,3 →
     // 0b00_01_10_11 = 0x1B.
-    let src = PngImage {
-        width: 4,
-        height: 1,
-        pixel_format: PngPixelFormat::Pal8,
-        stride: 4,
-        data: vec![0, 1, 2, 3],
-        palette: vec![0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255],
-    };
-    let opts = PngEncoderOptions {
-        bit_depth: Some(2),
-        ..Default::default()
-    };
+    let src = PngImage::new(4, 1, PngPixelFormat::Pal8, 4, vec![0, 1, 2, 3])
+        .with_palette(vec![0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]);
+    let opts = PngEncoderOptions::default().with_bit_depth(Some(2));
     let bytes = encode_png_image_with_options(&src, &opts).expect("encode");
     let decoded = decode_png(&bytes).expect("decode");
     assert_eq!(decoded.data, vec![0, 1, 2, 3]);
@@ -279,18 +238,9 @@ fn pal_2bit_packs_two_pixels_per_byte() {
 fn pal_4bit_packs_two_nibbles_per_byte() {
     // Eight pixels at 4-bit packing. Source 0..8 → 0x01 0x23 0x45 0x67
     // packed.
-    let src = PngImage {
-        width: 8,
-        height: 1,
-        pixel_format: PngPixelFormat::Pal8,
-        stride: 8,
-        data: vec![0, 1, 2, 3, 4, 5, 6, 7],
-        palette: (0..8 * 3).map(|i| i as u8).collect(),
-    };
-    let opts = PngEncoderOptions {
-        bit_depth: Some(4),
-        ..Default::default()
-    };
+    let src = PngImage::new(8, 1, PngPixelFormat::Pal8, 8, vec![0, 1, 2, 3, 4, 5, 6, 7])
+        .with_palette((0..8 * 3).map(|i| i as u8).collect());
+    let opts = PngEncoderOptions::default().with_bit_depth(Some(4));
     let bytes = encode_png_image_with_options(&src, &opts).expect("encode");
     let decoded = decode_png(&bytes).expect("decode");
     assert_eq!(decoded.data, vec![0, 1, 2, 3, 4, 5, 6, 7]);
@@ -300,18 +250,8 @@ fn pal_4bit_packs_two_nibbles_per_byte() {
 
 #[test]
 fn rejects_subbyte_on_rgb_source() {
-    let src = PngImage {
-        width: 2,
-        height: 1,
-        pixel_format: PngPixelFormat::Rgb24,
-        stride: 6,
-        data: vec![0u8; 6],
-        palette: Vec::new(),
-    };
-    let opts = PngEncoderOptions {
-        bit_depth: Some(4),
-        ..Default::default()
-    };
+    let src = PngImage::new(2, 1, PngPixelFormat::Rgb24, 6, vec![0u8; 6]).with_palette(Vec::new());
+    let opts = PngEncoderOptions::default().with_bit_depth(Some(4));
     let err =
         encode_png_image_with_options(&src, &opts).expect_err("sub-byte on RGB must be rejected");
     let msg = format!("{err}");
@@ -323,36 +263,17 @@ fn rejects_subbyte_on_rgb_source() {
 
 #[test]
 fn rejects_subbyte_on_rgba_source() {
-    let src = PngImage {
-        width: 2,
-        height: 1,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: 8,
-        data: vec![0u8; 8],
-        palette: Vec::new(),
-    };
-    let opts = PngEncoderOptions {
-        bit_depth: Some(2),
-        ..Default::default()
-    };
+    let src = PngImage::new(2, 1, PngPixelFormat::Rgba, 8, vec![0u8; 8]).with_palette(Vec::new());
+    let opts = PngEncoderOptions::default().with_bit_depth(Some(2));
     assert!(encode_png_image_with_options(&src, &opts).is_err());
 }
 
 #[test]
 fn rejects_sample_overflowing_bit_depth_cap() {
     // 2-bit source must be in 0..=3; a value of 4 trips the cap check.
-    let src = PngImage {
-        width: 4,
-        height: 1,
-        pixel_format: PngPixelFormat::Gray8,
-        stride: 4,
-        data: vec![0, 1, 2, 4],
-        palette: Vec::new(),
-    };
-    let opts = PngEncoderOptions {
-        bit_depth: Some(2),
-        ..Default::default()
-    };
+    let src =
+        PngImage::new(4, 1, PngPixelFormat::Gray8, 4, vec![0, 1, 2, 4]).with_palette(Vec::new());
+    let opts = PngEncoderOptions::default().with_bit_depth(Some(2));
     let err = encode_png_image_with_options(&src, &opts).expect_err("overflow must be rejected");
     let msg = format!("{err}");
     assert!(
@@ -365,10 +286,7 @@ fn rejects_sample_overflowing_bit_depth_cap() {
 fn rejects_unsupported_bit_depth_value() {
     let src = gray_source(4, 1, 1);
     for &bd in &[0u8, 3, 5, 6, 7, 9, 12, 16, 32] {
-        let opts = PngEncoderOptions {
-            bit_depth: Some(bd),
-            ..Default::default()
-        };
+        let opts = PngEncoderOptions::default().with_bit_depth(Some(bd));
         assert!(
             encode_png_image_with_options(&src, &opts).is_err(),
             "bit_depth = Some({bd}) must be rejected"
@@ -378,18 +296,9 @@ fn rejects_unsupported_bit_depth_value() {
 
 #[test]
 fn bit_depth_8_is_a_no_op_for_gray_and_pal() {
-    let src_gray = PngImage {
-        width: 3,
-        height: 1,
-        pixel_format: PngPixelFormat::Gray8,
-        stride: 3,
-        data: vec![10, 20, 30],
-        palette: Vec::new(),
-    };
-    let opts = PngEncoderOptions {
-        bit_depth: Some(8),
-        ..Default::default()
-    };
+    let src_gray =
+        PngImage::new(3, 1, PngPixelFormat::Gray8, 3, vec![10, 20, 30]).with_palette(Vec::new());
+    let opts = PngEncoderOptions::default().with_bit_depth(Some(8));
     let bytes = encode_png_image_with_options(&src_gray, &opts).expect("encode");
     let decoded = decode_png(&bytes).expect("decode");
     assert_eq!(decoded.data, vec![10, 20, 30]);
@@ -408,11 +317,9 @@ fn bit_depth_8_is_a_no_op_for_gray_and_pal() {
 /// (§6.3 first-scanline-of-a-pass rule).
 fn adam7_subbyte_roundtrip_gray(w: u32, h: u32, bit_depth: u8) {
     let src = gray_source(w, h, bit_depth);
-    let mut opts = PngEncoderOptions {
-        bit_depth: Some(bit_depth),
-        interlace: true,
-        ..Default::default()
-    };
+    let mut opts = PngEncoderOptions::default()
+        .with_bit_depth(Some(bit_depth))
+        .with_interlace(true);
     let bytes_interlaced =
         encode_png_image_with_options(&src, &opts).expect("Adam7 sub-byte encode");
     let decoded_interlaced = decode_png(&bytes_interlaced).expect("Adam7 sub-byte decode");
@@ -440,11 +347,9 @@ fn adam7_subbyte_roundtrip_gray(w: u32, h: u32, bit_depth: u8) {
 fn adam7_subbyte_roundtrip_pal(w: u32, h: u32, bit_depth: u8) {
     let palette_entries = 1 << bit_depth;
     let src = pal_source(w, h, bit_depth, palette_entries);
-    let mut opts = PngEncoderOptions {
-        bit_depth: Some(bit_depth),
-        interlace: true,
-        ..Default::default()
-    };
+    let mut opts = PngEncoderOptions::default()
+        .with_bit_depth(Some(bit_depth))
+        .with_interlace(true);
     let bytes = encode_png_image_with_options(&src, &opts).expect("Adam7 sub-byte indexed encode");
     let decoded = decode_png(&bytes).expect("Adam7 sub-byte indexed decode");
     opts.interlace = false;
@@ -523,11 +428,9 @@ fn adam7_pal_2bit_tiny_drops_empty_passes() {
 fn adam7_rejects_overflowing_subbyte_sample() {
     let mut src = pal_source(8, 4, 2, 4);
     src.data[3] = 7; // overflows 2-bit cap of 3
-    let opts = PngEncoderOptions {
-        bit_depth: Some(2),
-        interlace: true,
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default()
+        .with_bit_depth(Some(2))
+        .with_interlace(true);
     let err = encode_png_image_with_options(&src, &opts)
         .expect_err("Adam7 sub-byte must reject overflow samples");
     let msg = format!("{err}");
@@ -541,11 +444,9 @@ fn adam7_rejects_overflowing_subbyte_sample() {
 fn apng_adam7_subbyte_roundtrip() {
     use oxideav_png::{decode_apng, encode_apng_with_options};
     let frames: Vec<_> = (0..2).map(|_| gray_source(13, 11, 4)).collect();
-    let opts = PngEncoderOptions {
-        bit_depth: Some(4),
-        interlace: true,
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default()
+        .with_bit_depth(Some(4))
+        .with_interlace(true);
     let bytes = encode_apng_with_options(&frames, 10, 0, &opts)
         .expect("APNG Adam7 sub-byte encode must succeed");
     let decoded = decode_apng(&bytes).expect("APNG Adam7 sub-byte decode must succeed");
@@ -562,10 +463,7 @@ fn apng_adam7_subbyte_roundtrip() {
 fn apng_subbyte_roundtrip() {
     use oxideav_png::{decode_apng, encode_apng_with_options};
     let frames: Vec<_> = (0..2).map(|_| gray_source(8, 4, 2)).collect();
-    let opts = PngEncoderOptions {
-        bit_depth: Some(2),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_bit_depth(Some(2));
     let bytes =
         encode_apng_with_options(&frames, 10, 0, &opts).expect("APNG sub-byte encode must succeed");
     let decoded = decode_apng(&bytes).expect("APNG sub-byte decode must succeed");

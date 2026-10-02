@@ -16,14 +16,7 @@ use oxideav_png::{
 };
 
 fn rgba_image(w: u32, h: u32, data: Vec<u8>) -> PngImage {
-    PngImage {
-        width: w,
-        height: h,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: w as usize * 4,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(w, h, PngPixelFormat::Rgba, w as usize * 4, data).with_palette(Vec::new())
 }
 
 /// Encode an RGBA image with an `sRGB` chunk (Perceptual intent), then
@@ -33,15 +26,9 @@ fn rgba_image(w: u32, h: u32, data: Vec<u8>) -> PngImage {
 #[test]
 fn srgb_chunk_survives_roundtrip() {
     let img = rgba_image(2, 1, vec![10, 20, 30, 255, 200, 150, 100, 255]);
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            srgb: Some(Srgb {
-                rendering_intent: RenderingIntent::Perceptual,
-            }),
-            ..PngMetadata::default()
-        }),
-        ..PngEncoderOptions::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_srgb(Some(Srgb::new(RenderingIntent::Perceptual))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
 
     let meta = parse_metadata(&bytes).expect("parse_metadata");
@@ -62,15 +49,10 @@ fn decoded_srgb_linearizes_per_channel() {
     let img = rgba_image(2, 1, vec![0, 128, 255, 64, 255, 0, 64, 200]);
     let bytes = encode_png_image_with_options(
         &img,
-        &PngEncoderOptions {
-            metadata: Some(PngMetadata {
-                srgb: Some(Srgb {
-                    rendering_intent: RenderingIntent::RelativeColorimetric,
-                }),
-                ..PngMetadata::default()
-            }),
-            ..PngEncoderOptions::default()
-        },
+        &PngEncoderOptions::default().with_metadata(Some(
+            PngMetadata::default()
+                .with_srgb(Some(Srgb::new(RenderingIntent::RelativeColorimetric))),
+        )),
     )
     .expect("encode");
 
@@ -104,24 +86,14 @@ fn composite_decoded_image_over_background_linear() {
     );
     let bytes = encode_png_image_with_options(
         &img,
-        &PngEncoderOptions {
-            metadata: Some(PngMetadata {
-                srgb: Some(Srgb {
-                    rendering_intent: RenderingIntent::Perceptual,
-                }),
-                ..PngMetadata::default()
-            }),
-            ..PngEncoderOptions::default()
-        },
+        &PngEncoderOptions::default().with_metadata(Some(
+            PngMetadata::default().with_srgb(Some(Srgb::new(RenderingIntent::Perceptual))),
+        )),
     )
     .expect("encode");
 
     let decoded = decode_png_to_rgba(&bytes).expect("decode");
-    let mut canvas = RgbaBitmap {
-        width: decoded.width,
-        height: decoded.height,
-        data: decoded.data.clone(),
-    };
+    let mut canvas = RgbaBitmap::new(decoded.width, decoded.height, decoded.data.clone());
     composite_over_background(&mut canvas, [0, 0, 0]);
 
     // Opaque red reproduces exactly; transparent pixel becomes the

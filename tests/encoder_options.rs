@@ -95,22 +95,16 @@ fn compression_level_roundtrips_and_validates_range() {
             data.extend_from_slice(&[(x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8, 255]);
         }
     }
-    let img = PngImage {
-        width: w,
-        height: h,
-        stride: (w * 4) as usize,
-        pixel_format: PngPixelFormat::Rgba,
-        data,
-        palette: Vec::new(),
-    };
+    let img =
+        PngImage::new(w, h, PngPixelFormat::Rgba, (w * 4) as usize, data).with_palette(Vec::new());
 
     let mut sizes = Vec::new();
     for level in 0u8..=9 {
-        let opts = PngEncoderOptions {
-            // 0 exercises the None default; 1..=9 the explicit levels.
-            compression_level: if level == 0 { None } else { Some(level) },
-            ..Default::default()
-        };
+        let opts = PngEncoderOptions::default().with_compression_level(if level == 0 {
+            None
+        } else {
+            Some(level)
+        });
         let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
         let decoded = decode_png_to_rgba(&bytes).expect("decode");
         assert_eq!(decoded.width, w);
@@ -127,10 +121,8 @@ fn compression_level_roundtrips_and_validates_range() {
     );
     // `None` is exactly `Some(DEFAULT_COMPRESSION_LEVEL)` — the default
     // is a named level, not a separate code path.
-    let explicit = PngEncoderOptions {
-        compression_level: Some(oxideav_png::DEFAULT_COMPRESSION_LEVEL),
-        ..Default::default()
-    };
+    let explicit = PngEncoderOptions::default()
+        .with_compression_level(Some(oxideav_png::DEFAULT_COMPRESSION_LEVEL));
     let default_bytes = encode_png_image_with_options(&img, &PngEncoderOptions::default()).unwrap();
     assert_eq!(
         default_bytes,
@@ -140,10 +132,7 @@ fn compression_level_roundtrips_and_validates_range() {
 
     // Out-of-range level is rejected before any bytes are emitted.
     for bad in [10u8, 11, 255] {
-        let opts = PngEncoderOptions {
-            compression_level: Some(bad),
-            ..Default::default()
-        };
+        let opts = PngEncoderOptions::default().with_compression_level(Some(bad));
         let err = encode_png_image_with_options(&img, &opts).unwrap_err();
         let msg = format!("{err:?}");
         assert!(

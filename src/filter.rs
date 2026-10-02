@@ -455,6 +455,7 @@ pub fn choose_filter_heuristic(
 /// (`Fixed(None)`); the encoder still emits exactly the filter the
 /// caller selected, leaving the §12.7 mapping to the caller.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FilterStrategy {
     /// Per-row §12.8 min-sum-abs-delta heuristic. Tries all five
     /// filter types on every row and keeps the row that minimises the

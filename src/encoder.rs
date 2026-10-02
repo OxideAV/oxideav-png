@@ -42,6 +42,7 @@ use crate::zstream::{
 /// `CodecParameters::options` (when the `registry` feature is on) or
 /// passed directly to [`encode_png_image_with_options`].
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct PngEncoderOptions {
     /// Adam7 seven-pass interlaced encode. Sets `IHDR.interlace = 1`.
     /// Compressed payload gets ~5–15% larger but the image is
@@ -172,6 +173,38 @@ pub struct PngEncoderOptions {
     /// level since their payloads are small and their byte layout is
     /// pinned by round-trip tests.
     pub compression_level: Option<u8>,
+}
+
+impl PngEncoderOptions {
+    /// Adam7 interlaced output (`IHDR.interlace = 1`).
+    pub fn with_interlace(mut self, interlace: bool) -> Self {
+        self.interlace = interlace;
+        self
+    }
+
+    /// Ancillary metadata to embed; `None` emits none.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<PngMetadata>>) -> Self {
+        self.metadata = metadata.into();
+        self
+    }
+
+    /// Sub-byte wire depth (1 / 2 / 4) for `Gray8` / `Pal8` sources; `None` keeps the native depth.
+    pub fn with_bit_depth(mut self, bit_depth: impl Into<Option<u8>>) -> Self {
+        self.bit_depth = bit_depth.into();
+        self
+    }
+
+    /// Filter-selection policy (W3C PNG3 §12.7).
+    pub fn with_filter_strategy(mut self, filter_strategy: FilterStrategy) -> Self {
+        self.filter_strategy = filter_strategy;
+        self
+    }
+
+    /// DEFLATE level `1..=9` for the pixel stream; `None` selects [`DEFAULT_COMPRESSION_LEVEL`].
+    pub fn with_compression_level(mut self, compression_level: impl Into<Option<u8>>) -> Self {
+        self.compression_level = compression_level.into();
+        self
+    }
 }
 
 /// DEFLATE level the pixel stream uses when
@@ -1445,6 +1478,7 @@ pub fn encode_apng_threaded(
 /// the default image"). Every frame's `image.pixel_format` must equal
 /// the canvas pixel format because a PNG file carries one IHDR.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct ApngFrameSpec {
     /// Sub-region pixels for this frame. `image.width` / `image.height`
     /// are the `fcTL` frame extent; `image.pixel_format` must match the
@@ -1469,6 +1503,55 @@ pub struct ApngFrameSpec {
 }
 
 impl ApngFrameSpec {
+    /// A frame at offset (0, 0) with a zero delay (`delay_num = 0`, `delay_den = 100`), `Disposal::None` and `Blend::Source`; chain `with_*` setters to adjust.
+    pub fn new(image: PngImage) -> Self {
+        Self {
+            image,
+            x_offset: 0,
+            y_offset: 0,
+            delay_num: 0,
+            delay_den: 100,
+            dispose_op: Disposal::None,
+            blend_op: Blend::Source,
+        }
+    }
+
+    /// Frame-region left edge on the canvas, in pixels.
+    pub fn with_x_offset(mut self, x_offset: u32) -> Self {
+        self.x_offset = x_offset;
+        self
+    }
+
+    /// Frame-region top edge on the canvas, in pixels.
+    pub fn with_y_offset(mut self, y_offset: u32) -> Self {
+        self.y_offset = y_offset;
+        self
+    }
+
+    /// `fcTL` `delay_num` (numerator of the frame duration in seconds).
+    pub fn with_delay_num(mut self, delay_num: u16) -> Self {
+        self.delay_num = delay_num;
+        self
+    }
+
+    /// `fcTL` `delay_den` (denominator; `0` is written as `100`).
+    pub fn with_delay_den(mut self, delay_den: u16) -> Self {
+        self.delay_den = delay_den;
+        self
+    }
+
+    /// Disposal applied to the frame region after this frame is shown.
+    pub fn with_dispose_op(mut self, dispose_op: Disposal) -> Self {
+        self.dispose_op = dispose_op;
+        self
+    }
+
+    /// How this frame's pixels combine with the canvas underneath.
+    pub fn with_blend_op(mut self, blend_op: Blend) -> Self {
+        self.blend_op = blend_op;
+        self
+    }
+
     /// Convenience constructor for a full-canvas frame at the given
     /// integer-centisecond delay with `Disposal::None` / `Blend::Source`
     /// — the same defaults [`encode_apng`] applies, but reachable from a

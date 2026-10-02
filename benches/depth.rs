@@ -34,14 +34,8 @@ fn fill16(count: usize, mut state: u32) -> Vec<u8> {
 fn image(format: PngPixelFormat, w: u32, h: u32) -> PngImage {
     let bpp = format.bytes_per_pixel();
     let samples = w as usize * h as usize * (bpp / 2);
-    PngImage {
-        width: w,
-        height: h,
-        pixel_format: format,
-        stride: w as usize * bpp,
-        data: fill16(samples, 0x9e37_79b9),
-        palette: Vec::new(),
-    }
+    PngImage::new(w, h, format, w as usize * bpp, fill16(samples, 0x9e37_79b9))
+        .with_palette(Vec::new())
 }
 
 fn bench_rescale(c: &mut Criterion) {

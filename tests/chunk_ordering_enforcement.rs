@@ -23,38 +23,23 @@ use oxideav_png::{
 };
 
 fn rgba_2x2() -> PngImage {
-    PngImage {
-        width: 2,
-        height: 2,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: 8,
-        data: vec![
-            255, 0, 0, 255, // (0,0)
-            0, 255, 0, 255, // (1,0)
-            0, 0, 255, 255, // (0,1)
-            255, 255, 255, 255, // (1,1)
+    PngImage::new(
+        2,
+        2,
+        PngPixelFormat::Rgba,
+        8,
+        vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ],
-        palette: Vec::new(),
-    }
+    )
+    .with_palette(Vec::new())
 }
 
 /// A 2x2 indexed image so a stream carries a real `PLTE` chunk for the
 /// "after PLTE" bucket tests.
 fn pal_2x2() -> PngImage {
-    PngImage {
-        width: 2,
-        height: 2,
-        pixel_format: PngPixelFormat::Pal8,
-        stride: 2,
-        data: vec![0, 1, 2, 3],
-        // 4 palette entries (RGB triples) so a bKGD/hIST index is valid.
-        palette: vec![
-            0, 0, 0, // 0
-            255, 0, 0, // 1
-            0, 255, 0, // 2
-            0, 0, 255, // 3
-        ],
-    }
+    PngImage::new(2, 2, PngPixelFormat::Pal8, 2, vec![0, 1, 2, 3])
+        .with_palette(vec![0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255])
 }
 
 /// Splice `chunks` into an encoded PNG immediately *before* the first
@@ -256,14 +241,14 @@ fn bkgd_before_idat_accepted() {
 #[test]
 fn trns_after_idat_rejected() {
     // tRNS for a truecolor (ct=2) image is 6 bytes (one BE RGB key).
-    let rgb = PngImage {
-        width: 2,
-        height: 2,
-        pixel_format: PngPixelFormat::Rgb24,
-        stride: 6,
-        data: vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255],
-        palette: Vec::new(),
-    };
+    let rgb = PngImage::new(
+        2,
+        2,
+        PngPixelFormat::Rgb24,
+        6,
+        vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255],
+    )
+    .with_palette(Vec::new());
     let png = encode_png_image(&rgb).expect("encode rgb");
     let bytes = splice_before_iend(&png, &[(b"tRNS", &[0, 255, 0, 0, 0, 0])]);
     assert!(parse_metadata(&bytes).is_err());

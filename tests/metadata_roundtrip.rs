@@ -10,30 +10,20 @@ use oxideav_png::{
 };
 
 fn rgba_2x2() -> PngImage {
-    PngImage {
-        width: 2,
-        height: 2,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: 8,
-        data: vec![
-            255, 0, 0, 255, // (0,0)
-            0, 255, 0, 255, // (1,0)
-            0, 0, 255, 255, // (0,1)
-            255, 255, 255, 255, // (1,1)
+    PngImage::new(
+        2,
+        2,
+        PngPixelFormat::Rgba,
+        8,
+        vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ],
-        palette: Vec::new(),
-    }
+    )
+    .with_palette(Vec::new())
 }
 
 fn gray8_2x2() -> PngImage {
-    PngImage {
-        width: 2,
-        height: 2,
-        pixel_format: PngPixelFormat::Gray8,
-        stride: 2,
-        data: vec![0, 64, 128, 255],
-        palette: Vec::new(),
-    }
+    PngImage::new(2, 2, PngPixelFormat::Gray8, 2, vec![0, 64, 128, 255]).with_palette(Vec::new())
 }
 
 /// 4×1 Pal8 image with a 4-entry palette (red, green, blue, white). Used
@@ -46,14 +36,7 @@ fn pal8_4x1() -> PngImage {
         0, 0, 255, // entry 2 = blue
         255, 255, 255, // entry 3 = white
     ];
-    PngImage {
-        width: 4,
-        height: 1,
-        pixel_format: PngPixelFormat::Pal8,
-        stride: 4,
-        data: vec![0, 1, 2, 3],
-        palette,
-    }
+    PngImage::new(4, 1, PngPixelFormat::Pal8, 4, vec![0, 1, 2, 3]).with_palette(palette)
 }
 
 #[test]
@@ -72,13 +55,9 @@ fn no_metadata_in_default_encode() {
 #[test]
 fn sbit_rgba_8bit_roundtrip() {
     let img = rgba_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            sbit: Some(Sbit::Rgba(8, 8, 8, 8)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_sbit(Some(Sbit::Rgba(8, 8, 8, 8))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.sbit, Some(Sbit::Rgba(8, 8, 8, 8)));
@@ -90,13 +69,9 @@ fn sbit_rgba_8bit_roundtrip() {
 #[test]
 fn sbit_grayscale_roundtrip() {
     let img = gray8_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            sbit: Some(Sbit::Grayscale(6)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_sbit(Some(Sbit::Grayscale(6))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.sbit, Some(Sbit::Grayscale(6)));
@@ -108,17 +83,9 @@ fn phys_72_dpi_roundtrip() {
     // 2835 px/m == 72.009 DPI — the classic "72 DPI" image. Spec says
     // one inch is exactly 0.0254 metres, so the back-conversion lands a
     // hair off 72.
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            phys: Some(Phys {
-                pixels_per_unit_x: 2835,
-                pixels_per_unit_y: 2835,
-                unit: PhysUnit::Metre,
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_phys(Some(Phys::new(2835, 2835, PhysUnit::Metre))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     let p = meta.phys.expect("pHYs");
@@ -133,17 +100,9 @@ fn phys_72_dpi_roundtrip() {
 #[test]
 fn phys_aspect_only_roundtrip() {
     let img = rgba_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            phys: Some(Phys {
-                pixels_per_unit_x: 4,
-                pixels_per_unit_y: 3,
-                unit: PhysUnit::Unknown,
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_phys(Some(Phys::new(4, 3, PhysUnit::Unknown))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     let p = meta.phys.expect("pHYs");
@@ -155,21 +114,9 @@ fn phys_aspect_only_roundtrip() {
 #[test]
 fn time_roundtrip() {
     let img = rgba_2x2();
-    let t = Time {
-        year: 2026,
-        month: 5,
-        day: 20,
-        hour: 14,
-        minute: 30,
-        second: 45,
-    };
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            time: Some(t),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let t = Time::new(2026, 5, 20, 14, 30, 45);
+    let opts =
+        PngEncoderOptions::default().with_metadata(Some(PngMetadata::default().with_time(Some(t))));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.time, Some(t));
@@ -178,69 +125,26 @@ fn time_roundtrip() {
 #[test]
 fn all_three_chunks_roundtrip() {
     let img = rgba_2x2();
-    let meta_in = PngMetadata {
-        sbit: Some(Sbit::Rgba(8, 8, 8, 8)),
-        phys: Some(Phys {
-            pixels_per_unit_x: 11811,
-            pixels_per_unit_y: 11811,
-            unit: PhysUnit::Metre,
-        }),
-        time: Some(Time {
-            year: 2026,
-            month: 5,
-            day: 20,
-            hour: 0,
-            minute: 0,
-            second: 60, // RFC 2083 §4.2.8: 60 is the leap-second sentinel.
-        }),
-        // bKGD on colour type 6 ⇒ RGB triple; hIST not meaningful here
-        // (no PLTE on RGBA).
-        bkgd: Some(Bkgd::Rgb(255, 255, 255)),
-        hist: None,
-        // tRNS is prohibited on ct=6 (full alpha channel present per
-        // RFC 2083 §4.2.9 final paragraph). The "all chunks" fixture
-        // omits it for that reason; a dedicated ct=0/ct=2 round-trip
-        // test below covers the on-wire path.
-        trns: None,
-        exif: None,
-        srgb: Some(Srgb {
-            rendering_intent: RenderingIntent::Saturation,
-        }),
-        cicp: Some(Cicp {
-            // §11.3.2.6 Example 4 — Display P3 full-range.
-            color_primaries: 12,
-            transfer_function: 13,
-            matrix_coefficients: 0,
-            video_full_range_flag: 1,
-        }),
-        iccp: None,
-        gama: Some(Gama {
-            // RFC 2083 §4.2.3: γ 1/2.2 ≈ 0.45455 ⇒ 45455.
-            gamma_times_100000: 45_455,
-        }),
-        chrm: Some(Chrm {
-            // sRGB / Rec.709 primaries + D65 white point (× 100000).
-            white_point_x: 31_270,
-            white_point_y: 32_900,
-            red_x: 64_000,
-            red_y: 33_000,
-            green_x: 30_000,
-            green_y: 60_000,
-            blue_x: 15_000,
-            blue_y: 6_000,
-        }),
-        mdcv: None,
-        clli: None,
-        splt: Vec::new(),
-        texts: Vec::new(),
-        ztxts: Vec::new(),
-        itxts: Vec::new(),
-        unknowns: Vec::new(),
-    };
-    let opts = PngEncoderOptions {
-        metadata: Some(meta_in.clone()),
-        ..Default::default()
-    };
+    let meta_in = PngMetadata::default()
+        .with_sbit(Some(Sbit::Rgba(8, 8, 8, 8)))
+        .with_phys(Some(Phys::new(11811, 11811, PhysUnit::Metre)))
+        .with_time(Some(Time::new(2026, 5, 20, 0, 0, 60)))
+        .with_bkgd(Some(Bkgd::Rgb(255, 255, 255)))
+        .with_srgb(Some(Srgb::new(RenderingIntent::Saturation)))
+        .with_cicp(Some(Cicp::new(12, 13, 0, 1)))
+        .with_gama(Some(Gama::new(45_455)))
+        .with_chrm(Some(Chrm::new(
+            (31_270, 32_900),
+            (64_000, 33_000),
+            (30_000, 60_000),
+            (15_000, 6_000),
+        )))
+        .with_splt(Vec::new())
+        .with_texts(Vec::new())
+        .with_ztxts(Vec::new())
+        .with_itxts(Vec::new())
+        .with_unknowns(Vec::new());
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta_in.clone()));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta, meta_in);
@@ -251,13 +155,9 @@ fn chunk_ordering_sbit_precedes_idat() {
     // sBIT must come before PLTE and IDAT (RFC 2083 §4.3). Verify it
     // appears in the byte stream strictly before the first IDAT.
     let img = rgba_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            sbit: Some(Sbit::Rgba(8, 8, 8, 8)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_sbit(Some(Sbit::Rgba(8, 8, 8, 8))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let sbit_pos = bytes
         .windows(4)
@@ -273,17 +173,9 @@ fn chunk_ordering_sbit_precedes_idat() {
 #[test]
 fn chunk_ordering_phys_precedes_idat() {
     let img = rgba_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            phys: Some(Phys {
-                pixels_per_unit_x: 100,
-                pixels_per_unit_y: 100,
-                unit: PhysUnit::Metre,
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_phys(Some(Phys::new(100, 100, PhysUnit::Metre))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let phys_pos = bytes
         .windows(4)
@@ -308,11 +200,7 @@ fn parse_metadata_detects_duplicate_phys() {
     // IHDR is the first chunk after the 8-byte magic: length=13 means
     // total chunk size = 4(len) + 4(type) + 13(data) + 4(crc) = 25.
     let inject_pos = 8 + 25;
-    let phys = Phys {
-        pixels_per_unit_x: 100,
-        pixels_per_unit_y: 100,
-        unit: PhysUnit::Metre,
-    };
+    let phys = Phys::new(100, 100, PhysUnit::Metre);
     let mut tampered = Vec::with_capacity(bytes.len() + 2 * (4 + 4 + 9 + 4));
     tampered.extend_from_slice(&bytes[..inject_pos]);
 
@@ -347,13 +235,9 @@ fn parse_metadata_detects_duplicate_phys() {
 fn bkgd_rgb_8bit_roundtrip() {
     // Colour type 6 (Rgba) sample image; bKGD payload is 6 bytes BE.
     let img = rgba_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            bkgd: Some(Bkgd::Rgb(0x80, 0x40, 0x10)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_bkgd(Some(Bkgd::Rgb(0x80, 0x40, 0x10))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.bkgd, Some(Bkgd::Rgb(0x80, 0x40, 0x10)));
@@ -366,13 +250,9 @@ fn bkgd_rgb_8bit_roundtrip() {
 fn bkgd_grayscale_roundtrip() {
     // Colour type 0 (Gray8): bKGD is one 2-byte BE u16, MSB = 0 for 8-bit.
     let img = gray8_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            bkgd: Some(Bkgd::Grayscale(123)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_bkgd(Some(Bkgd::Grayscale(123))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.bkgd, Some(Bkgd::Grayscale(123)));
@@ -382,13 +262,9 @@ fn bkgd_grayscale_roundtrip() {
 fn bkgd_palette_index_roundtrip() {
     // Colour type 3: bKGD payload is a single u8 palette index.
     let img = pal8_4x1();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            bkgd: Some(Bkgd::Palette(2)), // blue, the 3rd entry
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_bkgd(Some(Bkgd::Palette(2))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.bkgd, Some(Bkgd::Palette(2)));
@@ -400,16 +276,9 @@ fn bkgd_palette_index_roundtrip() {
 fn hist_matches_palette_entry_count() {
     // 4-entry palette ⇒ hIST carries exactly 4 frequencies.
     let img = pal8_4x1();
-    let h = Hist {
-        frequencies: vec![1, 1, 1, 1],
-    };
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            hist: Some(h.clone()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let h = Hist::new(vec![1, 1, 1, 1]);
+    let opts = PngEncoderOptions::default()
+        .with_metadata(Some(PngMetadata::default().with_hist(Some(h.clone()))));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.hist, Some(h));
@@ -420,16 +289,11 @@ fn chunk_ordering_bkgd_and_hist_follow_plte_precede_idat() {
     // PNG3 §5.6 Table 1: bKGD / hIST go after PLTE and before IDAT. We
     // verify the byte positions explicitly.
     let img = pal8_4x1();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            bkgd: Some(Bkgd::Palette(0)),
-            hist: Some(Hist {
-                frequencies: vec![10, 5, 2, 1],
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default()
+            .with_bkgd(Some(Bkgd::Palette(0)))
+            .with_hist(Some(Hist::new(vec![10, 5, 2, 1]))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
     let plte_pos = pos(b"PLTE").expect("PLTE");
@@ -470,13 +334,9 @@ fn parse_metadata_rejects_hist_without_plte() {
 fn parse_metadata_rejects_bkgd_palette_index_out_of_range() {
     // Pal8 image has 4 entries; bKGD index 7 is out of range.
     let img = pal8_4x1();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            bkgd: Some(Bkgd::Palette(7)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_bkgd(Some(Bkgd::Palette(7))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let err = parse_metadata(&bytes).expect_err("oob palette index must fail");
     let msg = format!("{err:?}");
@@ -526,16 +386,9 @@ fn sample_exif_le() -> Vec<u8> {
 #[test]
 fn exif_roundtrip() {
     let img = rgba_2x2();
-    let exif = Exif {
-        data: sample_exif_le(),
-    };
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            exif: Some(exif.clone()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let exif = Exif::new(sample_exif_le());
+    let opts = PngEncoderOptions::default()
+        .with_metadata(Some(PngMetadata::default().with_exif(Some(exif.clone()))));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.exif, Some(exif));
@@ -551,14 +404,9 @@ fn exif_big_endian_roundtrip() {
     data.extend_from_slice(&8u32.to_be_bytes());
     data.extend_from_slice(&0u16.to_be_bytes());
     data.extend_from_slice(&0u32.to_be_bytes());
-    let exif = Exif { data };
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            exif: Some(exif.clone()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let exif = Exif::new(data);
+    let opts = PngEncoderOptions::default()
+        .with_metadata(Some(PngMetadata::default().with_exif(Some(exif.clone()))));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.exif, Some(exif));
@@ -568,15 +416,9 @@ fn exif_big_endian_roundtrip() {
 fn chunk_ordering_exif_precedes_idat() {
     // PNG3 §5.6 Table 1: eXIf is "Before IDAT". Verify the byte position.
     let img = rgba_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            exif: Some(Exif {
-                data: sample_exif_le(),
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_exif(Some(Exif::new(sample_exif_le()))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let exif_pos = bytes
         .windows(4)
@@ -638,16 +480,9 @@ fn srgb_roundtrip() {
     // PNG3 §11.3.2.5: one-byte rendering intent. Round-trip the
     // "Relative colorimetric" intent through encode/decode.
     let img = rgba_2x2();
-    let srgb = Srgb {
-        rendering_intent: RenderingIntent::RelativeColorimetric,
-    };
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            srgb: Some(srgb),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let srgb = Srgb::new(RenderingIntent::RelativeColorimetric);
+    let opts = PngEncoderOptions::default()
+        .with_metadata(Some(PngMetadata::default().with_srgb(Some(srgb))));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.srgb, Some(srgb));
@@ -661,15 +496,9 @@ fn chunk_ordering_srgb_precedes_plte_and_idat() {
     // PNG3 §5.6 Table 1: sRGB is "Before PLTE and IDAT". Verify the byte
     // positions against a palette image so PLTE is actually present.
     let img = pal8_4x1();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            srgb: Some(Srgb {
-                rendering_intent: RenderingIntent::Perceptual,
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_srgb(Some(Srgb::new(RenderingIntent::Perceptual))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
     let srgb_pos = pos(b"sRGB").expect("sRGB");
@@ -725,19 +554,9 @@ fn parse_metadata_rejects_reserved_srgb_intent() {
 fn cicp_roundtrip() {
     // PNG3 §11.3.2.6 Example 4 — Display P3 (full-range): 0C 0D 00 01.
     let img = rgba_2x2();
-    let cicp = Cicp {
-        color_primaries: 12,
-        transfer_function: 13,
-        matrix_coefficients: 0,
-        video_full_range_flag: 1,
-    };
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            cicp: Some(cicp),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let cicp = Cicp::new(12, 13, 0, 1);
+    let opts = PngEncoderOptions::default()
+        .with_metadata(Some(PngMetadata::default().with_cicp(Some(cicp))));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.cicp, Some(cicp));
@@ -752,18 +571,9 @@ fn chunk_ordering_cicp_precedes_plte_and_idat() {
     // PNG3 §5.6 Table 1: cICP is "Before PLTE and IDAT". Use a palette
     // image so PLTE is actually present in the output stream.
     let img = pal8_4x1();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            cicp: Some(Cicp {
-                color_primaries: 1,
-                transfer_function: 1,
-                matrix_coefficients: 0,
-                video_full_range_flag: 0,
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_cicp(Some(Cicp::new(1, 1, 0, 0))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
     let cicp_pos = pos(b"cICP").expect("cICP");
@@ -780,22 +590,12 @@ fn chunk_ordering_cicp_precedes_other_colour_chunks() {
     // a viewer that walks the file in order picks the higher-precedence
     // signal up first.
     let img = rgba_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            cicp: Some(Cicp {
-                color_primaries: 9,
-                transfer_function: 16,
-                matrix_coefficients: 0,
-                video_full_range_flag: 1,
-            }),
-            srgb: Some(Srgb {
-                rendering_intent: RenderingIntent::Perceptual,
-            }),
-            sbit: Some(Sbit::Rgba(8, 8, 8, 8)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default()
+            .with_cicp(Some(Cicp::new(9, 16, 0, 1)))
+            .with_srgb(Some(Srgb::new(RenderingIntent::Perceptual)))
+            .with_sbit(Some(Sbit::Rgba(8, 8, 8, 8))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
     let cicp_pos = pos(b"cICP").expect("cICP");
@@ -855,33 +655,16 @@ fn parse_metadata_rejects_nonzero_cicp_matrix_coefficients() {
 fn splt_single_8bit_roundtrip() {
     // One 8-bit suggested palette survives encode → decode intact.
     let img = rgba_2x2();
-    let splt = Splt {
-        name: "web safe".to_string(),
-        sample_depth: 8,
-        entries: vec![
-            SpltEntry {
-                red: 255,
-                green: 0,
-                blue: 0,
-                alpha: 255,
-                frequency: 50000,
-            },
-            SpltEntry {
-                red: 0,
-                green: 255,
-                blue: 0,
-                alpha: 128,
-                frequency: 10000,
-            },
+    let splt = Splt::new(
+        "web safe".to_string(),
+        8,
+        vec![
+            SpltEntry::new(255, 0, 0, 255, 50000),
+            SpltEntry::new(0, 255, 0, 128, 10000),
         ],
-    };
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            splt: vec![splt.clone()],
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    );
+    let opts = PngEncoderOptions::default()
+        .with_metadata(Some(PngMetadata::default().with_splt(vec![splt.clone()])));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     // Image data still decodes.
     let decoded = decode_png(&bytes).expect("decode");
@@ -894,24 +677,13 @@ fn splt_single_8bit_roundtrip() {
 #[test]
 fn splt_16bit_roundtrip() {
     let img = rgba_2x2();
-    let splt = Splt {
-        name: "deep".to_string(),
-        sample_depth: 16,
-        entries: vec![SpltEntry {
-            red: 0xFFFE,
-            green: 0x8001,
-            blue: 0x0123,
-            alpha: 0xFFFF,
-            frequency: 0xCAFE,
-        }],
-    };
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            splt: vec![splt.clone()],
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let splt = Splt::new(
+        "deep".to_string(),
+        16,
+        vec![SpltEntry::new(0xFFFE, 0x8001, 0x0123, 0xFFFF, 0xCAFE)],
+    );
+    let opts = PngEncoderOptions::default()
+        .with_metadata(Some(PngMetadata::default().with_splt(vec![splt.clone()])));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.splt, vec![splt]);
@@ -922,35 +694,15 @@ fn splt_multiple_palettes_roundtrip_in_order() {
     // PNG permits multiple sPLT chunks (distinct names); the Vec order is
     // preserved across the round-trip.
     let img = rgba_2x2();
-    let a = Splt {
-        name: "first".to_string(),
-        sample_depth: 8,
-        entries: vec![SpltEntry {
-            red: 1,
-            green: 2,
-            blue: 3,
-            alpha: 4,
-            frequency: 9,
-        }],
-    };
-    let b = Splt {
-        name: "second".to_string(),
-        sample_depth: 16,
-        entries: vec![SpltEntry {
-            red: 0x1111,
-            green: 0x2222,
-            blue: 0x3333,
-            alpha: 0x4444,
-            frequency: 0x5555,
-        }],
-    };
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            splt: vec![a.clone(), b.clone()],
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let a = Splt::new("first".to_string(), 8, vec![SpltEntry::new(1, 2, 3, 4, 9)]);
+    let b = Splt::new(
+        "second".to_string(),
+        16,
+        vec![SpltEntry::new(0x1111, 0x2222, 0x3333, 0x4444, 0x5555)],
+    );
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_splt(vec![a.clone(), b.clone()]),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.splt, vec![a, b]);
@@ -960,17 +712,9 @@ fn splt_multiple_palettes_roundtrip_in_order() {
 fn chunk_ordering_splt_precedes_idat() {
     // PNG3 §5.6 Table 7: sPLT is "Before IDAT".
     let img = rgba_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            splt: vec![Splt {
-                name: "p".to_string(),
-                sample_depth: 8,
-                entries: vec![],
-            }],
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_splt(vec![Splt::new("p".to_string(), 8, vec![])]),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let splt_pos = bytes
         .windows(4)
@@ -990,13 +734,9 @@ fn parse_metadata_rejects_duplicate_splt_palette_name() {
     let img = rgba_2x2();
     let bytes = encode_png_image(&img).expect("encode");
     let inject_pos = 8 + 25; // after IHDR.
-    let payload = Splt {
-        name: "same".to_string(),
-        sample_depth: 8,
-        entries: vec![],
-    }
-    .to_bytes()
-    .expect("splt payload");
+    let payload = Splt::new("same".to_string(), 8, vec![])
+        .to_bytes()
+        .expect("splt payload");
     let mut single = Vec::new();
     oxideav_png::chunk::write_chunk(&mut single, b"sPLT", &payload);
     let mut tampered = Vec::with_capacity(bytes.len() + 2 * single.len());
@@ -1019,13 +759,7 @@ fn parse_metadata_allows_two_splt_with_distinct_names() {
     let bytes = encode_png_image(&img).expect("encode");
     let inject_pos = 8 + 25;
     let mk = |name: &str| {
-        let payload = Splt {
-            name: name.to_string(),
-            sample_depth: 8,
-            entries: vec![],
-        }
-        .to_bytes()
-        .unwrap();
+        let payload = Splt::new(name.to_string(), 8, vec![]).to_bytes().unwrap();
         let mut c = Vec::new();
         oxideav_png::chunk::write_chunk(&mut c, b"sPLT", &payload);
         c
@@ -1049,10 +783,10 @@ fn text_single_roundtrip_through_encoder() {
     let img = rgba_2x2();
     let mut opts = PngEncoderOptions::default();
     let mut meta = PngMetadata::default();
-    meta.texts.push(Text {
-        keyword: "Title".to_string(),
-        text: "Sunset over the cape".to_string(),
-    });
+    meta.texts.push(Text::new(
+        "Title".to_string(),
+        "Sunset over the cape".to_string(),
+    ));
     opts.metadata = Some(meta);
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let parsed = parse_metadata(&bytes).expect("parse_metadata");
@@ -1070,18 +804,16 @@ fn text_multiple_with_same_keyword_roundtrip() {
     let img = rgba_2x2();
     let mut opts = PngEncoderOptions::default();
     let mut meta = PngMetadata::default();
-    meta.texts.push(Text {
-        keyword: "Comment".to_string(),
-        text: "first comment".to_string(),
-    });
-    meta.texts.push(Text {
-        keyword: "Comment".to_string(),
-        text: "second comment".to_string(),
-    });
-    meta.texts.push(Text {
-        keyword: "Author".to_string(),
-        text: "anon".to_string(),
-    });
+    meta.texts.push(Text::new(
+        "Comment".to_string(),
+        "first comment".to_string(),
+    ));
+    meta.texts.push(Text::new(
+        "Comment".to_string(),
+        "second comment".to_string(),
+    ));
+    meta.texts
+        .push(Text::new("Author".to_string(), "anon".to_string()));
     opts.metadata = Some(meta);
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let parsed = parse_metadata(&bytes).expect("parse_metadata");
@@ -1102,10 +834,10 @@ fn text_with_latin1_high_byte_roundtrips() {
     let img = rgba_2x2();
     let mut opts = PngEncoderOptions::default();
     let mut meta = PngMetadata::default();
-    meta.texts.push(Text {
-        keyword: "Author".to_string(),
-        text: "Renée Lévesque".to_string(),
-    });
+    meta.texts.push(Text::new(
+        "Author".to_string(),
+        "Renée Lévesque".to_string(),
+    ));
     opts.metadata = Some(meta);
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let parsed = parse_metadata(&bytes).expect("parse_metadata");
@@ -1122,10 +854,8 @@ fn text_chunk_precedes_idat_in_output() {
     let img = rgba_2x2();
     let mut opts = PngEncoderOptions::default();
     let mut meta = PngMetadata::default();
-    meta.texts.push(Text {
-        keyword: "Software".to_string(),
-        text: "oxideav-png".to_string(),
-    });
+    meta.texts
+        .push(Text::new("Software".to_string(), "oxideav-png".to_string()));
     opts.metadata = Some(meta);
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
 
@@ -1157,10 +887,8 @@ fn text_empty_string_roundtrips_through_encoder() {
     let img = rgba_2x2();
     let mut opts = PngEncoderOptions::default();
     let mut meta = PngMetadata::default();
-    meta.texts.push(Text {
-        keyword: "Comment".to_string(),
-        text: String::new(),
-    });
+    meta.texts
+        .push(Text::new("Comment".to_string(), String::new()));
     opts.metadata = Some(meta);
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let parsed = parse_metadata(&bytes).expect("parse_metadata");
@@ -1239,16 +967,9 @@ fn gama_roundtrip() {
     // RFC 2083 §4.2.3: a gamma of 0.45 is stored as 45000. Round-trip it
     // through encode/decode and confirm the pixels still decode exactly.
     let img = rgba_2x2();
-    let gama = Gama {
-        gamma_times_100000: 45_000,
-    };
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            gama: Some(gama),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let gama = Gama::new(45_000);
+    let opts = PngEncoderOptions::default()
+        .with_metadata(Some(PngMetadata::default().with_gama(Some(gama))));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.gama, Some(gama));
@@ -1261,15 +982,9 @@ fn chunk_ordering_gama_precedes_plte_and_idat() {
     // PNG3 §5.6 Table 1: gAMA is "Before PLTE and IDAT". Use a palette
     // image so PLTE is present in the stream.
     let img = pal8_4x1();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            gama: Some(Gama {
-                gamma_times_100000: 100_000,
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_gama(Some(Gama::new(100_000))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
     let gama_pos = pos(b"gAMA").expect("gAMA");
@@ -1324,29 +1039,20 @@ fn parse_metadata_rejects_gama_wrong_length() {
 fn srgb_chrm() -> Chrm {
     // Canonical sRGB / Rec.709 primaries + D65 white point (× 100000),
     // per RFC 2083 §4.2.2's example storage convention.
-    Chrm {
-        white_point_x: 31_270,
-        white_point_y: 32_900,
-        red_x: 64_000,
-        red_y: 33_000,
-        green_x: 30_000,
-        green_y: 60_000,
-        blue_x: 15_000,
-        blue_y: 6_000,
-    }
+    Chrm::new(
+        (31_270, 32_900),
+        (64_000, 33_000),
+        (30_000, 60_000),
+        (15_000, 6_000),
+    )
 }
 
 #[test]
 fn chrm_roundtrip() {
     let img = rgba_2x2();
     let chrm = srgb_chrm();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            chrm: Some(chrm),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default()
+        .with_metadata(Some(PngMetadata::default().with_chrm(Some(chrm))));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.chrm, Some(chrm));
@@ -1357,13 +1063,8 @@ fn chrm_roundtrip() {
 #[test]
 fn chunk_ordering_chrm_precedes_plte_and_idat() {
     let img = pal8_4x1();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            chrm: Some(srgb_chrm()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default()
+        .with_metadata(Some(PngMetadata::default().with_chrm(Some(srgb_chrm()))));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
     let chrm_pos = pos(b"cHRM").expect("cHRM");
@@ -1380,25 +1081,13 @@ fn chunk_ordering_colour_chunks_follow_priority_table() {
     // precedence ordering, with gAMA ahead of cHRM by our deterministic
     // convention.
     let img = rgba_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            cicp: Some(Cicp {
-                color_primaries: 9,
-                transfer_function: 16,
-                matrix_coefficients: 0,
-                video_full_range_flag: 1,
-            }),
-            srgb: Some(Srgb {
-                rendering_intent: RenderingIntent::Perceptual,
-            }),
-            gama: Some(Gama {
-                gamma_times_100000: 45_455,
-            }),
-            chrm: Some(srgb_chrm()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default()
+            .with_cicp(Some(Cicp::new(9, 16, 0, 1)))
+            .with_srgb(Some(Srgb::new(RenderingIntent::Perceptual)))
+            .with_gama(Some(Gama::new(45_455)))
+            .with_chrm(Some(srgb_chrm())),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let pos = |tag: &[u8; 4]| {
         bytes
@@ -1463,22 +1152,13 @@ fn gama_chrm_combined_with_other_metadata_roundtrip() {
     // exercises the encoder's chunk-bucketing across both before-PLTE and
     // before-IDAT positions.
     let img = pal8_4x1();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            gama: Some(Gama {
-                gamma_times_100000: 45_455,
-            }),
-            chrm: Some(srgb_chrm()),
-            sbit: Some(Sbit::Rgb(8, 8, 8)),
-            phys: Some(Phys {
-                pixels_per_unit_x: 2835,
-                pixels_per_unit_y: 2835,
-                unit: PhysUnit::Metre,
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default()
+            .with_gama(Some(Gama::new(45_455)))
+            .with_chrm(Some(srgb_chrm()))
+            .with_sbit(Some(Sbit::Rgb(8, 8, 8)))
+            .with_phys(Some(Phys::new(2835, 2835, PhysUnit::Metre))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.gama.unwrap().gamma_times_100000, 45_455);
@@ -1497,14 +1177,11 @@ fn ztxt_single_roundtrip_through_encoder() {
     // encode → parse_metadata and confirm the decompressed text matches.
     let img = rgba_2x2();
     let mut meta = PngMetadata::default();
-    meta.ztxts.push(Ztxt {
-        keyword: "Description".to_string(),
-        text: "A compressed annotation that survives the codec.".to_string(),
-    });
-    let opts = PngEncoderOptions {
-        metadata: Some(meta),
-        ..Default::default()
-    };
+    meta.ztxts.push(Ztxt::new(
+        "Description".to_string(),
+        "A compressed annotation that survives the codec.".to_string(),
+    ));
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let parsed = parse_metadata(&bytes).expect("parse_metadata");
     assert_eq!(parsed.ztxts.len(), 1);
@@ -1527,22 +1204,19 @@ fn ztxt_multiple_with_same_keyword_roundtrip() {
     // encode + decode and confirm both survive in order.
     let img = rgba_2x2();
     let mut meta = PngMetadata::default();
-    meta.ztxts.push(Ztxt {
-        keyword: "Description".to_string(),
-        text: "first description".to_string(),
-    });
-    meta.ztxts.push(Ztxt {
-        keyword: "Description".to_string(),
-        text: "second description".to_string(),
-    });
-    meta.ztxts.push(Ztxt {
-        keyword: "Copyright".to_string(),
-        text: "© anon 2026".to_string(),
-    });
-    let opts = PngEncoderOptions {
-        metadata: Some(meta),
-        ..Default::default()
-    };
+    meta.ztxts.push(Ztxt::new(
+        "Description".to_string(),
+        "first description".to_string(),
+    ));
+    meta.ztxts.push(Ztxt::new(
+        "Description".to_string(),
+        "second description".to_string(),
+    ));
+    meta.ztxts.push(Ztxt::new(
+        "Copyright".to_string(),
+        "© anon 2026".to_string(),
+    ));
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let parsed = parse_metadata(&bytes).expect("parse_metadata");
     assert_eq!(parsed.ztxts.len(), 3);
@@ -1561,14 +1235,9 @@ fn ztxt_chunk_precedes_idat_in_output() {
     // confirm the emitted `zTXt` is found before the first `IDAT`.
     let img = rgba_2x2();
     let mut meta = PngMetadata::default();
-    meta.ztxts.push(Ztxt {
-        keyword: "Software".to_string(),
-        text: "oxideav-png".to_string(),
-    });
-    let opts = PngEncoderOptions {
-        metadata: Some(meta),
-        ..Default::default()
-    };
+    meta.ztxts
+        .push(Ztxt::new("Software".to_string(), "oxideav-png".to_string()));
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
 
     let mut cur = 8usize;
@@ -1599,18 +1268,13 @@ fn ztxt_emitted_after_text_in_chunk_stream() {
     // in §5.6 Table 1); this asserts the project's documented choice.
     let img = rgba_2x2();
     let mut meta = PngMetadata::default();
-    meta.texts.push(Text {
-        keyword: "Title".to_string(),
-        text: "Plain".to_string(),
-    });
-    meta.ztxts.push(Ztxt {
-        keyword: "Description".to_string(),
-        text: "Compressed".to_string(),
-    });
-    let opts = PngEncoderOptions {
-        metadata: Some(meta),
-        ..Default::default()
-    };
+    meta.texts
+        .push(Text::new("Title".to_string(), "Plain".to_string()));
+    meta.ztxts.push(Ztxt::new(
+        "Description".to_string(),
+        "Compressed".to_string(),
+    ));
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
     let text_pos = pos(b"tEXt").expect("tEXt");
@@ -1628,14 +1292,9 @@ fn ztxt_compresses_large_repetitive_text() {
     let img = rgba_2x2();
     let payload = "A".repeat(4096);
     let mut meta = PngMetadata::default();
-    meta.ztxts.push(Ztxt {
-        keyword: "Bulk".to_string(),
-        text: payload.clone(),
-    });
-    let opts = PngEncoderOptions {
-        metadata: Some(meta),
-        ..Default::default()
-    };
+    meta.ztxts
+        .push(Ztxt::new("Bulk".to_string(), payload.clone()));
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let zpos = bytes
         .windows(4)
@@ -1734,26 +1393,19 @@ fn ztxt_coexists_with_text_in_one_file() {
     // preserved within each vector.
     let img = rgba_2x2();
     let mut meta = PngMetadata::default();
-    meta.texts.push(Text {
-        keyword: "Title".to_string(),
-        text: "Plain title".to_string(),
-    });
-    meta.texts.push(Text {
-        keyword: "Author".to_string(),
-        text: "anon".to_string(),
-    });
-    meta.ztxts.push(Ztxt {
-        keyword: "Description".to_string(),
-        text: "Long compressed description".to_string(),
-    });
-    meta.ztxts.push(Ztxt {
-        keyword: "Comment".to_string(),
-        text: "Another compressed annotation".to_string(),
-    });
-    let opts = PngEncoderOptions {
-        metadata: Some(meta),
-        ..Default::default()
-    };
+    meta.texts
+        .push(Text::new("Title".to_string(), "Plain title".to_string()));
+    meta.texts
+        .push(Text::new("Author".to_string(), "anon".to_string()));
+    meta.ztxts.push(Ztxt::new(
+        "Description".to_string(),
+        "Long compressed description".to_string(),
+    ));
+    meta.ztxts.push(Ztxt::new(
+        "Comment".to_string(),
+        "Another compressed annotation".to_string(),
+    ));
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let parsed = parse_metadata(&bytes).expect("parse_metadata");
     assert_eq!(parsed.texts.len(), 2);
@@ -1774,17 +1426,11 @@ fn iccp_roundtrip_through_encoder() {
     let img = rgba_2x2();
     // 256-byte synthesised profile blob — opaque to the codec.
     let profile: Vec<u8> = (0..=255u8).collect();
-    let meta = PngMetadata {
-        iccp: Some(Iccp {
-            name: "Synthetic Profile".to_string(),
-            profile: profile.clone(),
-        }),
-        ..Default::default()
-    };
-    let opts = PngEncoderOptions {
-        metadata: Some(meta),
-        ..Default::default()
-    };
+    let meta = PngMetadata::default().with_iccp(Some(Iccp::new(
+        "Synthetic Profile".to_string(),
+        profile.clone(),
+    )));
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let parsed = parse_metadata(&bytes).expect("parse_metadata");
     let back = parsed.iccp.expect("iCCP must round-trip");
@@ -1799,25 +1445,14 @@ fn iccp_duplicate_rejected() {
     // §5.6 Table 1: iCCP is "Multiple OK? No". Inject two iCCP chunks
     // and confirm parse_metadata rejects.
     let img = rgba_2x2();
-    let meta = PngMetadata {
-        iccp: Some(Iccp {
-            name: "First".to_string(),
-            profile: vec![1, 2, 3],
-        }),
-        ..Default::default()
-    };
-    let opts = PngEncoderOptions {
-        metadata: Some(meta),
-        ..Default::default()
-    };
+    let meta =
+        PngMetadata::default().with_iccp(Some(Iccp::new("First".to_string(), vec![1, 2, 3])));
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     // Inject a second iCCP after the first (8 PNG sig + 25 IHDR + we
     // know the first iCCP follows immediately).
     let inject_pos = 8 + 25;
-    let dup = Iccp {
-        name: "Second".to_string(),
-        profile: vec![4, 5, 6],
-    };
+    let dup = Iccp::new("Second".to_string(), vec![4, 5, 6]);
     let mut chunk = Vec::new();
     oxideav_png::chunk::write_chunk(&mut chunk, b"iCCP", &dup.to_bytes().unwrap());
     let mut tampered = Vec::new();
@@ -1832,17 +1467,8 @@ fn iccp_chunk_precedes_plte_and_idat_in_output() {
     // §5.6 Table 1: iCCP must appear before PLTE and IDAT. Walk the
     // emitted chunk stream and verify the iCCP position.
     let img = rgba_2x2();
-    let meta = PngMetadata {
-        iccp: Some(Iccp {
-            name: "P".to_string(),
-            profile: vec![0xAA; 32],
-        }),
-        ..Default::default()
-    };
-    let opts = PngEncoderOptions {
-        metadata: Some(meta),
-        ..Default::default()
-    };
+    let meta = PngMetadata::default().with_iccp(Some(Iccp::new("P".to_string(), vec![0xAA; 32])));
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let mut pos = 8usize;
     let mut iccp_pos = None;
@@ -1933,17 +1559,16 @@ fn parse_metadata_rejects_iccp_with_invalid_name() {
 fn itxt_uncompressed_roundtrip_through_encoder() {
     let img = rgba_2x2();
     let mut meta = PngMetadata::default();
-    meta.itxts.push(Itxt {
-        keyword: "Title".to_string(),
-        compressed: false,
-        language_tag: "en-US".to_string(),
-        translated_keyword: String::new(),
-        text: "An internationalised plain title.".to_string(),
-    });
-    let opts = PngEncoderOptions {
-        metadata: Some(meta),
-        ..Default::default()
-    };
+    meta.itxts.push(
+        Itxt::new(
+            "Title".to_string(),
+            "An internationalised plain title.".to_string(),
+        )
+        .with_compressed(false)
+        .with_language_tag("en-US".to_string())
+        .with_translated_keyword(String::new()),
+    );
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let parsed = parse_metadata(&bytes).expect("parse_metadata");
     assert_eq!(parsed.itxts.len(), 1);
@@ -1960,17 +1585,16 @@ fn itxt_uncompressed_roundtrip_through_encoder() {
 fn itxt_compressed_roundtrip_through_encoder() {
     let img = rgba_2x2();
     let mut meta = PngMetadata::default();
-    meta.itxts.push(Itxt {
-        keyword: "Description".to_string(),
-        compressed: true,
-        language_tag: "ja".to_string(),
-        translated_keyword: "説明".to_string(),
-        text: "圧縮された日本語の説明テキスト".to_string(),
-    });
-    let opts = PngEncoderOptions {
-        metadata: Some(meta),
-        ..Default::default()
-    };
+    meta.itxts.push(
+        Itxt::new(
+            "Description".to_string(),
+            "圧縮された日本語の説明テキスト".to_string(),
+        )
+        .with_compressed(true)
+        .with_language_tag("ja".to_string())
+        .with_translated_keyword("説明".to_string()),
+    );
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let parsed = parse_metadata(&bytes).expect("parse_metadata");
     assert_eq!(parsed.itxts.len(), 1);
@@ -1986,24 +1610,22 @@ fn itxt_multiple_with_same_keyword_roundtrip() {
     // §11.3.3.4 inherits §4.2.7 ¶3 — keyword uniqueness is not required.
     let img = rgba_2x2();
     let mut meta = PngMetadata::default();
-    meta.itxts.push(Itxt {
-        keyword: "Description".to_string(),
-        compressed: false,
-        language_tag: "en".to_string(),
-        translated_keyword: String::new(),
-        text: "First description".to_string(),
-    });
-    meta.itxts.push(Itxt {
-        keyword: "Description".to_string(),
-        compressed: false,
-        language_tag: "fr".to_string(),
-        translated_keyword: String::new(),
-        text: "Première description".to_string(),
-    });
-    let opts = PngEncoderOptions {
-        metadata: Some(meta),
-        ..Default::default()
-    };
+    meta.itxts.push(
+        Itxt::new("Description".to_string(), "First description".to_string())
+            .with_compressed(false)
+            .with_language_tag("en".to_string())
+            .with_translated_keyword(String::new()),
+    );
+    meta.itxts.push(
+        Itxt::new(
+            "Description".to_string(),
+            "Première description".to_string(),
+        )
+        .with_compressed(false)
+        .with_language_tag("fr".to_string())
+        .with_translated_keyword(String::new()),
+    );
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let parsed = parse_metadata(&bytes).expect("parse_metadata");
     assert_eq!(parsed.itxts.len(), 2);
@@ -2020,17 +1642,13 @@ fn itxt_chunk_precedes_idat_in_output() {
     // constraint" bucket with tEXt / zTXt.
     let img = rgba_2x2();
     let mut meta = PngMetadata::default();
-    meta.itxts.push(Itxt {
-        keyword: "Title".to_string(),
-        compressed: false,
-        language_tag: String::new(),
-        translated_keyword: String::new(),
-        text: "T".to_string(),
-    });
-    let opts = PngEncoderOptions {
-        metadata: Some(meta),
-        ..Default::default()
-    };
+    meta.itxts.push(
+        Itxt::new("Title".to_string(), "T".to_string())
+            .with_compressed(false)
+            .with_language_tag(String::new())
+            .with_translated_keyword(String::new()),
+    );
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let mut pos = 8usize;
     let mut itxt_pos = None;
@@ -2060,25 +1678,22 @@ fn itxt_coexists_with_text_and_ztxt() {
     // mixed in one file.
     let img = rgba_2x2();
     let mut meta = PngMetadata::default();
-    meta.texts.push(Text {
-        keyword: "Title".to_string(),
-        text: "plain".to_string(),
-    });
-    meta.ztxts.push(Ztxt {
-        keyword: "Description".to_string(),
-        text: "zlib compressed".to_string(),
-    });
-    meta.itxts.push(Itxt {
-        keyword: "Comment".to_string(),
-        compressed: true,
-        language_tag: "en".to_string(),
-        translated_keyword: "Comment".to_string(),
-        text: "international UTF-8 comment".to_string(),
-    });
-    let opts = PngEncoderOptions {
-        metadata: Some(meta),
-        ..Default::default()
-    };
+    meta.texts
+        .push(Text::new("Title".to_string(), "plain".to_string()));
+    meta.ztxts.push(Ztxt::new(
+        "Description".to_string(),
+        "zlib compressed".to_string(),
+    ));
+    meta.itxts.push(
+        Itxt::new(
+            "Comment".to_string(),
+            "international UTF-8 comment".to_string(),
+        )
+        .with_compressed(true)
+        .with_language_tag("en".to_string())
+        .with_translated_keyword("Comment".to_string()),
+    );
+    let opts = PngEncoderOptions::default().with_metadata(Some(meta));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let parsed = parse_metadata(&bytes).expect("parse_metadata");
     assert_eq!(parsed.texts.len(), 1);
@@ -2161,39 +1776,25 @@ fn parse_metadata_rejects_itxt_with_invalid_keyword() {
 
 fn bt2100_mdcv() -> Mdcv {
     // PNG3 §11.3.2.7 Examples 5-8 — BT.2100 HDR mastering display.
-    Mdcv {
-        primary_r_x: 35400,
-        primary_r_y: 14600,
-        primary_g_x: 8500,
-        primary_g_y: 39850,
-        primary_b_x: 6550,
-        primary_b_y: 2300,
-        white_point_x: 15635,
-        white_point_y: 16450,
-        max_luminance: 40_000_000, // 4000 cd/m²
-        min_luminance: 5,          // 0.0005 cd/m²
-    }
+    Mdcv::new(
+        [(35400, 14600), (8500, 39850), (6550, 2300)],
+        (15635, 16450),
+        40_000_000,
+        5,
+    )
 }
 
 fn hdr10_clli() -> Clli {
     // PNG3 §11.3.2.8 Examples 13-14 — MaxCLL 1000, MaxFALL 250 cd/m².
-    Clli {
-        max_content_light_level: 10_000_000,
-        max_frame_average_light_level: 2_500_000,
-    }
+    Clli::new(10_000_000, 2_500_000)
 }
 
 #[test]
 fn mdcv_roundtrip() {
     let img = rgba_2x2();
     let mdcv = bt2100_mdcv();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            mdcv: Some(mdcv),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default()
+        .with_metadata(Some(PngMetadata::default().with_mdcv(Some(mdcv))));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.mdcv, Some(mdcv));
@@ -2206,13 +1807,8 @@ fn mdcv_roundtrip() {
 fn clli_roundtrip() {
     let img = rgba_2x2();
     let clli = hdr10_clli();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            clli: Some(clli),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default()
+        .with_metadata(Some(PngMetadata::default().with_clli(Some(clli))));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.clli, Some(clli));
@@ -2226,23 +1822,15 @@ fn mdcv_and_clli_together_with_cicp_hdr10() {
     // practice the HDR10 profile pairs cICP (BT.2100 + PQ + full-range)
     // with mDCV + cLLI. Verify the three round-trip together.
     let img = rgba_2x2();
-    let cicp = Cicp {
-        color_primaries: 9,       // BT.2020 / BT.2100
-        transfer_function: 16,    // SMPTE 2084 / PQ
-        matrix_coefficients: 0,   // RGB (pinned by PNG3 §11.3.2.6)
-        video_full_range_flag: 1, // full range
-    };
+    let cicp = Cicp::new(9, 16, 0, 1);
     let mdcv = bt2100_mdcv();
     let clli = hdr10_clli();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            cicp: Some(cicp),
-            mdcv: Some(mdcv),
-            clli: Some(clli),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default()
+            .with_cicp(Some(cicp))
+            .with_mdcv(Some(mdcv))
+            .with_clli(Some(clli)),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.cicp, Some(cicp));
@@ -2255,13 +1843,8 @@ fn mdcv_payload_matches_spec_examples() {
     // PNG3 §11.3.2.7 Examples 5/7/8 — verify the encoded mDCV payload
     // matches the spec's tabulated hex bytes exactly.
     let img = rgba_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            mdcv: Some(bt2100_mdcv()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default()
+        .with_metadata(Some(PngMetadata::default().with_mdcv(Some(bt2100_mdcv()))));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let chunk_pos = bytes
         .windows(4)
@@ -2283,13 +1866,8 @@ fn clli_payload_matches_spec_examples() {
     // PNG3 §11.3.2.8 Examples 13/14 — MaxCLL 1000 cd/m² (00 98 96 80),
     // MaxFALL 250 cd/m² (00 26 25 A0).
     let img = rgba_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            clli: Some(hdr10_clli()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default()
+        .with_metadata(Some(PngMetadata::default().with_clli(Some(hdr10_clli()))));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let chunk_pos = bytes
         .windows(4)
@@ -2305,14 +1883,11 @@ fn chunk_ordering_mdcv_and_clli_precede_plte_and_idat() {
     // §11.3.2.7: "The mDCV chunk MUST come before the PLTE and IDAT
     // chunks." §5.6 Table 1 says the same for cLLI.
     let img = pal8_4x1();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            mdcv: Some(bt2100_mdcv()),
-            clli: Some(hdr10_clli()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default()
+            .with_mdcv(Some(bt2100_mdcv()))
+            .with_clli(Some(hdr10_clli())),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
     let mdcv_pos = pos(b"mDCV").expect("mDCV");
@@ -2333,20 +1908,12 @@ fn chunk_ordering_mdcv_clli_trail_basic_colour_chunks() {
     // ranked chunks first so a viewer walking the file in order picks
     // up the basic colour signal before the HDR hints.
     let img = rgba_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            cicp: Some(Cicp {
-                color_primaries: 9,
-                transfer_function: 16,
-                matrix_coefficients: 0,
-                video_full_range_flag: 1,
-            }),
-            mdcv: Some(bt2100_mdcv()),
-            clli: Some(hdr10_clli()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default()
+            .with_cicp(Some(Cicp::new(9, 16, 0, 1)))
+            .with_mdcv(Some(bt2100_mdcv()))
+            .with_clli(Some(hdr10_clli())),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let pos = |tag: &[u8; 4]| bytes.windows(4).position(|w| w == tag);
     let cicp_pos = pos(b"cICP").expect("cICP");
@@ -2443,17 +2010,9 @@ fn clli_zero_unknown_sentinel_roundtrips() {
     // encoder that does not yet know its peak values can emit a
     // placeholder cLLI and rewrite the value when the stream ends.
     let img = rgba_2x2();
-    let clli = Clli {
-        max_content_light_level: 0,
-        max_frame_average_light_level: 0,
-    };
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            clli: Some(clli),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let clli = Clli::new(0, 0);
+    let opts = PngEncoderOptions::default()
+        .with_metadata(Some(PngMetadata::default().with_clli(Some(clli))));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.clli, Some(clli));
@@ -2465,33 +2024,28 @@ fn clli_zero_unknown_sentinel_roundtrips() {
 /// (red, green, blue, white). Stride matches `3 * width` since the data
 /// is tightly packed.
 fn rgb24_4x1() -> PngImage {
-    PngImage {
-        width: 4,
-        height: 1,
-        pixel_format: PngPixelFormat::Rgb24,
-        stride: 12,
-        data: vec![
-            255, 0, 0, // red
-            0, 255, 0, // green
-            0, 0, 255, // blue
-            255, 255, 255, // white
-        ],
-        palette: Vec::new(),
-    }
+    PngImage::new(
+        4,
+        1,
+        PngPixelFormat::Rgb24,
+        12,
+        vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255],
+    )
+    .with_palette(Vec::new())
 }
 
 /// Helper: build a 2×1 `Gray16Le` image. `Gray16Le` per [`PngPixelFormat`]
 /// stores each sample as two little-endian bytes; the encoder swaps them
 /// to big-endian when packing the IDAT.
 fn gray16le_2x1() -> PngImage {
-    PngImage {
-        width: 2,
-        height: 1,
-        pixel_format: PngPixelFormat::Gray16Le,
-        stride: 4,
-        data: vec![0x00, 0x10, 0xFF, 0x80],
-        palette: Vec::new(),
-    }
+    PngImage::new(
+        2,
+        1,
+        PngPixelFormat::Gray16Le,
+        4,
+        vec![0x00, 0x10, 0xFF, 0x80],
+    )
+    .with_palette(Vec::new())
 }
 
 #[test]
@@ -2499,13 +2053,9 @@ fn trns_gray_keyed_sample_roundtrips_through_encoder() {
     // ct=0, 8-bit: encode a grayscale image with a keyed-sample tRNS,
     // re-parse, expect the same Trns::Grayscale(v) back.
     let img = gray8_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            trns: Some(Trns::Grayscale(64)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_trns(Some(Trns::Grayscale(64))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.trns, Some(Trns::Grayscale(64)));
@@ -2519,13 +2069,9 @@ fn trns_gray_keyed_sample_roundtrips_through_encoder() {
 fn trns_rgb_keyed_sample_roundtrips_through_encoder() {
     // ct=2, 8-bit: a keyed RGB triple round-trips byte-for-byte.
     let img = rgb24_4x1();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            trns: Some(Trns::Rgb(255, 0, 0)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_trns(Some(Trns::Rgb(255, 0, 0))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.trns, Some(Trns::Rgb(255, 0, 0)));
@@ -2541,13 +2087,9 @@ fn trns_gray16_keyed_sample_preserves_both_bytes() {
     // byte and decide that 0x0002 is also transparent." The encoder must
     // store both bytes; the parse path returns them unchanged.
     let img = gray16le_2x1();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            trns: Some(Trns::Grayscale(0x0001)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_trns(Some(Trns::Grayscale(0x0001))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.trns, Some(Trns::Grayscale(0x0001)));
@@ -2565,13 +2107,9 @@ fn trns_palette_table_routed_via_metadata_round_trips() {
     // RGB entries; pal8_4x1 already does that.
     assert_eq!(img.palette.len(), 12);
     let alphas = vec![0, 128, 255, 200];
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            trns: Some(Trns::Palette(alphas.clone())),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_trns(Some(Trns::Palette(alphas.clone()))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.trns, Some(Trns::Palette(alphas.clone())));
@@ -2593,13 +2131,9 @@ fn trns_two_sources_reject_to_avoid_duplicate_chunk() {
     // a tRNS chunk and the file would end up non-conforming.
     let mut img = pal8_4x1();
     img.palette.extend_from_slice(&[0, 0]); // palette tail = 2-byte tRNS
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            trns: Some(Trns::Palette(vec![0, 0, 0, 0])),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_trns(Some(Trns::Palette(vec![0, 0, 0, 0]))),
+    ));
     let err = encode_png_image_with_options(&img, &opts).expect_err("must fail");
     let msg = format!("{err:?}");
     assert!(
@@ -2613,13 +2147,9 @@ fn trns_variant_mismatching_colour_type_rejected_by_encoder() {
     // Asking the encoder to emit a Trns::Rgb on a Gray8 image must fail
     // — the resulting on-wire chunk would not parse.
     let img = gray8_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            trns: Some(Trns::Rgb(0, 0, 0)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_trns(Some(Trns::Rgb(0, 0, 0))),
+    ));
     let err = encode_png_image_with_options(&img, &opts).expect_err("must fail");
     let msg = format!("{err:?}");
     assert!(
@@ -2633,13 +2163,9 @@ fn trns_gray_sample_beyond_bit_depth_rejected_by_encoder() {
     // 8-bit grayscale ⇒ key sample cap is 255. Asking for 256 is
     // structurally impossible (u16 fits but the IHDR width says no).
     let img = gray8_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            trns: Some(Trns::Grayscale(256)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_trns(Some(Trns::Grayscale(256))),
+    ));
     let err = encode_png_image_with_options(&img, &opts).expect_err("must fail");
     let msg = format!("{err:?}");
     assert!(msg.contains("256") || msg.contains("exceeds"), "got {msg}");
@@ -2651,13 +2177,9 @@ fn trns_chunk_lands_after_plte_in_encoded_stream() {
     // with both PLTE and tRNS in the same metadata round-trip must have
     // PLTE before tRNS before IDAT in the resulting wire bytes.
     let img = pal8_4x1();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            trns: Some(Trns::Palette(vec![0, 0])),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_trns(Some(Trns::Palette(vec![0, 0]))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     let plte_pos = bytes.windows(4).position(|w| w == b"PLTE").expect("PLTE");
     let trns_pos = bytes.windows(4).position(|w| w == b"tRNS").expect("tRNS");
@@ -2671,13 +2193,9 @@ fn trns_decoder_rejects_duplicate_chunk() {
     // §5.6 Table 1: tRNS is "Multiple OK? No". An attacker-crafted file
     // with two tRNS chunks must be rejected by parse_metadata.
     let img = gray8_2x2();
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            trns: Some(Trns::Grayscale(64)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_trns(Some(Trns::Grayscale(64))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
     // Splice a second tRNS chunk in just after the legitimate one.
     let trns_pos = bytes.windows(4).position(|w| w == b"tRNS").expect("tRNS");

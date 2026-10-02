@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **API shape (0.2.0): every public struct with public fields is now
+  `#[non_exhaustive]`**, so future fields never force another major
+  bump. Fields remain public for reading; construction moves to
+  constructors (all additive):
+  - Options / builders (`Default` + `with_<field>`; `Option` fields
+    take `impl Into<Option<T>>`): `PngEncoderOptions` (`with_interlace`,
+    `with_metadata`, `with_bit_depth`, `with_filter_strategy`,
+    `with_compression_level`), `PngMetadata` (`with_<chunk>` for each
+    of the 14 optional records + `with_splt` / `with_texts` /
+    `with_ztxts` / `with_itxts` / `with_unknowns`), `GammaParams`
+    (`with_file_gamma` / `with_display_exponent` / `with_user_exponent`).
+  - Image records (`new(required…)` + setters): `PngImage::new(width,
+    height, pixel_format, stride, data)` + `with_palette`,
+    `RgbaBitmap::new`, `ApngImage::new`, `ApngFrameImage::new`,
+    `ApngFrameSpec::new(image)` + `with_x_offset` / `with_y_offset` /
+    `with_delay_num` / `with_delay_den` / `with_dispose_op` /
+    `with_blend_op` (alongside the existing `full_canvas`).
+  - Wire records (`new` in wire order): `Ihdr::new(width, height,
+    bit_depth, colour_type)` + `with_compression` / `with_filter` /
+    `with_interlace`; `Actl::new`; `Fctl::new(sequence_number, width,
+    height)` + `with_offset` / `with_delay` / `with_dispose_op` /
+    `with_blend_op`; `SeqChunk::new`; `ChunkRef::new`; `ApngInfo::new`;
+    `ApngFrame::new`; `Phys::new`, `Time::new`, `Hist::new`,
+    `Exif::new`, `Srgb::new`, `Cicp::new`, `Gama::new`,
+    `Chrm::new(white, red, green, blue)` (each an `(x, y)` pair),
+    `Mdcv::new([r, g, b], white, max_luminance, min_luminance)`,
+    `Clli::new`, `SpltEntry::new`, `Splt::new`, `Text::new`,
+    `Ztxt::new`, `Iccp::new`, `Itxt::new(keyword, text)` +
+    `with_compressed` / `with_language_tag` / `with_translated_keyword`,
+    `UnknownChunk::new`.
+- **`#[non_exhaustive]` enums**: `PngError` (error classes grow),
+  `FilterStrategy` (new policies are expected), `PngPixelFormat` (the
+  decoder's output layouts are a crate choice, not a spec list),
+  `ColourSource` (the colour-chunk precedence list follows the spec's
+  colour chunks). Enums the PNG specification closes stay exhaustive:
+  `FilterType` (filter method 0's five filters), `ColourType` (five
+  colour types), `ApngDisposal` / `ApngBlend` (fcTL operators),
+  `PhysUnit`, `RenderingIntent`, and the per-colour-type `Sbit` /
+  `Bkgd` / `Trns` forms.
+- Migration: struct literals and struct-update syntax
+  (`..Default::default()`) on these types no longer compile from
+  outside the crate — replace with the constructors above; exhaustive
+  `match`es on the four enums need a `_` arm. `cargo semver-checks`
+  reports exactly these two lint classes (`struct_marked_non_exhaustive`
+  × 33, `enum_marked_non_exhaustive` × 3) and nothing else.
+
 - **Default DEFLATE level is now 2** (`DEFAULT_COMPRESSION_LEVEL`, a
   new public constant) instead of 6. Chosen by measurement on a 12 MP
   RGB24 photograph, `Adaptive` filter, one thread: level 1 0.35 s /

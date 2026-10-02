@@ -13,6 +13,7 @@
 /// types so the [`crate::registry`] conversion layer is a 1:1
 /// match-and-rebuild rather than a re-pack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PngPixelFormat {
     /// 8-bit grayscale, 1 byte per pixel.
     Gray8,
@@ -54,6 +55,7 @@ impl PngPixelFormat {
 /// (`Pal8`), `palette` carries the source `PLTE` bytes followed by the
 /// optional `tRNS` bytes.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct PngImage {
     /// Image width in pixels.
     pub width: u32,
@@ -74,6 +76,30 @@ pub struct PngImage {
 }
 
 impl PngImage {
+    /// Wrap a pixel buffer (`stride × height` bytes, `stride ≥ width × bytes_per_pixel`) with no palette; `with_palette` attaches the `PLTE || tRNS` bytes a `Pal8` image needs.
+    pub fn new(
+        width: u32,
+        height: u32,
+        pixel_format: PngPixelFormat,
+        stride: usize,
+        data: Vec<u8>,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            pixel_format,
+            stride,
+            data,
+            palette: Vec::new(),
+        }
+    }
+
+    /// Attach the `PLTE` bytes (RGB triples) optionally followed by `tRNS` alpha bytes, for `Pal8` images.
+    pub fn with_palette(mut self, palette: Vec<u8>) -> Self {
+        self.palette = palette;
+        self
+    }
+
     /// Number of bytes per pixel for [`Self::pixel_format`].
     pub fn bytes_per_pixel(&self) -> usize {
         self.pixel_format.bytes_per_pixel()
@@ -83,6 +109,7 @@ impl PngImage {
 /// Decoded animated PNG (APNG): one [`PngImage`] per frame plus a
 /// per-frame delay in centiseconds (1/100 s — APNG's native unit).
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct ApngImage {
     /// Canvas width in pixels.
     pub width: u32,
@@ -98,13 +125,40 @@ pub struct ApngImage {
     pub num_plays: u32,
 }
 
+impl ApngImage {
+    /// Assemble an animation from its canvas geometry, frames and loop count (`0` = forever).
+    pub fn new(
+        width: u32,
+        height: u32,
+        pixel_format: PngPixelFormat,
+        frames: Vec<ApngFrameImage>,
+        num_plays: u32,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            pixel_format,
+            frames,
+            num_plays,
+        }
+    }
+}
+
 /// One composited APNG animation frame.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct ApngFrameImage {
     /// Composited canvas at this animation step.
     pub image: PngImage,
     /// Frame display duration in centiseconds (1/100 s).
     pub delay_cs: u32,
+}
+
+impl ApngFrameImage {
+    /// Pair a composited frame with its display delay in centiseconds.
+    pub fn new(image: PngImage, delay_cs: u32) -> Self {
+        Self { image, delay_cs }
+    }
 }
 
 /// 8-bit-per-channel RGBA bitmap returned by
@@ -115,6 +169,7 @@ pub struct ApngFrameImage {
 /// (`Gray8` / `Gray16Le` / `Rgb24` / `Rgb48Le` without `tRNS`) are
 /// promoted to RGBA with `α = 255`.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct RgbaBitmap {
     /// Image width in pixels.
     pub width: u32,
@@ -125,6 +180,15 @@ pub struct RgbaBitmap {
 }
 
 impl RgbaBitmap {
+    /// Wrap a tightly packed `width × height × 4` RGBA buffer.
+    pub fn new(width: u32, height: u32, data: Vec<u8>) -> Self {
+        Self {
+            width,
+            height,
+            data,
+        }
+    }
+
     /// Stride (bytes per row) — always `width * 4`.
     pub fn stride(&self) -> usize {
         self.width as usize * 4

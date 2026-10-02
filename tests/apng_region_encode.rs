@@ -21,14 +21,7 @@ fn solid_rgba(w: u32, h: u32, rgba: [u8; 4]) -> PngImage {
     for px in data.chunks_exact_mut(4) {
         px.copy_from_slice(&rgba);
     }
-    PngImage {
-        width: w,
-        height: h,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: w as usize * 4,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(w, h, PngPixelFormat::Rgba, w as usize * 4, data).with_palette(Vec::new())
 }
 
 /// Read the canvas pixel at (x, y) from a composited RGBA frame.
@@ -45,24 +38,20 @@ fn region_frames_no_default_first_frame_is_default() {
     let w = 4u32;
     let h = 4u32;
     let f0 = ApngFrameSpec::full_canvas(solid_rgba(w, h, [255, 0, 0, 255]), 10);
-    let f1 = ApngFrameSpec {
-        image: solid_rgba(2, 2, [0, 255, 0, 255]),
-        x_offset: 1,
-        y_offset: 1,
-        delay_num: 5,
-        delay_den: 100,
-        dispose_op: ApngDisposal::None,
-        blend_op: ApngBlend::Source,
-    };
-    let f2 = ApngFrameSpec {
-        image: solid_rgba(1, 1, [0, 0, 255, 255]),
-        x_offset: 0,
-        y_offset: 0,
-        delay_num: 1,
-        delay_den: 100,
-        dispose_op: ApngDisposal::None,
-        blend_op: ApngBlend::Source,
-    };
+    let f1 = ApngFrameSpec::new(solid_rgba(2, 2, [0, 255, 0, 255]))
+        .with_x_offset(1)
+        .with_y_offset(1)
+        .with_delay_num(5)
+        .with_delay_den(100)
+        .with_dispose_op(ApngDisposal::None)
+        .with_blend_op(ApngBlend::Source);
+    let f2 = ApngFrameSpec::new(solid_rgba(1, 1, [0, 0, 255, 255]))
+        .with_x_offset(0)
+        .with_y_offset(0)
+        .with_delay_num(1)
+        .with_delay_den(100)
+        .with_dispose_op(ApngDisposal::None)
+        .with_blend_op(ApngBlend::Source);
 
     let bytes = encode_apng_frames(w, h, None, &[f0, f1, f2], 0).expect("encode");
     let anim = decode_apng(&bytes).expect("decode");
@@ -133,24 +122,20 @@ fn region_frame_background_disposal_clears_region() {
     let w = 4u32;
     let h = 4u32;
     let f0 = ApngFrameSpec::full_canvas(solid_rgba(w, h, [255, 0, 0, 255]), 10);
-    let f1 = ApngFrameSpec {
-        image: solid_rgba(2, 2, [0, 255, 0, 255]),
-        x_offset: 1,
-        y_offset: 1,
-        delay_num: 10,
-        delay_den: 100,
-        dispose_op: ApngDisposal::Background,
-        blend_op: ApngBlend::Source,
-    };
-    let f2 = ApngFrameSpec {
-        image: solid_rgba(1, 1, [0, 0, 255, 255]),
-        x_offset: 0,
-        y_offset: 0,
-        delay_num: 10,
-        delay_den: 100,
-        dispose_op: ApngDisposal::None,
-        blend_op: ApngBlend::Source,
-    };
+    let f1 = ApngFrameSpec::new(solid_rgba(2, 2, [0, 255, 0, 255]))
+        .with_x_offset(1)
+        .with_y_offset(1)
+        .with_delay_num(10)
+        .with_delay_den(100)
+        .with_dispose_op(ApngDisposal::Background)
+        .with_blend_op(ApngBlend::Source);
+    let f2 = ApngFrameSpec::new(solid_rgba(1, 1, [0, 0, 255, 255]))
+        .with_x_offset(0)
+        .with_y_offset(0)
+        .with_delay_num(10)
+        .with_delay_den(100)
+        .with_dispose_op(ApngDisposal::None)
+        .with_blend_op(ApngBlend::Source);
 
     let bytes = encode_apng_frames(w, h, None, &[f0, f1, f2], 0).expect("encode");
     let anim = decode_apng(&bytes).expect("decode");
@@ -171,15 +156,13 @@ fn region_frame_over_blend_composites_alpha() {
     let w = 2u32;
     let h = 2u32;
     let f0 = ApngFrameSpec::full_canvas(solid_rgba(w, h, [255, 255, 255, 255]), 10);
-    let f1 = ApngFrameSpec {
-        image: solid_rgba(2, 2, [0, 0, 0, 128]),
-        x_offset: 0,
-        y_offset: 0,
-        delay_num: 10,
-        delay_den: 100,
-        dispose_op: ApngDisposal::None,
-        blend_op: ApngBlend::Over,
-    };
+    let f1 = ApngFrameSpec::new(solid_rgba(2, 2, [0, 0, 0, 128]))
+        .with_x_offset(0)
+        .with_y_offset(0)
+        .with_delay_num(10)
+        .with_delay_den(100)
+        .with_dispose_op(ApngDisposal::None)
+        .with_blend_op(ApngBlend::Over);
 
     let bytes = encode_apng_frames(w, h, None, &[f0, f1], 0).expect("encode");
     let anim = decode_apng(&bytes).expect("decode");
@@ -199,15 +182,13 @@ fn region_frame_rational_delay_preserved() {
     // delay_num=1, delay_den=30 → 1/30 s ≈ 3.33 cs → centiseconds floor 3.
     let w = 2u32;
     let h = 2u32;
-    let f0 = ApngFrameSpec {
-        image: solid_rgba(w, h, [10, 20, 30, 255]),
-        x_offset: 0,
-        y_offset: 0,
-        delay_num: 1,
-        delay_den: 30,
-        dispose_op: ApngDisposal::None,
-        blend_op: ApngBlend::Source,
-    };
+    let f0 = ApngFrameSpec::new(solid_rgba(w, h, [10, 20, 30, 255]))
+        .with_x_offset(0)
+        .with_y_offset(0)
+        .with_delay_num(1)
+        .with_delay_den(30)
+        .with_dispose_op(ApngDisposal::None)
+        .with_blend_op(ApngBlend::Source);
     let bytes = encode_apng_frames(w, h, None, &[f0], 1).expect("encode");
     let anim = decode_apng(&bytes).expect("decode");
     // 100/30 = 3.33 → 3, decoder applies .max(1) so stays 3.
@@ -220,15 +201,13 @@ fn region_frame_out_of_canvas_is_rejected() {
     let h = 4u32;
     // A 2x2 frame at offset (3,3) → right edge 5 > 4: out of canvas.
     let f0 = ApngFrameSpec::full_canvas(solid_rgba(w, h, [1, 2, 3, 255]), 10);
-    let bad = ApngFrameSpec {
-        image: solid_rgba(2, 2, [0, 0, 0, 255]),
-        x_offset: 3,
-        y_offset: 3,
-        delay_num: 10,
-        delay_den: 100,
-        dispose_op: ApngDisposal::None,
-        blend_op: ApngBlend::Source,
-    };
+    let bad = ApngFrameSpec::new(solid_rgba(2, 2, [0, 0, 0, 255]))
+        .with_x_offset(3)
+        .with_y_offset(3)
+        .with_delay_num(10)
+        .with_delay_den(100)
+        .with_dispose_op(ApngDisposal::None)
+        .with_blend_op(ApngBlend::Source);
     let err = encode_apng_frames(w, h, None, &[f0, bad], 0).unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("exceeds canvas"), "got: {msg}");
@@ -240,15 +219,13 @@ fn region_frame_partial_first_frame_without_default_is_rejected() {
     // canvas → the IDAT could not be a complete default image.
     let w = 4u32;
     let h = 4u32;
-    let f0 = ApngFrameSpec {
-        image: solid_rgba(2, 2, [0, 0, 0, 255]),
-        x_offset: 0,
-        y_offset: 0,
-        delay_num: 10,
-        delay_den: 100,
-        dispose_op: ApngDisposal::None,
-        blend_op: ApngBlend::Source,
-    };
+    let f0 = ApngFrameSpec::new(solid_rgba(2, 2, [0, 0, 0, 255]))
+        .with_x_offset(0)
+        .with_y_offset(0)
+        .with_delay_num(10)
+        .with_delay_den(100)
+        .with_dispose_op(ApngDisposal::None)
+        .with_blend_op(ApngBlend::Source);
     let err = encode_apng_frames(w, h, None, &[f0], 0).unwrap_err();
     assert!(format!("{err}").contains("full canvas"));
 }
@@ -261,15 +238,13 @@ fn region_first_frame_nonzero_offset_without_default_is_rejected() {
     // message (rather than an opaque region-bounds failure).
     let w = 4u32;
     let h = 4u32;
-    let f0 = ApngFrameSpec {
-        image: solid_rgba(w, h, [1, 2, 3, 255]),
-        x_offset: 1,
-        y_offset: 0,
-        delay_num: 10,
-        delay_den: 100,
-        dispose_op: ApngDisposal::None,
-        blend_op: ApngBlend::Source,
-    };
+    let f0 = ApngFrameSpec::new(solid_rgba(w, h, [1, 2, 3, 255]))
+        .with_x_offset(1)
+        .with_y_offset(0)
+        .with_delay_num(10)
+        .with_delay_den(100)
+        .with_dispose_op(ApngDisposal::None)
+        .with_blend_op(ApngBlend::Source);
     let err = encode_apng_frames(w, h, None, &[f0], 0).unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("offset (0, 0)"), "got: {msg}");
@@ -293,10 +268,7 @@ fn region_frames_interlaced_roundtrip() {
     let h = 8u32;
     let f0 = ApngFrameSpec::full_canvas(solid_rgba(w, h, [200, 100, 50, 255]), 10);
     let f1 = ApngFrameSpec::full_canvas(solid_rgba(w, h, [50, 100, 200, 255]), 10);
-    let opts = PngEncoderOptions {
-        interlace: true,
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_interlace(true);
     let bytes = encode_apng_frames_with_options(w, h, None, &[f0, f1], 0, &opts)
         .expect("encode interlaced");
     let anim = decode_apng(&bytes).expect("decode");

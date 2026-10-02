@@ -19,14 +19,7 @@ use oxideav_png::{decode_png_to_rgba, encode_png_image, PngImage, PngPixelFormat
 
 fn make(w: u32, h: u32, pf: PngPixelFormat, data: Vec<u8>, palette: Vec<u8>) -> PngImage {
     let bpp = pf.bytes_per_pixel();
-    PngImage {
-        width: w,
-        height: h,
-        pixel_format: pf,
-        stride: w as usize * bpp,
-        data,
-        palette,
-    }
+    PngImage::new(w, h, pf, w as usize * bpp, data).with_palette(palette)
 }
 
 #[test]

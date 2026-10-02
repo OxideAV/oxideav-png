@@ -22,14 +22,7 @@ fn png16(format: PngPixelFormat, w: u32, h: u32, samples: &[u16]) -> PngImage {
     }
     let bpp = format.bytes_per_pixel();
     assert_eq!(data.len(), w as usize * h as usize * bpp);
-    PngImage {
-        width: w,
-        height: h,
-        pixel_format: format,
-        stride: w as usize * bpp,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(w, h, format, w as usize * bpp, data).with_palette(Vec::new())
 }
 
 fn gradient16(w: u32, h: u32, samples_per_px: usize) -> Vec<u16> {
@@ -151,14 +144,8 @@ fn eight_bit_decode_is_returned_unchanged() {
     // An 8-bit source never enters the 16->8 reduction path.
     let w = 4u32;
     let data: Vec<u8> = (0..(w * 3) as u8).collect();
-    let src = PngImage {
-        width: w,
-        height: 1,
-        pixel_format: PngPixelFormat::Rgb24,
-        stride: (w * 3) as usize,
-        data,
-        palette: Vec::new(),
-    };
+    let src =
+        PngImage::new(w, 1, PngPixelFormat::Rgb24, (w * 3) as usize, data).with_palette(Vec::new());
     let bytes = encode_png_image(&src).expect("encode 8-bit");
     let decoded = decode_png(&bytes).expect("decode 8-bit");
     let out = rescale_16bit_to_8bit(&decoded);

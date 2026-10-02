@@ -89,15 +89,10 @@ fn adam7_rgb_8x8_matches_noninterlaced() {
     }
     let idat = compress_to_vec_zlib(&raw, 6);
 
-    let ihdr = Ihdr {
-        width: w as u32,
-        height: h as u32,
-        bit_depth: 8,
-        colour_type: 2, // RGB
-        compression: 0,
-        filter: 0,
-        interlace: 1, // Adam7
-    };
+    let ihdr = Ihdr::new(w as u32, h as u32, 8, 2)
+        .with_compression(0)
+        .with_filter(0)
+        .with_interlace(1);
     let png = build_png_file(&ihdr, &idat, None);
 
     let vf = decode_png_to_frame(&png, Some(0)).expect("adam7 decode");
@@ -161,15 +156,10 @@ fn indexed_2bit_16x16_unpacks_correctly() {
     }
     let idat = compress_to_vec_zlib(&raw, 6);
 
-    let ihdr = Ihdr {
-        width: w as u32,
-        height: h as u32,
-        bit_depth: 2,
-        colour_type: 3, // indexed
-        compression: 0,
-        filter: 0,
-        interlace: 0,
-    };
+    let ihdr = Ihdr::new(w as u32, h as u32, 2, 3)
+        .with_compression(0)
+        .with_filter(0)
+        .with_interlace(0);
     let png = build_png_file(&ihdr, &idat, Some(&palette));
 
     let vf = decode_png_to_frame(&png, Some(0)).expect("2-bit decode");
@@ -195,15 +185,10 @@ fn grayscale_4bit_scales_to_gray8() {
         }
     }
     let idat = compress_to_vec_zlib(&raw, 6);
-    let ihdr = Ihdr {
-        width: w as u32,
-        height: h as u32,
-        bit_depth: 4,
-        colour_type: 0,
-        compression: 0,
-        filter: 0,
-        interlace: 0,
-    };
+    let ihdr = Ihdr::new(w as u32, h as u32, 4, 0)
+        .with_compression(0)
+        .with_filter(0)
+        .with_interlace(0);
     let png = build_png_file(&ihdr, &idat, None);
     let vf = decode_png_to_frame(&png, Some(0)).expect("4-bit gray decode");
     let expected: Vec<u8> = src_vals.iter().map(|&v| v.wrapping_mul(17)).collect();

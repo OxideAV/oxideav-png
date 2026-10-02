@@ -14,6 +14,7 @@ use crate::error::{PngError as Error, Result};
 
 /// `acTL` — animation control chunk (8 bytes total).
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Actl {
     pub num_frames: u32,
     /// 0 → loop forever.
@@ -21,6 +22,14 @@ pub struct Actl {
 }
 
 impl Actl {
+    /// Build an `acTL` record from its two wire fields (`num_frames`, `num_plays`; `0` plays = loop forever).
+    pub fn new(num_frames: u32, num_plays: u32) -> Self {
+        Self {
+            num_frames,
+            num_plays,
+        }
+    }
+
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.len() != 8 {
             return Err(Error::invalid(format!(
@@ -64,6 +73,7 @@ pub enum Blend {
 
 /// `fcTL` — frame control chunk (26 bytes payload).
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Fctl {
     pub sequence_number: u32,
     pub width: u32,
@@ -77,6 +87,51 @@ pub struct Fctl {
 }
 
 impl Fctl {
+    /// Build an `fcTL` record for a `width × height` frame at offset
+    /// (0, 0) with a zero delay (`delay_num = 0`, `delay_den = 100`),
+    /// `Disposal::None` and `Blend::Source`; chain the `with_*` setters
+    /// for the remaining wire fields (W3C PNG3 §11.3.6.1).
+    pub fn new(sequence_number: u32, width: u32, height: u32) -> Self {
+        Self {
+            sequence_number,
+            width,
+            height,
+            x_offset: 0,
+            y_offset: 0,
+            delay_num: 0,
+            delay_den: 100,
+            dispose_op: Disposal::None,
+            blend_op: Blend::Source,
+        }
+    }
+
+    /// Place the frame region at (`x_offset`, `y_offset`) on the canvas.
+    pub fn with_offset(mut self, x_offset: u32, y_offset: u32) -> Self {
+        self.x_offset = x_offset;
+        self.y_offset = y_offset;
+        self
+    }
+
+    /// Set the frame duration as the rational `delay_num / delay_den`
+    /// seconds (`delay_den = 0` means 100 per the spec).
+    pub fn with_delay(mut self, delay_num: u16, delay_den: u16) -> Self {
+        self.delay_num = delay_num;
+        self.delay_den = delay_den;
+        self
+    }
+
+    /// Set the disposal applied after the frame is shown.
+    pub fn with_dispose_op(mut self, dispose_op: Disposal) -> Self {
+        self.dispose_op = dispose_op;
+        self
+    }
+
+    /// Set how the frame blends onto the canvas.
+    pub fn with_blend_op(mut self, blend_op: Blend) -> Self {
+        self.blend_op = blend_op;
+        self
+    }
+
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.len() != 26 {
             return Err(Error::invalid(format!(
@@ -192,9 +247,20 @@ pub enum SeqKind {
 /// One entry in the APNG sequence stream: which chunk it was and the 4-byte
 /// sequence number it carried, presented in file order.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct SeqChunk {
     pub kind: SeqKind,
     pub sequence_number: u32,
+}
+
+impl SeqChunk {
+    /// Pair a sequence-numbered chunk kind with its number.
+    pub fn new(kind: SeqKind, sequence_number: u32) -> Self {
+        Self {
+            kind,
+            sequence_number,
+        }
+    }
 }
 
 /// Validate the shared `fcTL` / `fdAT` sequence-number stream against the

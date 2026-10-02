@@ -16,14 +16,7 @@ use oxideav_png::{
 };
 
 fn rgba_image(w: u32, h: u32, data: Vec<u8>) -> PngImage {
-    PngImage {
-        width: w,
-        height: h,
-        pixel_format: PngPixelFormat::Rgba,
-        stride: w as usize * 4,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(w, h, PngPixelFormat::Rgba, w as usize * 4, data).with_palette(Vec::new())
 }
 
 /// The §13.16 linear-light composite of `fg` over `bg` at 8-bit straight
@@ -71,13 +64,9 @@ fn default_grey_when_no_bkgd_and_no_override() {
 #[test]
 fn override_beats_bkgd_chunk() {
     let img = rgba_image(1, 1, vec![0, 0, 0, 0]); // one transparent pixel
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            bkgd: Some(Bkgd::Rgb(10, 20, 30)),
-            ..PngMetadata::default()
-        }),
-        ..PngEncoderOptions::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_bkgd(Some(Bkgd::Rgb(10, 20, 30))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
 
     let out = decode_png_over_background(&bytes, Some([200, 100, 50])).expect("decode");
@@ -91,13 +80,9 @@ fn override_beats_bkgd_chunk() {
 #[test]
 fn bkgd_rgb_chunk_composites_half_alpha() {
     let img = rgba_image(2, 1, vec![255, 255, 255, 128, 40, 60, 80, 255]);
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            bkgd: Some(Bkgd::Rgb(0, 0, 0)), // black background
-            ..PngMetadata::default()
-        }),
-        ..PngEncoderOptions::default()
-    };
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default().with_bkgd(Some(Bkgd::Rgb(0, 0, 0))),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
 
     let out = decode_png_over_background(&bytes, None).expect("decode");
@@ -127,22 +112,12 @@ fn bkgd_palette_index_composites_transparent_entry() {
 
     // Two-pixel indexed image: pixel0 = idx0 (opaque red), pixel1 = idx2
     // (transparent blue).
-    let img = PngImage {
-        width: 2,
-        height: 1,
-        pixel_format: PngPixelFormat::Pal8,
-        stride: 2,
-        data: vec![0, 2],
-        palette,
-    };
-    let opts = PngEncoderOptions {
-        metadata: Some(PngMetadata {
-            bkgd: Some(Bkgd::Palette(1)), // green background
-            trns: Some(trns),
-            ..PngMetadata::default()
-        }),
-        ..PngEncoderOptions::default()
-    };
+    let img = PngImage::new(2, 1, PngPixelFormat::Pal8, 2, vec![0, 2]).with_palette(palette);
+    let opts = PngEncoderOptions::default().with_metadata(Some(
+        PngMetadata::default()
+            .with_bkgd(Some(Bkgd::Palette(1)))
+            .with_trns(Some(trns)),
+    ));
     let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
 
     let out = decode_png_over_background(&bytes, None).expect("decode");

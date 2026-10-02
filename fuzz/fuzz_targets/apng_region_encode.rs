@@ -44,14 +44,14 @@ fuzz_target!(|data: &[u8]| {
     let specs: Vec<ApngFrameSpec> = plan
         .frames
         .iter()
-        .map(|fp| ApngFrameSpec {
-            image: solid_region(fp.w, fp.h, fp.seed),
-            x_offset: fp.x,
-            y_offset: fp.y,
-            delay_num: fp.delay_num,
-            delay_den: fp.delay_den,
-            dispose_op: dispose(fp.dispose),
-            blend_op: blend(fp.blend),
+        .map(|fp| {
+            ApngFrameSpec::new(solid_region(fp.w, fp.h, fp.seed))
+                .with_x_offset(fp.x)
+                .with_y_offset(fp.y)
+                .with_delay_num(fp.delay_num)
+                .with_delay_den(fp.delay_den)
+                .with_dispose_op(dispose(fp.dispose))
+                .with_blend_op(blend(fp.blend))
         })
         .collect();
 
@@ -62,10 +62,7 @@ fuzz_target!(|data: &[u8]| {
         None
     };
 
-    let opts = PngEncoderOptions {
-        interlace: plan.interlace,
-        ..Default::default()
-    };
+    let opts = PngEncoderOptions::default().with_interlace(plan.interlace);
 
     let result = encode_apng_frames_with_options(
         canvas_w,
@@ -122,14 +119,7 @@ fn solid_region(w: u32, h: u32, seed: u8) -> PngImage {
         data.push(b);
         data.push(a);
     }
-    PngImage {
-        width: w,
-        height: h,
-        pixel_format: PngPixelFormat::Rgba,
-        stride,
-        data,
-        palette: Vec::new(),
-    }
+    PngImage::new(w, h, PngPixelFormat::Rgba, stride, data).with_palette(Vec::new())
 }
 
 struct FramePlan {

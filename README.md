@@ -874,8 +874,45 @@ PNG_BENCH_THREADS=1,8 cargo bench -p oxideav-png --bench encode_12mp -- rgb24
 
 ```toml
 [dependencies]
-oxideav-png = "0.0"
+oxideav-png = "0.2"
 ```
+
+### Constructing options and records
+
+Every public struct with public fields — `PngEncoderOptions`,
+`PngImage`, `PngMetadata`, the per-chunk records (`Phys`, `Time`,
+`Cicp`, `Text`, …), `ApngFrameSpec`, `Ihdr`, the decoder's `ApngInfo`
+/ `ApngFrame` / `RgbaBitmap` / `ApngImage` — is `#[non_exhaustive]`,
+so a future field never forces a major version bump. Fields stay
+public for *reading* (`decoded.width`, `meta.gama`); construction goes
+through `Default` + `with_*` setters where a default makes sense, and
+`new(required…)` + `with_*` for the rest:
+
+```rust
+use oxideav_png::{
+    encode_png_image_with_options, FilterStrategy, FilterType, Gama, PngEncoderOptions,
+    PngImage, PngMetadata, PngPixelFormat, Text,
+};
+
+let image = PngImage::new(2, 1, PngPixelFormat::Rgb24, 6, vec![255, 0, 0, 0, 255, 0]);
+let meta = PngMetadata::default()
+    .with_gama(Gama::new(45_455))
+    .with_texts(vec![Text::new("Software".into(), "oxideav".into())]);
+let opts = PngEncoderOptions::default()
+    .with_compression_level(4)
+    .with_filter_strategy(FilterStrategy::Fixed(FilterType::Paeth))
+    .with_metadata(meta);
+let png = encode_png_image_with_options(&image, &opts)?;
+# Ok::<(), oxideav_png::PngError>(())
+```
+
+Setters for `Option` fields take `impl Into<Option<T>>`, so both
+`.with_bit_depth(4)` and `.with_bit_depth(None)` read naturally.
+`PngError`, `PngPixelFormat`, `FilterStrategy` and `ColourSource` are
+`#[non_exhaustive]` enums (match with a `_` arm); the on-wire enums the
+PNG specification closes — `FilterType`, `ColourType`, `ApngDisposal`,
+`ApngBlend`, `PhysUnit`, `RenderingIntent`, `Sbit`, `Bkgd`, `Trns` —
+stay exhaustive.
 
 ## License
 

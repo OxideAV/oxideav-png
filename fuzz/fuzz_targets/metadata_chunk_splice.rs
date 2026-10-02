@@ -161,27 +161,14 @@ impl Plan {
             // Grayscale 8-bit.
             0 => {
                 let data = vec![0x80u8; (W * H) as usize];
-                PngImage {
-                    width: W,
-                    height: H,
-                    pixel_format: PngPixelFormat::Gray8,
-                    stride: W as usize,
-                    data,
-                    palette: Vec::new(),
-                }
+                PngImage::new(W, H, PngPixelFormat::Gray8, W as usize, data)
+                    .with_palette(Vec::new())
             }
             // RGB 8-bit.
             1 => {
                 let stride = (W * 3) as usize;
                 let data = vec![0x40u8; stride * H as usize];
-                PngImage {
-                    width: W,
-                    height: H,
-                    pixel_format: PngPixelFormat::Rgb24,
-                    stride,
-                    data,
-                    palette: Vec::new(),
-                }
+                PngImage::new(W, H, PngPixelFormat::Rgb24, stride, data).with_palette(Vec::new())
             }
             // Palette 8-bit, 4-entry palette, all pixels index 0.
             _ => {
@@ -192,14 +179,7 @@ impl Plan {
                     0, 255, 0, // entry 2
                     0, 0, 255, // entry 3
                 ];
-                PngImage {
-                    width: W,
-                    height: H,
-                    pixel_format: PngPixelFormat::Pal8,
-                    stride: W as usize,
-                    data,
-                    palette,
-                }
+                PngImage::new(W, H, PngPixelFormat::Pal8, W as usize, data).with_palette(palette)
             }
         }
     }
