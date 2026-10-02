@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/OxideAV/oxideav-png/compare/v0.1.9...v0.2.0) - 2026-10-02
+
+### Other
+
+- demote parser plumbing out of the public API (hygiene re-audit)
+
 ## [0.1.9](https://github.com/OxideAV/oxideav-png/compare/v0.1.8...v0.1.9) - 2026-10-02
 
 ### Other
