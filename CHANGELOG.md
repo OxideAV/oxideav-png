@@ -95,7 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     bit_depth, colour_type)` + `with_compression` / `with_filter` /
     `with_interlace`; `Actl::new`; `Fctl::new(sequence_number, width,
     height)` + `with_offset` / `with_delay` / `with_dispose_op` /
-    `with_blend_op`; `SeqChunk::new`; `ChunkRef::new`; `ApngInfo::new`;
+    `with_blend_op`; `ApngInfo::new`;
     `ApngFrame::new`; `Phys::new`, `Time::new`, `Hist::new`,
     `Exif::new`, `Srgb::new`, `Cicp::new`, `Gama::new`,
     `Chrm::new(white, red, green, blue)` (each an `(x, y)` pair),
@@ -113,6 +113,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   colour types), `ApngDisposal` / `ApngBlend` (fcTL operators),
   `PhysUnit`, `RenderingIntent`, and the per-colour-type `Sbit` /
   `Bkgd` / `Trns` forms.
+- **Plumbing demoted out of the public API** (re-audit of the
+  `#[non_exhaustive]` pass: the attribute belongs on records a user
+  deliberately constructs or reads; parser-internal records do not
+  get it). `SeqKind` / `SeqChunk` / `validate_apng_sequence` /
+  `parse_fdat` / `build_fdat` (the `apng` module's sequence-number
+  walk) and the encoder's incremental `ChunkWriter` are now
+  `pub(crate)`; `ChunkRef` / `read_chunk` / `ChunkIter` (the raw
+  chunk walk behind `parse_metadata` / `parse_apng`) stay `pub` for
+  the signatures that need them but are `#[doc(hidden)]` and no longer
+  `#[non_exhaustive]` (`ChunkRef::new` removed with them). Everything
+  reachable through the documented API keeps its attribute: `Ihdr`,
+  `ApngInfo` / `ApngFrame` / `Actl` / `Fctl` (read through
+  `parse_apng`), `Hist` / `SpltEntry` / `UnknownChunk` (set or read
+  through `PngMetadata`) and `ColourSource` (returned by
+  `PngMetadata::colour_source`).
 - Migration: struct literals and struct-update syntax
   (`..Default::default()`) on these types no longer compile from
   outside the crate — replace with the constructors above; exhaustive

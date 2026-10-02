@@ -23,18 +23,13 @@ pub const MAX_CHUNK_LEN: u32 = 0x7FFF_FFFF;
 
 /// A parsed chunk borrowed from a larger buffer.
 #[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
+#[doc(hidden)]
 pub struct ChunkRef<'a> {
     pub chunk_type: [u8; 4],
     pub data: &'a [u8],
 }
 
 impl<'a> ChunkRef<'a> {
-    /// Borrow a chunk from its type and payload bytes.
-    pub fn new(chunk_type: [u8; 4], data: &'a [u8]) -> Self {
-        Self { chunk_type, data }
-    }
-
     pub fn type_str(&self) -> &str {
         std::str::from_utf8(&self.chunk_type).unwrap_or("????")
     }
@@ -339,6 +334,7 @@ impl ColourType {
 
 /// Read one chunk starting at `buf[pos..]`, verify its CRC32, and return
 /// the parsed `ChunkRef` + the updated position.
+#[doc(hidden)]
 pub fn read_chunk<'a>(buf: &'a [u8], pos: usize) -> Result<(ChunkRef<'a>, usize)> {
     if pos + 8 > buf.len() {
         return Err(Error::invalid("PNG: truncated chunk header"));
@@ -404,8 +400,7 @@ pub fn write_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
 /// the 4-byte length (an error if the data exceeds the RFC 2083 §3.2
 /// `2^31 - 1` limit) and appends the CRC. Dropping a writer without
 /// `finish` leaves a malformed chunk, so callers always finish.
-#[doc(hidden)]
-pub struct ChunkWriter<'a> {
+pub(crate) struct ChunkWriter<'a> {
     out: &'a mut Vec<u8>,
     len_pos: usize,
     crc: u32,
@@ -413,7 +408,7 @@ pub struct ChunkWriter<'a> {
 
 impl<'a> ChunkWriter<'a> {
     /// Open a chunk of type `chunk_type` at the end of `out`.
-    pub fn begin(out: &'a mut Vec<u8>, chunk_type: &[u8; 4]) -> Self {
+    pub(crate) fn begin(out: &'a mut Vec<u8>, chunk_type: &[u8; 4]) -> Self {
         let len_pos = out.len();
         out.extend_from_slice(&[0, 0, 0, 0]);
         out.extend_from_slice(chunk_type);
@@ -422,18 +417,18 @@ impl<'a> ChunkWriter<'a> {
     }
 
     /// Append `data` to the chunk's data portion.
-    pub fn write(&mut self, data: &[u8]) {
+    pub(crate) fn write(&mut self, data: &[u8]) {
         self.out.extend_from_slice(data);
         self.crc = crc32_update(self.crc, data);
     }
 
     /// Bytes of data written so far.
-    pub fn data_len(&self) -> usize {
+    pub(crate) fn data_len(&self) -> usize {
         self.out.len() - self.len_pos - 8
     }
 
     /// Patch the length and append the CRC.
-    pub fn finish(self) -> Result<()> {
+    pub(crate) fn finish(self) -> Result<()> {
         let len = self.data_len();
         if len > MAX_CHUNK_LEN as usize {
             return Err(Error::invalid(format!(
@@ -448,6 +443,7 @@ impl<'a> ChunkWriter<'a> {
 }
 
 /// Iterator over chunks in a PNG file buffer (starting after the magic).
+#[doc(hidden)]
 pub struct ChunkIter<'a> {
     buf: &'a [u8],
     pos: usize,

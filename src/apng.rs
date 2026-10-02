@@ -237,7 +237,7 @@ impl Fctl {
 /// `fdAT` draw from the single shared sequence per W3C PNG 3rd Edition §4.9.2
 /// ("Both chunk types share the sequence.").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SeqKind {
+pub(crate) enum SeqKind {
     /// An `fcTL` chunk.
     Fctl,
     /// An `fdAT` chunk.
@@ -247,20 +247,9 @@ pub enum SeqKind {
 /// One entry in the APNG sequence stream: which chunk it was and the 4-byte
 /// sequence number it carried, presented in file order.
 #[derive(Clone, Copy, Debug)]
-#[non_exhaustive]
-pub struct SeqChunk {
-    pub kind: SeqKind,
-    pub sequence_number: u32,
-}
-
-impl SeqChunk {
-    /// Pair a sequence-numbered chunk kind with its number.
-    pub fn new(kind: SeqKind, sequence_number: u32) -> Self {
-        Self {
-            kind,
-            sequence_number,
-        }
-    }
+pub(crate) struct SeqChunk {
+    pub(crate) kind: SeqKind,
+    pub(crate) sequence_number: u32,
 }
 
 /// Validate the shared `fcTL` / `fdAT` sequence-number stream against the
@@ -285,7 +274,7 @@ impl SeqChunk {
 /// An empty stream (no `fcTL` at all) is *not* an APNG by this function's
 /// contract and is accepted here — the caller has already established animation
 /// via the presence of `acTL`, and the no-frame case is rejected upstream.
-pub fn validate_apng_sequence(entries: &[SeqChunk]) -> Result<()> {
+pub(crate) fn validate_apng_sequence(entries: &[SeqChunk]) -> Result<()> {
     let Some(first) = entries.first() else {
         return Ok(());
     };
@@ -325,7 +314,7 @@ pub fn validate_apng_sequence(entries: &[SeqChunk]) -> Result<()> {
 /// Parse a single `fdAT` chunk. Returns `(sequence_number, compressed_bytes)`.
 /// The first 4 bytes are a sequence number; the rest is raw IDAT-equivalent
 /// compressed data.
-pub fn parse_fdat(data: &[u8]) -> Result<(u32, &[u8])> {
+pub(crate) fn parse_fdat(data: &[u8]) -> Result<(u32, &[u8])> {
     if data.len() < 4 {
         return Err(Error::invalid("PNG fdAT: too short for sequence number"));
     }
@@ -334,7 +323,7 @@ pub fn parse_fdat(data: &[u8]) -> Result<(u32, &[u8])> {
 }
 
 /// Build an `fdAT` chunk payload (sequence_number + compressed data).
-pub fn build_fdat(seq: u32, compressed: &[u8]) -> Vec<u8> {
+pub(crate) fn build_fdat(seq: u32, compressed: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + compressed.len());
     out.extend_from_slice(&seq.to_be_bytes());
     out.extend_from_slice(compressed);
