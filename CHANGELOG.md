@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Image-crate API contract (`IMAGE_CRATE_API`, breaking).** The root
+  now exposes the vocabulary every OxideAV image crate shares: `probe`,
+  `info` → `ImageInfo`, `decode` / `decode_with(&DecodeOptions)`,
+  `decode_rgb8` → `RgbImage`, `decode_rgba8` → `RgbaImage`,
+  `decode_all` → `Vec<Frame>` (APNG), `decode_from<R: Read>`,
+  `encode(&PngImage, &EncodeOptions)`, `encode_rgb8` / `encode_rgba8`,
+  `encode_to<W: Write>`; `PixelFormat` / `Error` aliases.
+- `PngImage` is reshaped to the contract's image type: `width`,
+  `height`, `format: PixelFormat`, `planes: Vec<Plane>` (one packed
+  plane), `color: ColorInfo`, `metadata: Metadata`, `palette:
+  Option<Palette>` (RGBA entries, built from `PLTE` + `tRNS`), plus
+  PNG's keyed `transparency: Option<Trns>`; constructors `new` /
+  `packed` / `from_rgb8` / `from_rgba8` and `width()` / `height()` /
+  `format()` / `stride()` / `as_bytes()` / `into_raw()` / `to_rgb8()` /
+  `to_rgba8()`. The old `pixel_format` / `stride` / `data` fields and
+  the `PLTE || tRNS` palette blob are gone; `PngImage::new` now takes
+  `(width, height, format, planes)`.
+- `decode` fills `color` (W3C PNG3 §4.3 Table 1 precedence: `cICP` >
+  `iCCP` > `sRGB` > `cHRM` / `gAMA`) and `metadata` (`iCCP`, `eXIf`,
+  XMP `iTXt`, `gAMA`); `encode` writes them back (`sRGB` / `cICP`,
+  `iCCP`, `eXIf`, XMP, `gAMA`, `tRNS`) unless `EncodeOptions::metadata`
+  names the chunk; `decode(encode(img)) == img` is pinned.
+- `DecodeOptions`: `max_width` / `max_height` / `max_pixels` /
+  `max_bytes` (default 1 GiB of decoded plane) checked against the
+  header before any allocation (`PngError::LimitExceeded`), and
+  `strict` (ancillary colour / metadata chunks must parse, be unique
+  and respect §5.6 Table 7 ordering; lenient mode drops them).
+- `PngError` gains `LimitExceeded(String)` and `Io(std::io::Error)`;
+  `Error` is its alias.
+- `EncodeOptions` (renamed from `PngEncoderOptions`) gains `threads`
+  (`with_threads`) and `with_level`.
+- `Pal8` encode writes `PLTE` from every palette entry and `tRNS` up to
+  the last non-opaque entry (previously the `PLTE` length was guessed
+  from the highest index used).
+- APNG frames from `decode_apng` / `decode_all` carry the palette,
+  keyed transparency, colour and metadata of the stream;
+  `ApngFrameImage` gains an exact `delay: Duration`; `ApngInfo` gains
+  `color` / `metadata`.
+- `registry`: `From<PngImage> for VideoFrame` (plane + palette /
+  colour-signal side-channels), `PngImage::from_video_frame` /
+  `TryFrom<(&VideoFrame, &CodecParameters)>`, `to_core_pixel_format`,
+  `to_color_signal` / `from_color_signal`; the trait `Decoder` /
+  `Encoder` call the standalone functions. `PngError::LimitExceeded`
+  maps to `oxideav_core::Error::ResourceExhausted`.
+- Tests that exercise the framework path are `#![cfg(feature =
+  "registry")]`; CI's `ci-standalone` job now runs
+  `cargo test --no-default-features`. The `decode` fuzz target covers
+  `probe` / `info` / `decode_with` / `decode_rgb8` / `decode_all`.
+
+### Deprecated
+
+- `decode_png` → `decode`; `decode_png_to_rgba` → `decode_rgba8`;
+  `decode_png_over_background` → `decode_over_background`;
+  `encode_png_image` / `encode_png_image_with_options` → `encode`;
+  `encode_png_image_threaded` → `encode` with
+  `EncodeOptions::with_threads`; `PngEncoderOptions` → `EncodeOptions`;
+  `RgbaBitmap` → `RgbaImage`. All remain as thin wrappers for one
+  release.
+
 ## [0.1.10](https://github.com/OxideAV/oxideav-png/compare/v0.1.9...v0.1.10) - 2026-10-02
 
 ### Other
