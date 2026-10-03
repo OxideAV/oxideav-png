@@ -39,6 +39,9 @@ use crate::options::DecodeOptions;
 // by re-exporting the registry-side surface.
 #[cfg(feature = "registry")]
 pub use crate::registry::{decode_png_to_frame, make_decoder};
+// The pre-contract entry points at their historical module path.
+#[allow(deprecated)]
+pub use crate::api::{decode_png, decode_png_over_background, decode_png_to_rgba};
 
 use crate::zlibvec::decompress_to_vec_zlib_capped;
 use compcol::{Decoder as _, Status};
