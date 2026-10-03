@@ -186,7 +186,7 @@ fn solid_frame(width: u32, height: u32, seed: u8) -> PngImage {
             data.push(a);
         }
     }
-    PngImage::new(width, height, PngPixelFormat::Rgba, stride, data).with_palette(Vec::new())
+    PngImage::packed(width, height, PngPixelFormat::Rgba, stride, data)
 }
 
 /// Walk `png`, find every `fcTL` chunk, rewrite its payload's offset /

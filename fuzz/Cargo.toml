@@ -31,8 +31,10 @@ members = ["."]
 debug = 1
 
 # Decode-only target: feed arbitrary bytes straight at the standalone
-# decode entry points. No oracle / no encode round-trip — purely asserts
-# the decoder never panics / aborts / OOMs on hostile input.
+# entry points (`probe` / `info` / `decode` / `decode_with` /
+# `decode_rgb8` / `decode_rgba8` / `decode_all` / the APNG + metadata
+# parsers). No oracle / no encode round-trip — purely asserts the
+# decoder never panics / aborts / OOMs on hostile input.
 [[bin]]
 name = "decode"
 path = "fuzz_targets/decode.rs"
@@ -80,13 +82,13 @@ path = "fuzz_targets/encode_decode_roundtrip.rs"
 test = false
 doc = false
 
-# Encode-options matrix target (r296). Drives
-# `encode_png_image_with_options` over the option space the default
+# Encode-options matrix target (r296). Drives `encode` over the option
+# space the default
 # round-trip target never visits: Adam7 interlace (>=8-bit + sub-byte
 # 1/2/4-bit passes), caller-supplied sub-byte `bit_depth` packing,
 # every `FilterStrategy` variant (Adaptive + Fixed x5), and the
 # ancillary-metadata emission path. Decodes accepted output through
-# `decode_png` + `decode_png_to_rgba`. Asserts liveness on the
+# `decode` + `decode_rgba8`. Asserts liveness on the
 # option-bearing encode path and decode-liveness + dimension
 # preservation on its output.
 [[bin]]
@@ -119,7 +121,7 @@ doc = false
 # zlib inflate of zTXt / iTXt / iCCP bodies, sPLT entry strides, the eXIf
 # TIFF probe, bKGD / hIST PLTE-index bounds) that the raw-bytes `decode`
 # target rarely reaches past the signature / framing / CRC gate. Drives
-# `parse_metadata` + `decode_png` + `decode_png_to_rgba`; liveness only.
+# `parse_metadata` + `decode` + `decode_rgba8`; liveness only.
 [[bin]]
 name = "metadata_chunk_splice"
 path = "fuzz_targets/metadata_chunk_splice.rs"

@@ -1,13 +1,13 @@
 #![no_main]
 
-//! Drive `encode_png_image_with_options` across the full
-//! [`PngEncoderOptions`] matrix the existing `encode_decode_roundtrip`
+//! Drive `encode` across the full
+//! [`EncodeOptions`] matrix the existing `encode_decode_roundtrip`
 //! target leaves untouched: Adam7 interlace (both the >=8-bit and the
 //! sub-byte 1/2/4-bit pass layouts), caller-supplied sub-byte
 //! `bit_depth` packing, every `FilterStrategy` variant (Adaptive,
 //! `Fixed` x5, plus the whole-image exhaustive `Brute` search), and the
 //! ancillary-metadata emission path. The default
-//! round-trip target only ever passes `PngEncoderOptions::default()`
+//! round-trip target only ever passes `EncodeOptions::default()`
 //! (non-interlaced, 8-bit, Adaptive, no metadata), so the interlaced
 //! sub-image gather (`deflate_encode_pixels_adam7` /
 //! `deflate_encode_pixels_adam7_subbyte`), the sub-byte MSB-first
@@ -18,7 +18,7 @@
 //! (dimensions, pixel format, deterministic pixel fill) plus an options
 //! bundle from the fuzz bytes, then:
 //!
-//!   1. Call `encode_png_image_with_options`. The input is always a
+//!   1. Call `encode`. The input is always a
 //!      valid image with options the encoder must either accept or
 //!      reject with an `Err` — it may never panic / abort / overflow.
 //!      Options the encoder legitimately rejects (e.g. a sub-byte
@@ -26,7 +26,7 @@
 //!      the sub-byte range) yield `Err` and the harness returns; that
 //!      is a contract path, not a crash.
 //!   2. For the option combinations the encoder *accepts*, decode the
-//!      emitted bytes with `decode_png` and `decode_png_to_rgba`.
+//!      emitted bytes with `decode` and `decode_rgba8`.
 //!      Neither may panic on the encoder's own output, and the decode
 //!      must reproduce the image's width / height (the on-wire pixel
 //!      format may legitimately differ from the source format for the
@@ -40,8 +40,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_png::{
-    decode_png, decode_png_to_rgba, encode_png_image_with_options, FilterStrategy, FilterType,
-    Gama, Phys, PhysUnit, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat, Text, Time,
+    decode, decode_rgba8, encode, EncodeOptions, FilterStrategy, FilterType, Gama, Phys, PhysUnit,
+    PngImage, PngMetadata, PngPixelFormat, Text, Time,
 };
 
 /// Per-dimension cap. Interlaced encode walks all seven Adam7 passes
@@ -55,7 +55,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    let encoded = match encode_png_image_with_options(&image, &opts) {
+    let encoded = match encode(&image, &opts) {
         // A rejected option bundle is a legitimate contract outcome
         // (sub-byte depth on a wrong source format, out-of-range
         // sub-byte sample, invalid metadata, ...). Not a crash.
@@ -69,7 +69,7 @@ fuzz_target!(|data: &[u8]| {
     // (Gray8/Pal8 at depth 1/2/4 decode back as a packed plane), so we
     // assert only liveness + dimension preservation, not pixel-format
     // identity or pixel equality.
-    match decode_png(&encoded) {
+    match decode(&encoded) {
         Ok(decoded) => {
             assert_eq!(
                 decoded.width, image.width,
@@ -82,18 +82,18 @@ fuzz_target!(|data: &[u8]| {
                 decoded.height, image.height
             );
         }
-        Err(e) => panic!("decode_png failed on accepted encoder output: {e}"),
+        Err(e) => panic!("decode failed on accepted encoder output: {e}"),
     }
 
     // The one-shot RGBA promotion is a second, independent decode
     // surface (palette resolution, grayscale widening, 16->8 truncation,
     // sub-byte unpacking) over the same bytes — drive it for liveness.
-    match decode_png_to_rgba(&encoded) {
+    match decode_rgba8(&encoded) {
         Ok(bitmap) => {
             assert_eq!(bitmap.width, image.width, "rgba decode width drift");
             assert_eq!(bitmap.height, image.height, "rgba decode height drift");
         }
-        Err(e) => panic!("decode_png_to_rgba failed on accepted encoder output: {e}"),
+        Err(e) => panic!("decode_rgba8 failed on accepted encoder output: {e}"),
     }
 });
 
@@ -104,7 +104,7 @@ fuzz_target!(|data: &[u8]| {
 struct Plan;
 
 impl Plan {
-    fn build(data: &[u8]) -> Option<(PngImage, PngEncoderOptions)> {
+    fn build(data: &[u8]) -> Option<(PngImage, EncodeOptions)> {
         // Layout of the leading control bytes (everything else is unused
         // entropy; pixels are synthesised deterministically from a seed).
         //   [0] width-1 selector
@@ -155,7 +155,7 @@ impl Plan {
             n => Some(n),
         };
 
-        let opts = PngEncoderOptions::default()
+        let opts = EncodeOptions::default()
             .with_interlace(flags & 0b0000_0001 != 0)
             .with_metadata(metadata)
             .with_bit_depth(bit_depth)
@@ -288,17 +288,17 @@ fn solid_image(
             let v = i as u8;
             p.extend_from_slice(&[v, v.wrapping_mul(3), v.wrapping_mul(7)]);
         }
-        p
+        Some(oxideav_png::Palette::from_rgb(&p, None))
     } else {
-        Vec::new()
+        None
     };
 
-    PngImage::new(width, height, format, stride, buf).with_palette(palette)
+    PngImage::packed(width, height, format, stride, buf).with_palette(palette)
 }
 
 /// A small, always-valid ancillary-metadata bundle. Exercises the
 /// `tEXt` / `pHYs` / `tIME` / `gAMA` chunk-ordering + framing writers
-/// in `encode_png_image_with_options` without needing the fuzzer to
+/// in `encode` without needing the fuzzer to
 /// synthesise each chunk's internal constraints (keyword spacing,
 /// date ranges, ...) which would mostly land in rejection paths.
 fn sample_metadata() -> PngMetadata {

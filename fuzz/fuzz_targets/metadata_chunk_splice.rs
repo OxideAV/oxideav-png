@@ -27,8 +27,8 @@
 //!      the `IEND` chunk so `parse_all_chunks` accepts the stream and the
 //!      mutation lands in the per-chunk `::parse`.
 //!
-//! Asserts liveness only: `parse_metadata`, `decode_png`, and
-//! `decode_png_to_rgba` must each *return* a `Result` for any spliced
+//! Asserts liveness only: `parse_metadata`, `decode`, and
+//! `decode_rgba8` must each *return* a `Result` for any spliced
 //! stream — never panic / abort / index out of bounds / integer-overflow
 //! (debug) / OOM, no matter how hostile the spliced payload is (a
 //! truncated or bomb-shaped zlib body in particular must surface as
@@ -37,7 +37,7 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_png::chunk::PNG_MAGIC;
 use oxideav_png::{
-    decode_png, decode_png_to_rgba, encode_png_image, parse_metadata, PngImage, PngPixelFormat,
+    decode, decode_rgba8, encode, parse_metadata, EncodeOptions, PngImage, PngPixelFormat,
 };
 
 /// Ancillary chunk types `parse_metadata` dispatches on (decoder.rs
@@ -72,7 +72,7 @@ fuzz_target!(|data: &[u8]| {
     // A valid base PNG. The colour type is fuzz-selected so the
     // PLTE-dependent arms (`bKGD` palette index, `hIST`, `tRNS`
     // ct=3) see a real palette to bounds-check against.
-    let Ok(base) = encode_png_image(&plan.base_image()) else {
+    let Ok(base) = encode(&plan.base_image(), &EncodeOptions::default()) else {
         return;
     };
 
@@ -83,8 +83,8 @@ fuzz_target!(|data: &[u8]| {
     // Three liveness probes over the spliced stream. Each must return a
     // Result; the value is intentionally discarded.
     let _ = parse_metadata(&spliced);
-    let _ = decode_png(&spliced);
-    let _ = decode_png_to_rgba(&spliced);
+    let _ = decode(&spliced);
+    let _ = decode_rgba8(&spliced);
 });
 
 /// One synthesised ancillary chunk: a 4-byte type drawn from
@@ -161,14 +161,13 @@ impl Plan {
             // Grayscale 8-bit.
             0 => {
                 let data = vec![0x80u8; (W * H) as usize];
-                PngImage::new(W, H, PngPixelFormat::Gray8, W as usize, data)
-                    .with_palette(Vec::new())
+                PngImage::packed(W, H, PngPixelFormat::Gray8, W as usize, data)
             }
             // RGB 8-bit.
             1 => {
                 let stride = (W * 3) as usize;
                 let data = vec![0x40u8; stride * H as usize];
-                PngImage::new(W, H, PngPixelFormat::Rgb24, stride, data).with_palette(Vec::new())
+                PngImage::packed(W, H, PngPixelFormat::Rgb24, stride, data)
             }
             // Palette 8-bit, 4-entry palette, all pixels index 0.
             _ => {
@@ -179,7 +178,8 @@ impl Plan {
                     0, 255, 0, // entry 2
                     0, 0, 255, // entry 3
                 ];
-                PngImage::new(W, H, PngPixelFormat::Pal8, W as usize, data).with_palette(palette)
+                PngImage::packed(W, H, PngPixelFormat::Pal8, W as usize, data)
+                    .with_palette(oxideav_png::Palette::from_rgb(&palette, None))
             }
         }
     }

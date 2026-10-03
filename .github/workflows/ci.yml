@@ -15,14 +15,15 @@ jobs:
     uses: OxideAV/.github/.github/workflows/crate-ci.yml@master
     secrets: inherit
 
-  # Standalone (no-`registry`) build verification. Image-library
-  # consumers depend on the crate with `default-features = false` to
-  # skip the `oxideav-core` dep tree entirely; this job ensures the
-  # gated paths stay compiling on every change. Tests/benches stay on
-  # the default-feature path (they exercise trait integration), so
-  # this is `cargo build --lib` rather than `cargo test`.
-  standalone:
-    name: Build (no registry)
+  # Standalone (no-`registry`) verification — the image-crate contract
+  # (IMAGE_CRATE_API): image-library consumers depend on the crate with
+  # `default-features = false` to skip the `oxideav-core` dep tree
+  # entirely, so the whole Layer-1 surface (`probe` / `info` / `decode*`
+  # / `encode*`) must build AND pass its tests without the framework.
+  # Tests that exercise the trait integration are `#![cfg(feature =
+  # "registry")]` and drop out of this run.
+  ci-standalone:
+    name: Build + test (no registry)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -32,3 +33,5 @@ jobs:
           key: standalone
       - name: cargo build --lib --no-default-features
         run: cargo build --lib --no-default-features --verbose
+      - name: cargo test --no-default-features
+        run: cargo test --no-default-features --verbose

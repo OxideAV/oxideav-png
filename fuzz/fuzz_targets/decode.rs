@@ -32,8 +32,8 @@ use oxideav_png::depth::{
 };
 use oxideav_png::metadata::Sbit;
 use oxideav_png::{
-    decode_apng, decode_png, decode_png_over_background, decode_png_to_rgba, parse_apng,
-    parse_metadata,
+    decode, decode_all, decode_apng, decode_over_background, decode_rgb8, decode_rgba8,
+    decode_with, info, parse_apng, parse_metadata, probe, DecodeOptions,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -53,14 +53,32 @@ fuzz_target!(|data: &[u8]| {
         let _ = recover_sbit(sample, a, b);
     }
 
-    // Static single-image decode (any colour type / bit depth / interlace).
-    let _ = decode_png(data);
+    // The contract's header-only surface: an allocation-free signature
+    // sniff and the chunk walk that describes the file without
+    // decoding pixels.
+    let _ = probe(data);
+    let _ = info(data);
+
+    // Static single-image decode (any colour type / bit depth / interlace),
+    // in the lenient default and in strict mode (ancillary-chunk rules
+    // enforced), plus a tight limit set so the LimitExceeded path is
+    // exercised on every oversized header.
+    let _ = decode(data);
+    let _ = decode_with(data, &DecodeOptions::default().with_strict(true));
+    let _ = decode_with(
+        data,
+        &DecodeOptions::default()
+            .with_max_width(256u32)
+            .with_max_height(256u32)
+            .with_max_pixels(4096u64)
+            .with_max_bytes(1u64 << 16),
+    );
 
     // §13.12 sample-depth reduction of any successfully decoded 16-bit
     // image, plus the sBIT-aware arm keyed off whatever sBIT the metadata
     // parser recovered. Both must stay live on adversarial dimensions /
     // strides.
-    if let Ok(img) = decode_png(data) {
+    if let Ok(img) = decode(data) {
         let _ = rescale_16bit_to_8bit(&img);
         let sbit = parse_metadata(data).ok().and_then(|m| m.sbit);
         let _ = rescale_16bit_to_8bit_via_sbit(&img, sbit.unwrap_or(Sbit::Grayscale(8)));
@@ -69,14 +87,15 @@ fuzz_target!(|data: &[u8]| {
     // One-shot promotion to 8-bit RGBA — exercises palette resolution,
     // grayscale widening, 16->8 truncation and alpha fill on top of the
     // raw decode.
-    let _ = decode_png_to_rgba(data);
+    let _ = decode_rgba8(data);
+    let _ = decode_rgb8(data);
 
     // §13.15/§13.16 background composite: resolves the bKGD chunk (or the
     // medium-grey default) and blends straight alpha over it in linear
     // light. Drives both the chunk-resolution arm (None override) and the
     // caller-override arm on top of the same decode surface.
-    let _ = decode_png_over_background(data, None);
-    let _ = decode_png_over_background(data, Some([0, 128, 255]));
+    let _ = decode_over_background(data, None);
+    let _ = decode_over_background(data, Some([0, 128, 255]));
 
     // Ancillary-chunk metadata parser (sBIT / pHYs / tIME / bKGD / hIST /
     // eXIf / sRGB / cICP / sPLT) — its own bounds-checking surface.
@@ -88,4 +107,8 @@ fuzz_target!(|data: &[u8]| {
     // composite.
     let _ = parse_apng(data);
     let _ = decode_apng(data);
+
+    // The contract's multi-image path: one frame for a still, the
+    // composited chain for an APNG.
+    let _ = decode_all(data);
 });

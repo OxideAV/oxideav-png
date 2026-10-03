@@ -1,7 +1,7 @@
 #![no_main]
 
 //! Standalone encode → decode → re-encode round-trip for both static PNG
-//! (`encode_png_image` / `decode_png`) and animated PNG (`encode_apng` /
+//! (`encode_png_image` / `decode`) and animated PNG (`encode_apng` /
 //! `decode_apng`). Asserts the decoder is a right inverse of the encoder
 //! on encoder-emitted bitstreams (per-frame pixel-byte equality), then
 //! re-encodes + re-decodes to confirm image-level idempotence.
@@ -21,7 +21,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_png::{
-    decode_apng, decode_png, encode_apng, encode_png_image, PngImage, PngPixelFormat,
+    decode, decode_apng, encode, encode_apng, EncodeOptions, PngImage, PngPixelFormat,
 };
 
 /// Maximum per-frame dimension. Static + animated round-trip cost is
@@ -56,7 +56,7 @@ fuzz_target!(|data: &[u8]| {
 
 fn static_roundtrip(width: u32, height: u32, format: PngPixelFormat, seed: u8) {
     let original = solid_frame(width, height, format, seed);
-    let encoded = match encode_png_image(&original) {
+    let encoded = match encode(&original, &EncodeOptions::default()) {
         Ok(b) => b,
         // Encoder rejecting a self-constructed input is itself a bug —
         // but the encoder also rejects width=0 / height=0 across the
@@ -64,22 +64,21 @@ fn static_roundtrip(width: u32, height: u32, format: PngPixelFormat, seed: u8) {
         // Surface anything else as a panic so the fuzzer bins it.
         Err(e) => panic!("encode_png_image rejected synthetic frame: {e}"),
     };
-    let decoded = match decode_png(&encoded) {
+    let decoded = match decode(&encoded) {
         Ok(img) => img,
-        Err(e) => panic!("decode_png failed on encoder output: {e}"),
+        Err(e) => panic!("decode failed on encoder output: {e}"),
     };
     assert_image_eq(&original, &decoded, "static encode→decode");
 
     // Re-encode the decoded image and decode that — the encoder is
     // deterministic on a clean frame, so the bytes must match.
-    let re_encoded =
-        encode_png_image(&decoded).expect("encode_png_image rejected its own decode output");
+    let re_encoded = encode(&decoded, &EncodeOptions::default())
+        .expect("encode_png_image rejected its own decode output");
     assert_eq!(
         encoded, re_encoded,
         "static encode→decode→encode is not byte-identical"
     );
-    let re_decoded =
-        decode_png(&re_encoded).expect("decode_png failed on second-cycle encoder output");
+    let re_decoded = decode(&re_encoded).expect("decode failed on second-cycle encoder output");
     assert_image_eq(&original, &re_decoded, "static encode→decode→encode→decode");
 }
 
@@ -157,20 +156,20 @@ fn assert_image_eq(expected: &PngImage, actual: &PngImage, ctx: &str) {
         actual.height, expected.height,
     );
     assert_eq!(
-        actual.pixel_format, expected.pixel_format,
+        actual.format, expected.format,
         "{ctx}: pixel-format drift {:?} != {:?}",
-        actual.pixel_format, expected.pixel_format,
+        actual.format, expected.format,
     );
     // Decoder output is always tightly packed; encoder input may have
     // stride > width*bpp. Compare the visible pixels row by row.
     let bpp = expected.bytes_per_pixel();
     let row_len = expected.width as usize * bpp;
     for row in 0..expected.height as usize {
-        let e_start = row * expected.stride;
-        let a_start = row * actual.stride;
+        let e_start = row * expected.stride();
+        let a_start = row * actual.stride();
         assert_eq!(
-            &actual.data[a_start..a_start + row_len],
-            &expected.data[e_start..e_start + row_len],
+            &actual.planes[0].data[a_start..a_start + row_len],
+            &expected.planes[0].data[e_start..e_start + row_len],
             "{ctx}: pixel drift on row {row}",
         );
     }
@@ -241,7 +240,7 @@ fn solid_frame(width: u32, height: u32, format: PngPixelFormat, seed: u8) -> Png
     for _ in 0..(width as usize * height as usize) {
         data.extend_from_slice(&pixel);
     }
-    PngImage::new(width, height, format, stride, data).with_palette(Vec::new())
+    PngImage::packed(width, height, format, stride, data)
 }
 
 enum Plan {

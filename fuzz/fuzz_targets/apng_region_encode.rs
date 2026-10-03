@@ -23,7 +23,7 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_png::{
     decode_apng, encode_apng_frames_with_options, ApngBlend, ApngDisposal, ApngFrameSpec,
-    PngEncoderOptions, PngImage, PngPixelFormat,
+    EncodeOptions, PngImage, PngPixelFormat,
 };
 
 /// Canvas cap. Encode + decode cost is O(canvas * frames); keep both
@@ -62,7 +62,7 @@ fuzz_target!(|data: &[u8]| {
         None
     };
 
-    let opts = PngEncoderOptions::default().with_interlace(plan.interlace);
+    let opts = EncodeOptions::default().with_interlace(plan.interlace);
 
     let result = encode_apng_frames_with_options(
         canvas_w,
@@ -119,7 +119,7 @@ fn solid_region(w: u32, h: u32, seed: u8) -> PngImage {
         data.push(b);
         data.push(a);
     }
-    PngImage::new(w, h, PngPixelFormat::Rgba, stride, data).with_palette(Vec::new())
+    PngImage::packed(w, h, PngPixelFormat::Rgba, stride, data)
 }
 
 struct FramePlan {
