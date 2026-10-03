@@ -2,6 +2,9 @@
 //! the APNG, decode each frame, and verify the frame count matches and each
 //! frame's data is byte-identical to the input.
 
+// The framework path: needs `oxideav-core` (default-on `registry`).
+#![cfg(feature = "registry")]
+
 use oxideav_core::{
     CodecId, CodecParameters, Frame, PixelFormat, Rational, VideoFrame, VideoPlane,
 };

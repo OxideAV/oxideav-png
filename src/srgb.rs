@@ -49,7 +49,7 @@
 //! RGBA-palette helpers transfer only the R, G, B channels and pass the
 //! alpha byte through untouched.
 
-use crate::image::RgbaBitmap;
+use crate::image::RgbaImage;
 use crate::srgb_tables::{SRGB_BASE, SRGB_DELTA, SRGB_TO_LINEAR};
 
 /// Maximum 8-bit-scaled linear value, `255 * 65535`. A linear sample passed
@@ -95,7 +95,7 @@ pub fn to_scaled_linear8(srgb: u8) -> u32 {
     to_linear8(srgb) as u32 * 255
 }
 
-/// Linearize the R, G, B channels of an [`RgbaBitmap`] in place into 16-bit
+/// Linearize the R, G, B channels of an [`RgbaImage`] in place into 16-bit
 /// linear-light values, returning a parallel `Vec<u16>` of `width * height *
 /// 4` samples (R, G, B linear in `0..=65535`; A copied through unchanged in
 /// `0..=255`).
@@ -105,7 +105,7 @@ pub fn to_scaled_linear8(srgb: u8) -> u32 {
 /// always represented linearly" (§13.16), so the alpha byte is copied
 /// straight into the `u16` lane (still `0..=255`) rather than passed through
 /// the EOTF.
-pub fn linearize_rgba(bitmap: &RgbaBitmap) -> Vec<u16> {
+pub fn linearize_rgba(bitmap: &RgbaImage) -> Vec<u16> {
     let mut out = Vec::with_capacity(bitmap.data.len());
     for px in bitmap.data.chunks_exact(4) {
         out.push(to_linear8(px[0]));
@@ -117,7 +117,7 @@ pub fn linearize_rgba(bitmap: &RgbaBitmap) -> Vec<u16> {
     out
 }
 
-/// Composite a foreground [`RgbaBitmap`] over an opaque sRGB background
+/// Composite a foreground [`RgbaImage`] over an opaque sRGB background
 /// colour using linear-light blending (W3C PNG3 §13), writing the result
 /// back into `bitmap` as opaque (`alpha = 255`) sRGB pixels.
 ///
@@ -138,7 +138,7 @@ pub fn linearize_rgba(bitmap: &RgbaBitmap) -> Vec<u16> {
 /// The result is opaque everywhere (alpha forced to 255) — the image now
 /// stands on a known background, which is exactly the §13 "displaying the
 /// image against a background" operation.
-pub fn composite_over_background(bitmap: &mut RgbaBitmap, bg: [u8; 3]) {
+pub fn composite_over_background(bitmap: &mut RgbaImage, bg: [u8; 3]) {
     // Background linearized once (8-bit-scaled linear); constant per image.
     let bg_lin = [
         to_scaled_linear8(bg[0]),
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn linearize_passes_alpha_through() {
-        let bmp = RgbaBitmap {
+        let bmp = RgbaImage {
             width: 2,
             height: 1,
             data: vec![0, 128, 255, 7, 255, 0, 128, 200],
@@ -228,7 +228,7 @@ mod tests {
     fn composite_opaque_foreground_is_identity() {
         // A fully opaque foreground over any background reproduces the
         // foreground colour exactly (alpha=255 => weight 1.0 on fg).
-        let mut bmp = RgbaBitmap {
+        let mut bmp = RgbaImage {
             width: 3,
             height: 1,
             data: vec![10, 90, 200, 255, 0, 0, 0, 255, 255, 255, 255, 255],
@@ -243,7 +243,7 @@ mod tests {
     fn composite_transparent_foreground_is_background() {
         // A fully transparent foreground (alpha=0) reproduces the
         // background colour exactly everywhere.
-        let mut bmp = RgbaBitmap {
+        let mut bmp = RgbaImage {
             width: 2,
             height: 1,
             data: vec![200, 50, 9, 0, 1, 2, 3, 0],
@@ -258,7 +258,7 @@ mod tests {
         // 50% white over black: in linear light the midpoint is 0.5 linear,
         // which re-encodes to ~188 sRGB (NOT the gamma-space 127/8). This is
         // the whole point of compositing in linear space (§13).
-        let mut bmp = RgbaBitmap {
+        let mut bmp = RgbaImage {
             width: 1,
             height: 1,
             data: vec![255, 255, 255, 128],

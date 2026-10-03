@@ -61,7 +61,10 @@ fn fctl_bytes(seq: u32, w: u32, h: u32, x: u32, y: u32, dispose: u8, blend: u8) 
 /// composited RGBA64Le frame.
 fn sample(img: &oxideav_png::ApngFrameImage, w: usize, x: usize, y: usize, c: usize) -> u16 {
     let off = (y * w + x) * 8 + c * 2;
-    u16::from_le_bytes([img.image.data[off], img.image.data[off + 1]])
+    u16::from_le_bytes([
+        img.image.planes[0].data[off],
+        img.image.planes[0].data[off + 1],
+    ])
 }
 
 #[test]

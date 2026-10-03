@@ -19,30 +19,14 @@
 use std::io::{Read, SeekFrom, Write};
 
 use oxideav_core::{
-    CodecId, CodecParameters, CodecResolver, MediaType, Packet, PixelFormat, Result, StreamInfo,
-    TimeBase,
+    CodecId, CodecParameters, CodecResolver, MediaType, Packet, Result, StreamInfo, TimeBase,
 };
 use oxideav_core::{ContainerRegistry, Demuxer, Error, Muxer, ProbeData, ReadSeek, WriteSeek};
 
 use crate::apng::parse_fdat;
 use crate::chunk::{write_chunk, ChunkRef, PNG_MAGIC};
 use crate::decoder::{parse_all_chunks, validate_ancillary_ordering, Ihdr};
-use crate::image::PngPixelFormat;
-
-/// Map a [`PngPixelFormat`] back to the framework's pixel-format enum
-/// for the demuxer's `CodecParameters`.
-fn to_core_pixel_format(pf: PngPixelFormat) -> PixelFormat {
-    match pf {
-        PngPixelFormat::Gray8 => PixelFormat::Gray8,
-        PngPixelFormat::Gray16Le => PixelFormat::Gray16Le,
-        PngPixelFormat::Rgb24 => PixelFormat::Rgb24,
-        PngPixelFormat::Rgb48Le => PixelFormat::Rgb48Le,
-        PngPixelFormat::Pal8 => PixelFormat::Pal8,
-        PngPixelFormat::Ya8 => PixelFormat::Ya8,
-        PngPixelFormat::Rgba => PixelFormat::Rgba,
-        PngPixelFormat::Rgba64Le => PixelFormat::Rgba64Le,
-    }
-}
+use crate::registry::to_core_pixel_format;
 
 /// Register the PNG / APNG container (demuxer + muxer + extensions + probe).
 pub fn register(reg: &mut ContainerRegistry) {

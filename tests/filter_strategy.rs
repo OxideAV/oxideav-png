@@ -1,4 +1,4 @@
-//! End-to-end coverage for `PngEncoderOptions::filter_strategy`.
+//! End-to-end coverage for `EncodeOptions::filter_strategy`.
 //!
 //! The encoder consults W3C PNG3 §12.7 ("Filter selection") at three
 //! sites: the non-interlaced ≥ 8-bit path, the Adam7 ≥ 8-bit path, and
@@ -11,18 +11,17 @@
 //!    (RFC 2083 §2.6 caution). Decoding the encoder's output reproduces
 //!    the input image bit-exact regardless of strategy.
 //!
-//! 2. **Defaults.** `PngEncoderOptions::default().filter_strategy ==
+//! 2. **Defaults.** `EncodeOptions::default().filter_strategy ==
 //!    FilterStrategy::Adaptive` — the registered behaviour pre-r245 is
 //!    preserved on callers that never set the new field.
 //!
 //! Bit-exact reconstruction is asserted via the standalone
-//! `decode_png` round-trip: pixel data must survive every
+//! `decode` round-trip: pixel data must survive every
 //! strategy because the per-row filter is a lossless transform
 //! (§9.1 "All filters are linear, … and are therefore reversible").
 
 use oxideav_png::{
-    decode_png, encode_png_image_with_options, FilterStrategy, FilterType, PngEncoderOptions,
-    PngImage, PngPixelFormat,
+    decode, encode, EncodeOptions, FilterStrategy, FilterType, Palette, PngImage, PngPixelFormat,
 };
 
 /// Walk a PNG file in front-to-back chunk order and pull out every
@@ -59,7 +58,7 @@ fn make_rgb_image(w: u32, h: u32) -> PngImage {
             data.push(((x + y) * 5) as u8);
         }
     }
-    PngImage::new(w, h, PngPixelFormat::Rgb24, (w * 3) as usize, data).with_palette(Vec::new())
+    PngImage::packed(w, h, PngPixelFormat::Rgb24, (w * 3) as usize, data)
 }
 
 /// `Fixed(f)` writes filter byte `f as u8` at the head of every row
@@ -75,8 +74,8 @@ fn fixed_filter_appears_on_every_noninterlaced_row() {
         FilterType::Average,
         FilterType::Paeth,
     ] {
-        let opts = PngEncoderOptions::default().with_filter_strategy(FilterStrategy::Fixed(f));
-        let png = encode_png_image_with_options(&img, &opts).expect("encode");
+        let opts = EncodeOptions::default().with_filter_strategy(FilterStrategy::Fixed(f));
+        let png = encode(&img, &opts).expect("encode");
         let stream = collect_idat_inflated(&png);
         // (1 + row_bytes) per row, height rows.
         assert_eq!(stream.len(), (1 + row_bytes) * 8);
@@ -89,8 +88,11 @@ fn fixed_filter_appears_on_every_noninterlaced_row() {
             );
         }
         // Decode survives every strategy bit-exact.
-        let decoded = decode_png(&png).expect("decode");
-        assert_eq!(decoded.data, img.data, "strategy {f:?} round-trip mismatch");
+        let decoded = decode(&png).expect("decode");
+        assert_eq!(
+            decoded.planes[0].data, img.planes[0].data,
+            "strategy {f:?} round-trip mismatch"
+        );
     }
 }
 
@@ -101,10 +103,10 @@ fn fixed_filter_appears_on_every_noninterlaced_row() {
 #[test]
 fn fixed_filter_appears_on_every_adam7_pass_row() {
     let img = make_rgb_image(16, 8);
-    let opts = PngEncoderOptions::default()
+    let opts = EncodeOptions::default()
         .with_interlace(true)
         .with_filter_strategy(FilterStrategy::Fixed(FilterType::Paeth));
-    let png = encode_png_image_with_options(&img, &opts).expect("encode");
+    let png = encode(&img, &opts).expect("encode");
     let stream = collect_idat_inflated(&png);
     // The seven-pass concatenation walks the wire layout; every
     // filter byte in it must read `Paeth` (= 4) regardless of
@@ -138,8 +140,8 @@ fn fixed_filter_appears_on_every_adam7_pass_row() {
         }
     }
     // The interlaced decode round-trips bit-exact too.
-    let decoded = decode_png(&png).expect("decode");
-    assert_eq!(decoded.data, img.data);
+    let decoded = decode(&png).expect("decode");
+    assert_eq!(decoded.planes[0].data, img.planes[0].data);
 }
 
 /// Adam7 sub-byte (ct=3 indexed at depth 4) honours `Fixed(None)`.
@@ -158,24 +160,22 @@ fn fixed_filter_none_on_adam7_subbyte_indexed() {
             data.push(((x + y) & 0x0F) as u8);
         }
     }
-    // Palette covers exactly the max index in `data` (plus one) ×3
-    // bytes — the encoder splits `image.palette` into `PLTE || tRNS`
-    // by computing `PLTE` length from `max_idx + 1` entries, so a
-    // matching-size buffer means no `tRNS` tail. Content is filler;
-    // this test only cares about the filter-byte at the row head.
+    // Palette covers exactly the max index in `data` (plus one); all
+    // entries opaque so no `tRNS` is written. Content is filler; this
+    // test only cares about the filter-byte at the row head.
     let max_idx = data.iter().copied().max().unwrap_or(0) as usize;
     let n_entries = max_idx + 1;
     let palette: Vec<u8> = (0..n_entries as u8)
         .flat_map(|i| [i * 16, 0, 255 - i * 16])
         .collect();
-    let img =
-        PngImage::new(w, h, PngPixelFormat::Pal8, w as usize, data.clone()).with_palette(palette);
+    let img = PngImage::packed(w, h, PngPixelFormat::Pal8, w as usize, data.clone())
+        .with_palette(Palette::from_rgb(&palette, None));
 
-    let opts = PngEncoderOptions::default()
+    let opts = EncodeOptions::default()
         .with_interlace(true)
         .with_bit_depth(Some(4))
         .with_filter_strategy(FilterStrategy::Fixed(FilterType::None));
-    let png = encode_png_image_with_options(&img, &opts).expect("encode");
+    let png = encode(&img, &opts).expect("encode");
     let stream = collect_idat_inflated(&png);
 
     // Walk every non-empty Adam7 pass and assert the filter byte at
@@ -216,10 +216,10 @@ fn fixed_filter_none_on_adam7_subbyte_indexed() {
 
     // Round-trip: decode the encoded stream and confirm the original
     // indexed payload comes back identically.
-    let decoded = decode_png(&png).expect("decode");
+    let decoded = decode(&png).expect("decode");
     // Sub-byte indexed decode promotes to one-byte-per-pixel `Pal8`,
     // matching the source layout.
-    assert_eq!(decoded.data, data);
+    assert_eq!(decoded.planes[0].data, data);
 }
 
 #[test]
@@ -228,10 +228,10 @@ fn default_strategy_is_adaptive_and_matches_pre_r245_output() {
     // must produce exactly the same bytes as `Adaptive` set
     // explicitly — pre-r245 callers see no change.
     let img = make_rgb_image(8, 8);
-    let a = encode_png_image_with_options(&img, &PngEncoderOptions::default()).expect("a");
-    let b = encode_png_image_with_options(
+    let a = encode(&img, &EncodeOptions::default()).expect("a");
+    let b = encode(
         &img,
-        &PngEncoderOptions::default().with_filter_strategy(FilterStrategy::Adaptive),
+        &EncodeOptions::default().with_filter_strategy(FilterStrategy::Adaptive),
     )
     .expect("b");
     assert_eq!(a, b, "default options must equal explicit Adaptive");
@@ -239,7 +239,7 @@ fn default_strategy_is_adaptive_and_matches_pre_r245_output() {
     // And `FilterStrategy::default()` is `Adaptive` itself.
     assert_eq!(FilterStrategy::default(), FilterStrategy::Adaptive);
     assert_eq!(
-        PngEncoderOptions::default().filter_strategy,
+        EncodeOptions::default().filter_strategy,
         FilterStrategy::Adaptive
     );
 }
@@ -251,12 +251,11 @@ fn default_strategy_is_adaptive_and_matches_pre_r245_output() {
 /// uses a 1×1 image where only pass 7 produces a row.
 #[test]
 fn fixed_filter_skips_empty_adam7_passes() {
-    let img =
-        PngImage::new(1, 1, PngPixelFormat::Rgb24, 3, vec![10, 20, 30]).with_palette(Vec::new());
-    let opts = PngEncoderOptions::default()
+    let img = PngImage::packed(1, 1, PngPixelFormat::Rgb24, 3, vec![10, 20, 30]);
+    let opts = EncodeOptions::default()
         .with_interlace(true)
         .with_filter_strategy(FilterStrategy::Fixed(FilterType::Sub));
-    let png = encode_png_image_with_options(&img, &opts).expect("encode");
+    let png = encode(&img, &opts).expect("encode");
     let stream = collect_idat_inflated(&png);
     // For a 1×1 image only pass 7 (final pass) has one 1×1 row.
     // The filtered stream therefore holds exactly `1 + 3 = 4` bytes:
@@ -277,13 +276,11 @@ fn encoded_len(
     interlace: bool,
     bit_depth: Option<u8>,
 ) -> usize {
-    let opts = PngEncoderOptions::default()
+    let opts = EncodeOptions::default()
         .with_interlace(interlace)
         .with_bit_depth(bit_depth)
         .with_filter_strategy(strat);
-    encode_png_image_with_options(img, &opts)
-        .expect("encode")
-        .len()
+    encode(img, &opts).expect("encode").len()
 }
 
 /// `Brute` re-decodes bit-exact and is never larger than `Adaptive` or
@@ -311,10 +308,13 @@ fn brute_is_smallest_noninterlaced() {
     }
 
     // Bit-exact round-trip.
-    let opts = PngEncoderOptions::default().with_filter_strategy(FilterStrategy::Brute);
-    let png = encode_png_image_with_options(&img, &opts).expect("encode");
-    let decoded = decode_png(&png).expect("decode");
-    assert_eq!(decoded.data, img.data, "Brute round-trip mismatch");
+    let opts = EncodeOptions::default().with_filter_strategy(FilterStrategy::Brute);
+    let png = encode(&img, &opts).expect("encode");
+    let decoded = decode(&png).expect("decode");
+    assert_eq!(
+        decoded.planes[0].data, img.planes[0].data,
+        "Brute round-trip mismatch"
+    );
 }
 
 /// `Brute` works through the Adam7 ≥ 8-bit path too: bit-exact
@@ -331,11 +331,14 @@ fn brute_is_smallest_adam7() {
     ] {
         assert!(brute <= encoded_len(&img, cand, true, None));
     }
-    let opts = PngEncoderOptions::default()
+    let opts = EncodeOptions::default()
         .with_interlace(true)
         .with_filter_strategy(FilterStrategy::Brute);
-    let png = encode_png_image_with_options(&img, &opts).expect("encode");
-    assert_eq!(decode_png(&png).expect("decode").data, img.data);
+    let png = encode(&img, &opts).expect("encode");
+    assert_eq!(
+        decode(&png).expect("decode").planes[0].data,
+        img.planes[0].data
+    );
 }
 
 /// `Brute` runs the per-sample bit-depth validation exactly once even
@@ -357,28 +360,28 @@ fn brute_subbyte_roundtrip_and_validation() {
     }
     // 16-entry palette so a depth-4 IHDR fits with no `tRNS` tail.
     let palette: Vec<u8> = (0u8..16).flat_map(|i| [i * 16, 0, 255 - i * 16]).collect();
-    let img =
-        PngImage::new(w, h, PngPixelFormat::Pal8, w as usize, data.clone()).with_palette(palette);
+    let img = PngImage::packed(w, h, PngPixelFormat::Pal8, w as usize, data.clone())
+        .with_palette(Palette::from_rgb(&palette, None));
 
     // Non-interlaced sub-byte Brute: round-trip bit-exact.
-    let opts = PngEncoderOptions::default()
+    let opts = EncodeOptions::default()
         .with_bit_depth(Some(4))
         .with_filter_strategy(FilterStrategy::Brute);
-    let png = encode_png_image_with_options(&img, &opts).expect("encode");
-    assert_eq!(decode_png(&png).expect("decode").data, data);
+    let png = encode(&img, &opts).expect("encode");
+    assert_eq!(decode(&png).expect("decode").planes[0].data, data);
 
     // Adam7 sub-byte Brute: round-trip bit-exact.
-    let opts_i = PngEncoderOptions::default()
+    let opts_i = EncodeOptions::default()
         .with_interlace(true)
         .with_bit_depth(Some(4))
         .with_filter_strategy(FilterStrategy::Brute);
-    let png_i = encode_png_image_with_options(&img, &opts_i).expect("encode");
-    assert_eq!(decode_png(&png_i).expect("decode").data, data);
+    let png_i = encode(&img, &opts_i).expect("encode");
+    assert_eq!(decode(&png_i).expect("decode").planes[0].data, data);
 
     // Over-range sample → exactly one encode error under Brute.
     let mut bad = img.clone();
-    bad.data[0] = 0xFF; // > 15
-    let err = encode_png_image_with_options(&bad, &opts).unwrap_err();
+    bad.planes[0].data[0] = 0xFF; // > 15
+    let err = encode(&bad, &opts).unwrap_err();
     assert!(
         err.to_string().contains("exceeds"),
         "expected over-range error, got {err}"

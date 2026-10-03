@@ -5,6 +5,9 @@
 //! Adam7 or sub-byte output — decoding those formats is purely a decoder
 //! capability.
 
+// The framework path: needs `oxideav-core` (default-on `registry`).
+#![cfg(feature = "registry")]
+
 use oxideav_png::chunk::{write_chunk, PNG_MAGIC};
 use oxideav_png::decoder::{decode_png_to_frame, Ihdr};
 

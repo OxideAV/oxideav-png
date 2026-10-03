@@ -2,7 +2,7 @@
 //! (W3C PNG3 §13.15 "Background color" / §13.16 "Alpha channel
 //! processing" / §13.12 "Sample depth rescaling").
 //!
-//! `decode_png_over_background` decodes a PNG to RGBA, resolves the
+//! `decode_over_background` decodes a PNG to RGBA, resolves the
 //! background colour (caller override > `bKGD` chunk > medium-grey 153
 //! default), and composites every pixel's straight alpha over it in
 //! linear light: `out = α·foreground + (1−α)·background`. These tests
@@ -10,13 +10,12 @@
 //! the §13.15 background-resolution precedence plus the §13.16 blend.
 
 use oxideav_png::{
-    decode_png_over_background, encode_png_image_with_options, srgb_from_linear,
-    srgb_to_scaled_linear8, Bkgd, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat,
-    RgbaBitmap, Trns, DEFAULT_BACKGROUND_GREY,
+    decode_over_background, encode, srgb_from_linear, srgb_to_scaled_linear8, Bkgd, EncodeOptions,
+    PngImage, PngMetadata, PngPixelFormat, RgbaImage, Trns, DEFAULT_BACKGROUND_GREY,
 };
 
 fn rgba_image(w: u32, h: u32, data: Vec<u8>) -> PngImage {
-    PngImage::new(w, h, PngPixelFormat::Rgba, w as usize * 4, data).with_palette(Vec::new())
+    PngImage::packed(w, h, PngPixelFormat::Rgba, w as usize * 4, data)
 }
 
 /// The §13.16 linear-light composite of `fg` over `bg` at 8-bit straight
@@ -42,9 +41,9 @@ fn default_grey_when_no_bkgd_and_no_override() {
             99, 99, 99, 0, // fully transparent
         ],
     );
-    let bytes = encode_png_image_with_options(&img, &PngEncoderOptions::default()).expect("encode");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode");
 
-    let out = decode_png_over_background(&bytes, None).expect("decode over bg");
+    let out = decode_over_background(&bytes, None).expect("decode over bg");
     assert_eq!(out.data[0..4], [10, 20, 30, 255]);
     // Transparent pixel becomes the medium-grey default, fully opaque.
     assert_eq!(
@@ -64,12 +63,12 @@ fn default_grey_when_no_bkgd_and_no_override() {
 #[test]
 fn override_beats_bkgd_chunk() {
     let img = rgba_image(1, 1, vec![0, 0, 0, 0]); // one transparent pixel
-    let opts = PngEncoderOptions::default().with_metadata(Some(
+    let opts = EncodeOptions::default().with_metadata(Some(
         PngMetadata::default().with_bkgd(Some(Bkgd::Rgb(10, 20, 30))),
     ));
-    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let bytes = encode(&img, &opts).expect("encode");
 
-    let out = decode_png_over_background(&bytes, Some([200, 100, 50])).expect("decode");
+    let out = decode_over_background(&bytes, Some([200, 100, 50])).expect("decode");
     // The transparent pixel resolves to the override, not the bKGD chunk.
     assert_eq!(out.data[0..4], [200, 100, 50, 255]);
 }
@@ -80,12 +79,12 @@ fn override_beats_bkgd_chunk() {
 #[test]
 fn bkgd_rgb_chunk_composites_half_alpha() {
     let img = rgba_image(2, 1, vec![255, 255, 255, 128, 40, 60, 80, 255]);
-    let opts = PngEncoderOptions::default().with_metadata(Some(
+    let opts = EncodeOptions::default().with_metadata(Some(
         PngMetadata::default().with_bkgd(Some(Bkgd::Rgb(0, 0, 0))),
     ));
-    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let bytes = encode(&img, &opts).expect("encode");
 
-    let out = decode_png_over_background(&bytes, None).expect("decode");
+    let out = decode_over_background(&bytes, None).expect("decode");
     // Pixel 0: 50% white over black, per channel, in linear light.
     let expect0 = composite_ref(255, 0, 128);
     assert_eq!(out.data[0], expect0);
@@ -112,15 +111,16 @@ fn bkgd_palette_index_composites_transparent_entry() {
 
     // Two-pixel indexed image: pixel0 = idx0 (opaque red), pixel1 = idx2
     // (transparent blue).
-    let img = PngImage::new(2, 1, PngPixelFormat::Pal8, 2, vec![0, 2]).with_palette(palette);
-    let opts = PngEncoderOptions::default().with_metadata(Some(
+    let img = PngImage::packed(2, 1, PngPixelFormat::Pal8, 2, vec![0, 2])
+        .with_palette(oxideav_png::Palette::from_rgb(&palette, None));
+    let opts = EncodeOptions::default().with_metadata(Some(
         PngMetadata::default()
             .with_bkgd(Some(Bkgd::Palette(1)))
             .with_trns(Some(trns)),
     ));
-    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let bytes = encode(&img, &opts).expect("encode");
 
-    let out = decode_png_over_background(&bytes, None).expect("decode");
+    let out = decode_over_background(&bytes, None).expect("decode");
     // Opaque red survives.
     assert_eq!(out.data[0..4], [200, 0, 0, 255]);
     // The transparent pixel composites fully onto the green background
@@ -133,20 +133,20 @@ fn bkgd_palette_index_composites_transparent_entry() {
 #[test]
 fn fully_opaque_image_is_unchanged() {
     let img = rgba_image(2, 1, vec![10, 20, 30, 255, 40, 50, 60, 255]);
-    let bytes = encode_png_image_with_options(&img, &PngEncoderOptions::default()).expect("encode");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode");
 
-    let out = decode_png_over_background(&bytes, Some([1, 2, 3])).expect("decode");
+    let out = decode_over_background(&bytes, Some([1, 2, 3])).expect("decode");
     assert_eq!(out.data, vec![10, 20, 30, 255, 40, 50, 60, 255]);
 }
 
-/// `decode_png_over_background` always yields a tightly-packed RGBA buffer
+/// `decode_over_background` always yields a tightly-packed RGBA buffer
 /// at the source dimensions with opaque alpha everywhere.
 #[test]
 fn output_is_opaque_packed_rgba() {
     let img = rgba_image(3, 2, vec![0; 3 * 2 * 4]); // all transparent black
-    let bytes = encode_png_image_with_options(&img, &PngEncoderOptions::default()).expect("encode");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode");
 
-    let out: RgbaBitmap = decode_png_over_background(&bytes, None).expect("decode");
+    let out: RgbaImage = decode_over_background(&bytes, None).expect("decode");
     assert_eq!(out.width, 3);
     assert_eq!(out.height, 2);
     assert_eq!(out.data.len(), 3 * 2 * 4);

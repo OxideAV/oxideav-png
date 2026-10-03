@@ -14,7 +14,7 @@
 //! `roundtrip`.
 //!
 //! Each scenario synthesises a fresh PNG on the fly with the public
-//! encoder API and iterates [`decode_png`] / [`decode_png_to_rgba`] /
+//! encoder API and iterates [`decode`] / [`decode_rgba8`] /
 //! [`parse_metadata`] / [`decode_apng`] on the encoded bytes. No
 //! fixture files are committed; the bench inputs are entirely
 //! reproducible from the bench source.
@@ -40,7 +40,7 @@
 //!     PLTE bytes copied through `extradata`; no decode-side palette
 //!     expansion.
 //!   - **decode_to_rgba_pal8_320x240**: same source as above but
-//!     decoded through [`decode_png_to_rgba`], which expands the
+//!     decoded through [`decode_rgba8`], which expands the
 //!     palette + applies tRNS on the way out.
 //!   - **parse_metadata_rgba_320x240**: chunk-walk + CRC validation
 //!     on a populated metadata block (sBIT/pHYs/tIME/bKGD/sRGB) with
@@ -68,8 +68,8 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use oxideav_png::{
-    decode_apng, decode_png, decode_png_to_rgba, encode_apng, encode_png_image, parse_metadata,
-    Phys, PhysUnit, PngImage, PngPixelFormat, RenderingIntent, Sbit, Srgb, Time,
+    decode, decode_apng, decode_rgba8, encode, encode_apng, parse_metadata, EncodeOptions, Phys,
+    PhysUnit, PngImage, PngPixelFormat, RenderingIntent, Sbit, Srgb, Time,
 };
 
 /// Cheap deterministic xorshift32 — keeps the bench inputs from being
@@ -105,7 +105,7 @@ fn build_rgba(width: u32, height: u32) -> PngImage {
             data[idx + 3] = 0xff;
         }
     }
-    PngImage::new(width, height, PngPixelFormat::Rgba, w * 4, data).with_palette(Vec::new())
+    PngImage::packed(width, height, PngPixelFormat::Rgba, w * 4, data)
 }
 
 fn build_rgb24(width: u32, height: u32) -> PngImage {
@@ -123,7 +123,7 @@ fn build_rgb24(width: u32, height: u32) -> PngImage {
             data[idx + 2] = base_x.min(255) as u8;
         }
     }
-    PngImage::new(width, height, PngPixelFormat::Rgb24, w * 3, data).with_palette(Vec::new())
+    PngImage::packed(width, height, PngPixelFormat::Rgb24, w * 3, data)
 }
 
 fn build_gray8(width: u32, height: u32) -> PngImage {
@@ -136,7 +136,7 @@ fn build_gray8(width: u32, height: u32) -> PngImage {
             data[r * w + c] = natural_pattern_byte(r, c, h, w, &mut state);
         }
     }
-    PngImage::new(width, height, PngPixelFormat::Gray8, w, data).with_palette(Vec::new())
+    PngImage::packed(width, height, PngPixelFormat::Gray8, w, data)
 }
 
 fn build_gray16(width: u32, height: u32) -> PngImage {
@@ -152,7 +152,7 @@ fn build_gray16(width: u32, height: u32) -> PngImage {
             data[idx + 1] = (base >> 8) as u8;
         }
     }
-    PngImage::new(width, height, PngPixelFormat::Gray16Le, w * 2, data).with_palette(Vec::new())
+    PngImage::packed(width, height, PngPixelFormat::Gray16Le, w * 2, data)
 }
 
 fn build_rgb48(width: u32, height: u32) -> PngImage {
@@ -173,7 +173,7 @@ fn build_rgb48(width: u32, height: u32) -> PngImage {
             data[idx + 5] = (bb >> 8) as u8;
         }
     }
-    PngImage::new(width, height, PngPixelFormat::Rgb48Le, w * 6, data).with_palette(Vec::new())
+    PngImage::packed(width, height, PngPixelFormat::Rgb48Le, w * 6, data)
 }
 
 fn build_rgba64(width: u32, height: u32) -> PngImage {
@@ -196,7 +196,7 @@ fn build_rgba64(width: u32, height: u32) -> PngImage {
             data[idx + 7] = 0xff;
         }
     }
-    PngImage::new(width, height, PngPixelFormat::Rgba64Le, w * 8, data).with_palette(Vec::new())
+    PngImage::packed(width, height, PngPixelFormat::Rgba64Le, w * 8, data)
 }
 
 fn build_pal8(width: u32, height: u32) -> PngImage {
@@ -214,120 +214,121 @@ fn build_pal8(width: u32, height: u32) -> PngImage {
         palette.push((i ^ 0x55) as u8);
         palette.push((i ^ 0xaa) as u8);
     }
-    PngImage::new(width, height, PngPixelFormat::Pal8, w, data).with_palette(palette)
+    PngImage::packed(width, height, PngPixelFormat::Pal8, w, data)
+        .with_palette(oxideav_png::Palette::from_rgb(&palette, None))
 }
 
 fn encode_with_metadata(image: &PngImage) -> Vec<u8> {
-    use oxideav_png::{PngEncoderOptions, PngMetadata};
+    use oxideav_png::{EncodeOptions, PngMetadata};
     let metadata = PngMetadata::default()
         .with_sbit(Some(Sbit::Rgba(8, 8, 8, 8)))
         .with_phys(Some(Phys::new(2835, 2835, PhysUnit::Metre)))
         .with_time(Some(Time::new(2026, 5, 26, 12, 0, 0)))
         .with_srgb(Some(Srgb::new(RenderingIntent::Perceptual)));
-    let opts = PngEncoderOptions::default()
+    let opts = EncodeOptions::default()
         .with_interlace(false)
         .with_metadata(Some(metadata));
-    oxideav_png::encode_png_image_with_options(image, &opts).expect("encode_png_image_with_options")
+    oxideav_png::encode(image, &opts).expect("encode")
 }
 
 fn bench_decode_rgba_1920x1080(c: &mut Criterion) {
     let image = build_rgba(1920, 1080);
-    let bytes = encode_png_image(&image).expect("encode_png_image");
+    let bytes = encode(&image, &EncodeOptions::default()).expect("encode_png_image");
     let mut g = c.benchmark_group("decode_rgba_1920x1080");
     g.throughput(Throughput::Bytes((1920 * 1080 * 4) as u64));
     g.sample_size(10);
     g.bench_function(BenchmarkId::from_parameter("rgba/1920x1080"), |b| {
-        b.iter(|| decode_png(criterion::black_box(&bytes)).expect("decode_png"));
+        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
 
 fn bench_decode_rgba_320x240(c: &mut Criterion) {
     let image = build_rgba(320, 240);
-    let bytes = encode_png_image(&image).expect("encode_png_image");
+    let bytes = encode(&image, &EncodeOptions::default()).expect("encode_png_image");
     let mut g = c.benchmark_group("decode_rgba_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
     g.bench_function(BenchmarkId::from_parameter("rgba/320x240"), |b| {
-        b.iter(|| decode_png(criterion::black_box(&bytes)).expect("decode_png"));
+        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
 
 fn bench_decode_rgb24_640x480(c: &mut Criterion) {
     let image = build_rgb24(640, 480);
-    let bytes = encode_png_image(&image).expect("encode_png_image");
+    let bytes = encode(&image, &EncodeOptions::default()).expect("encode_png_image");
     let mut g = c.benchmark_group("decode_rgb24_640x480");
     g.throughput(Throughput::Bytes((640 * 480 * 3) as u64));
     g.sample_size(20);
     g.bench_function(BenchmarkId::from_parameter("rgb24/640x480"), |b| {
-        b.iter(|| decode_png(criterion::black_box(&bytes)).expect("decode_png"));
+        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
 
 fn bench_decode_gray8_512x512(c: &mut Criterion) {
     let image = build_gray8(512, 512);
-    let bytes = encode_png_image(&image).expect("encode_png_image");
+    let bytes = encode(&image, &EncodeOptions::default()).expect("encode_png_image");
     let mut g = c.benchmark_group("decode_gray8_512x512");
     g.throughput(Throughput::Bytes((512 * 512) as u64));
     g.bench_function(BenchmarkId::from_parameter("gray8/512x512"), |b| {
-        b.iter(|| decode_png(criterion::black_box(&bytes)).expect("decode_png"));
+        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
 
 fn bench_decode_gray16_512x512(c: &mut Criterion) {
     let image = build_gray16(512, 512);
-    let bytes = encode_png_image(&image).expect("encode_png_image");
+    let bytes = encode(&image, &EncodeOptions::default()).expect("encode_png_image");
     let mut g = c.benchmark_group("decode_gray16_512x512");
     g.throughput(Throughput::Bytes((512 * 512 * 2) as u64));
     g.bench_function(BenchmarkId::from_parameter("gray16/512x512"), |b| {
-        b.iter(|| decode_png(criterion::black_box(&bytes)).expect("decode_png"));
+        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
 
 fn bench_decode_rgb48_512x512(c: &mut Criterion) {
     let image = build_rgb48(512, 512);
-    let bytes = encode_png_image(&image).expect("encode_png_image");
+    let bytes = encode(&image, &EncodeOptions::default()).expect("encode_png_image");
     let mut g = c.benchmark_group("decode_rgb48_512x512");
     g.throughput(Throughput::Bytes((512 * 512 * 6) as u64));
     g.sample_size(20);
     g.bench_function(BenchmarkId::from_parameter("rgb48/512x512"), |b| {
-        b.iter(|| decode_png(criterion::black_box(&bytes)).expect("decode_png"));
+        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
 
 fn bench_decode_rgba64_320x240(c: &mut Criterion) {
     let image = build_rgba64(320, 240);
-    let bytes = encode_png_image(&image).expect("encode_png_image");
+    let bytes = encode(&image, &EncodeOptions::default()).expect("encode_png_image");
     let mut g = c.benchmark_group("decode_rgba64_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 8) as u64));
     g.bench_function(BenchmarkId::from_parameter("rgba64/320x240"), |b| {
-        b.iter(|| decode_png(criterion::black_box(&bytes)).expect("decode_png"));
+        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
 
 fn bench_decode_pal8_320x240(c: &mut Criterion) {
     let image = build_pal8(320, 240);
-    let bytes = encode_png_image(&image).expect("encode_png_image");
+    let bytes = encode(&image, &EncodeOptions::default()).expect("encode_png_image");
     let mut g = c.benchmark_group("decode_pal8_320x240");
     g.throughput(Throughput::Bytes((320 * 240) as u64));
     g.bench_function(BenchmarkId::from_parameter("pal8/320x240"), |b| {
-        b.iter(|| decode_png(criterion::black_box(&bytes)).expect("decode_png"));
+        b.iter(|| decode(criterion::black_box(&bytes)).expect("decode"));
     });
     g.finish();
 }
 
 fn bench_decode_to_rgba_pal8_320x240(c: &mut Criterion) {
     let image = build_pal8(320, 240);
-    let bytes = encode_png_image(&image).expect("encode_png_image");
+    let bytes = encode(&image, &EncodeOptions::default()).expect("encode_png_image");
     let mut g = c.benchmark_group("decode_to_rgba_pal8_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
     g.bench_function(BenchmarkId::from_parameter("pal8/to-rgba/320x240"), |b| {
-        b.iter(|| decode_png_to_rgba(criterion::black_box(&bytes)).expect("decode_png_to_rgba"));
+        b.iter(|| decode_rgba8(criterion::black_box(&bytes)).expect("decode_rgba8"));
     });
     g.finish();
 }

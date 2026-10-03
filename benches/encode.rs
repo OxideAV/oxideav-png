@@ -33,10 +33,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use oxideav_png::{
-    encode_apng, encode_png_image, encode_png_image_with_options, PngEncoderOptions, PngImage,
-    PngPixelFormat,
-};
+use oxideav_png::{encode, encode_apng, EncodeOptions, PngImage, PngPixelFormat};
 
 fn xorshift_byte(state: &mut u32) -> u8 {
     *state ^= *state << 13;
@@ -62,7 +59,7 @@ fn build_rgba(width: u32, height: u32) -> PngImage {
             data[idx + 3] = 0xff;
         }
     }
-    PngImage::new(width, height, PngPixelFormat::Rgba, w * 4, data).with_palette(Vec::new())
+    PngImage::packed(width, height, PngPixelFormat::Rgba, w * 4, data)
 }
 
 fn build_rgb24(width: u32, height: u32) -> PngImage {
@@ -81,7 +78,7 @@ fn build_rgb24(width: u32, height: u32) -> PngImage {
             data[idx + 2] = base_x.min(255) as u8;
         }
     }
-    PngImage::new(width, height, PngPixelFormat::Rgb24, w * 3, data).with_palette(Vec::new())
+    PngImage::packed(width, height, PngPixelFormat::Rgb24, w * 3, data)
 }
 
 fn build_gray8(width: u32, height: u32) -> PngImage {
@@ -96,7 +93,7 @@ fn build_gray8(width: u32, height: u32) -> PngImage {
                 (base_x.min(255) as u8).wrapping_add(xorshift_byte(&mut state) & 0x07);
         }
     }
-    PngImage::new(width, height, PngPixelFormat::Gray8, w, data).with_palette(Vec::new())
+    PngImage::packed(width, height, PngPixelFormat::Gray8, w, data)
 }
 
 fn build_gray16(width: u32, height: u32) -> PngImage {
@@ -111,7 +108,7 @@ fn build_gray16(width: u32, height: u32) -> PngImage {
             data[idx + 1] = (base >> 8) as u8;
         }
     }
-    PngImage::new(width, height, PngPixelFormat::Gray16Le, w * 2, data).with_palette(Vec::new())
+    PngImage::packed(width, height, PngPixelFormat::Gray16Le, w * 2, data)
 }
 
 fn build_rgb48(width: u32, height: u32) -> PngImage {
@@ -132,7 +129,7 @@ fn build_rgb48(width: u32, height: u32) -> PngImage {
             data[idx + 5] = (bb >> 8) as u8;
         }
     }
-    PngImage::new(width, height, PngPixelFormat::Rgb48Le, w * 6, data).with_palette(Vec::new())
+    PngImage::packed(width, height, PngPixelFormat::Rgb48Le, w * 6, data)
 }
 
 fn build_rgba64(width: u32, height: u32) -> PngImage {
@@ -155,7 +152,7 @@ fn build_rgba64(width: u32, height: u32) -> PngImage {
             data[idx + 7] = 0xff;
         }
     }
-    PngImage::new(width, height, PngPixelFormat::Rgba64Le, w * 8, data).with_palette(Vec::new())
+    PngImage::packed(width, height, PngPixelFormat::Rgba64Le, w * 8, data)
 }
 
 fn build_pal8(width: u32, height: u32) -> PngImage {
@@ -172,7 +169,8 @@ fn build_pal8(width: u32, height: u32) -> PngImage {
         palette.push((i ^ 0x55) as u8);
         palette.push((i ^ 0xaa) as u8);
     }
-    PngImage::new(width, height, PngPixelFormat::Pal8, w, data).with_palette(palette)
+    PngImage::packed(width, height, PngPixelFormat::Pal8, w, data)
+        .with_palette(oxideav_png::Palette::from_rgb(&palette, None))
 }
 
 fn bench_encode_rgba_1920x1080(c: &mut Criterion) {
@@ -181,7 +179,10 @@ fn bench_encode_rgba_1920x1080(c: &mut Criterion) {
     g.throughput(Throughput::Bytes((1920 * 1080 * 4) as u64));
     g.sample_size(10);
     g.bench_function(BenchmarkId::from_parameter("rgba/1920x1080"), |b| {
-        b.iter(|| encode_png_image(criterion::black_box(&image)).expect("encode_png_image"));
+        b.iter(|| {
+            encode(criterion::black_box(&image), &EncodeOptions::default())
+                .expect("encode_png_image")
+        });
     });
     g.finish();
 }
@@ -191,7 +192,10 @@ fn bench_encode_rgba_320x240(c: &mut Criterion) {
     let mut g = c.benchmark_group("encode_rgba_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
     g.bench_function(BenchmarkId::from_parameter("rgba/320x240"), |b| {
-        b.iter(|| encode_png_image(criterion::black_box(&image)).expect("encode_png_image"));
+        b.iter(|| {
+            encode(criterion::black_box(&image), &EncodeOptions::default())
+                .expect("encode_png_image")
+        });
     });
     g.finish();
 }
@@ -202,7 +206,10 @@ fn bench_encode_rgb24_640x480(c: &mut Criterion) {
     g.throughput(Throughput::Bytes((640 * 480 * 3) as u64));
     g.sample_size(20);
     g.bench_function(BenchmarkId::from_parameter("rgb24/640x480"), |b| {
-        b.iter(|| encode_png_image(criterion::black_box(&image)).expect("encode_png_image"));
+        b.iter(|| {
+            encode(criterion::black_box(&image), &EncodeOptions::default())
+                .expect("encode_png_image")
+        });
     });
     g.finish();
 }
@@ -212,7 +219,10 @@ fn bench_encode_gray8_512x512(c: &mut Criterion) {
     let mut g = c.benchmark_group("encode_gray8_512x512");
     g.throughput(Throughput::Bytes((512 * 512) as u64));
     g.bench_function(BenchmarkId::from_parameter("gray8/512x512"), |b| {
-        b.iter(|| encode_png_image(criterion::black_box(&image)).expect("encode_png_image"));
+        b.iter(|| {
+            encode(criterion::black_box(&image), &EncodeOptions::default())
+                .expect("encode_png_image")
+        });
     });
     g.finish();
 }
@@ -222,7 +232,10 @@ fn bench_encode_gray16_512x512(c: &mut Criterion) {
     let mut g = c.benchmark_group("encode_gray16_512x512");
     g.throughput(Throughput::Bytes((512 * 512 * 2) as u64));
     g.bench_function(BenchmarkId::from_parameter("gray16/512x512"), |b| {
-        b.iter(|| encode_png_image(criterion::black_box(&image)).expect("encode_png_image"));
+        b.iter(|| {
+            encode(criterion::black_box(&image), &EncodeOptions::default())
+                .expect("encode_png_image")
+        });
     });
     g.finish();
 }
@@ -233,7 +246,10 @@ fn bench_encode_rgb48_512x512(c: &mut Criterion) {
     g.throughput(Throughput::Bytes((512 * 512 * 6) as u64));
     g.sample_size(20);
     g.bench_function(BenchmarkId::from_parameter("rgb48/512x512"), |b| {
-        b.iter(|| encode_png_image(criterion::black_box(&image)).expect("encode_png_image"));
+        b.iter(|| {
+            encode(criterion::black_box(&image), &EncodeOptions::default())
+                .expect("encode_png_image")
+        });
     });
     g.finish();
 }
@@ -243,7 +259,10 @@ fn bench_encode_rgba64_320x240(c: &mut Criterion) {
     let mut g = c.benchmark_group("encode_rgba64_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 8) as u64));
     g.bench_function(BenchmarkId::from_parameter("rgba64/320x240"), |b| {
-        b.iter(|| encode_png_image(criterion::black_box(&image)).expect("encode_png_image"));
+        b.iter(|| {
+            encode(criterion::black_box(&image), &EncodeOptions::default())
+                .expect("encode_png_image")
+        });
     });
     g.finish();
 }
@@ -253,21 +272,21 @@ fn bench_encode_pal8_320x240(c: &mut Criterion) {
     let mut g = c.benchmark_group("encode_pal8_320x240");
     g.throughput(Throughput::Bytes((320 * 240) as u64));
     g.bench_function(BenchmarkId::from_parameter("pal8/320x240"), |b| {
-        b.iter(|| encode_png_image(criterion::black_box(&image)).expect("encode_png_image"));
+        b.iter(|| {
+            encode(criterion::black_box(&image), &EncodeOptions::default())
+                .expect("encode_png_image")
+        });
     });
     g.finish();
 }
 
 fn bench_encode_rgba_adam7_320x240(c: &mut Criterion) {
     let image = build_rgba(320, 240);
-    let opts = PngEncoderOptions::default().with_interlace(true);
+    let opts = EncodeOptions::default().with_interlace(true);
     let mut g = c.benchmark_group("encode_rgba_adam7_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
     g.bench_function(BenchmarkId::from_parameter("rgba/adam7/320x240"), |b| {
-        b.iter(|| {
-            encode_png_image_with_options(criterion::black_box(&image), &opts)
-                .expect("encode_png_image_with_options")
-        });
+        b.iter(|| encode(criterion::black_box(&image), &opts).expect("encode"));
     });
     g.finish();
 }

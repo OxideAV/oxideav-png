@@ -17,9 +17,9 @@ categories = ["multimedia::encoding", "multimedia::images"]
 # `oxideav-core` is gated behind the default-on `registry` feature so
 # image-library consumers can depend on `oxideav-png` with
 # `default-features = false` and avoid the framework dependency tree
-# entirely. Without `registry` the crate exposes a free-standing
-# `decode_png` / `encode_png_image` / `decode_apng` / `encode_apng`
-# API plus local `PngImage` / `PngError` types and never references
+# entirely. Without `registry` the crate exposes the image-crate
+# contract (`probe` / `info` / `decode*` / `encode*`, `PngImage`,
+# `PngError`, …) plus the APNG / metadata depth API and never references
 # `oxideav-core`.
 oxideav-core = { version = "0.1", optional = true }
 
@@ -35,7 +35,7 @@ default = ["registry"]
 # Wires up the codec / encoder / decoder / demuxer / muxer trait
 # implementations against `oxideav-core` so the crate can plug into the
 # `oxideav` framework registry. Default-on; turn off for image-library
-# use-cases that just want the standalone `decode_png` API.
+# use-cases that just want the standalone `decode` / `encode` API.
 registry = ["dep:oxideav-core"]
 
 [dev-dependencies]

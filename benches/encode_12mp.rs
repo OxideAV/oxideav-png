@@ -45,8 +45,7 @@ use std::time::Instant;
 
 use oxideav_png::filter::{choose_filter_heuristic, filter_row};
 use oxideav_png::{
-    decode_png, encode_png_image_threaded, FilterStrategy, FilterType, PngEncoderOptions, PngImage,
-    PngPixelFormat,
+    decode, encode, EncodeOptions, FilterStrategy, FilterType, PngImage, PngPixelFormat,
 };
 
 const WIDTH: u32 = 4032;
@@ -157,7 +156,7 @@ fn build(pf: PngPixelFormat, photo: bool, raw: Option<&[u8]>) -> PngImage {
             }
         }
     }
-    PngImage::new(WIDTH, HEIGHT, pf, stride, data).with_palette(Vec::new())
+    PngImage::packed(WIDTH, HEIGHT, pf, stride, data)
 }
 
 /// Stage breakdown for one layout: §12.8 heuristic alone, a fixed
@@ -167,18 +166,18 @@ fn build(pf: PngPixelFormat, photo: bool, raw: Option<&[u8]>) -> PngImage {
 fn stages(name: &str, img: &PngImage, levels: &[Option<u8>]) {
     use compcol::zlib::{EncoderConfig, Zlib};
     let bpp = img.bytes_per_pixel();
-    let rb = img.stride;
+    let rb = img.stride();
     let h = img.height as usize;
     let zero = vec![0u8; rb];
     let mut scratch = vec![0u8; rb];
     let t = Instant::now();
     let mut picks = [0usize; 5];
     for y in 0..h {
-        let row = &img.data[y * rb..(y + 1) * rb];
+        let row = &img.planes[0].data[y * rb..(y + 1) * rb];
         let prev = if y == 0 {
             &zero[..]
         } else {
-            &img.data[(y - 1) * rb..y * rb]
+            &img.planes[0].data[(y - 1) * rb..y * rb]
         };
         picks[choose_filter_heuristic(row, prev, bpp, &mut scratch) as usize] += 1;
     }
@@ -186,11 +185,11 @@ fn stages(name: &str, img: &PngImage, levels: &[Option<u8>]) {
     let mut filtered = vec![0u8; (rb + 1) * h];
     let t = Instant::now();
     for y in 0..h {
-        let row = &img.data[y * rb..(y + 1) * rb];
+        let row = &img.planes[0].data[y * rb..(y + 1) * rb];
         let prev = if y == 0 {
             &zero[..]
         } else {
-            &img.data[(y - 1) * rb..y * rb]
+            &img.planes[0].data[(y - 1) * rb..y * rb]
         };
         let dst = &mut filtered[y * (rb + 1)..(y + 1) * (rb + 1)];
         dst[0] = FilterType::Paeth as u8;
@@ -210,24 +209,25 @@ fn stages(name: &str, img: &PngImage, levels: &[Option<u8>]) {
             "| {name} | stages | zlib level {level} over paeth stream | {ms:.0} ms | {} bytes |",
             z.len()
         );
-        // Decode side: inflate alone vs the whole decode_png.
+        // Decode side: inflate alone vs the whole decode.
         let t = Instant::now();
         let back = compcol::vec::decompress_to_vec_capped::<Zlib>(&z, filtered.len() as u64 + 1)
             .expect("inflate");
         let inflate_ms = t.elapsed().as_secs_f64() * 1e3;
         assert_eq!(back.len(), filtered.len());
-        let png = encode_png_image_threaded(
+        let png = encode(
             img,
-            &PngEncoderOptions::default().with_compression_level(Some(level)),
-            8,
+            &EncodeOptions::default()
+                .with_compression_level(Some(level))
+                .with_threads(8),
         )
         .expect("encode");
         let t = Instant::now();
-        let dec = decode_png(&png).expect("decode");
+        let dec = decode(&png).expect("decode");
         let decode_ms = t.elapsed().as_secs_f64() * 1e3;
-        assert_eq!(dec.data, img.data);
+        assert_eq!(dec.planes[0].data, img.planes[0].data);
         println!(
-            "| {name} | stages | level {level}: inflate alone {inflate_ms:.0} ms | decode_png total {decode_ms:.0} ms |"
+            "| {name} | stages | level {level}: inflate alone {inflate_ms:.0} ms | decode total {decode_ms:.0} ms |"
         );
     }
 }
@@ -276,10 +276,10 @@ fn main() {
         // plane are the only large buffers that should be resident.
         let png = std::fs::read(&path).expect("read PNG_BENCH_PNG");
         let t = Instant::now();
-        let back = decode_png(&png).expect("decode");
+        let back = decode(&png).expect("decode");
         eprintln!(
             "rss probe: decoded {} B from {} B in {:.0} ms",
-            back.data.len(),
+            back.planes[0].data.len(),
             png.len(),
             t.elapsed().as_secs_f64() * 1e3
         );
@@ -296,21 +296,21 @@ fn main() {
             .expect("layout");
         let img = build(pf, true, raw.as_deref());
         drop(raw);
-        let opts = PngEncoderOptions::default()
+        let opts = EncodeOptions::default()
             .with_compression_level(levels[0])
             .with_filter_strategy(filters[0].1);
-        let png = encode_png_image_threaded(&img, &opts, thread_budgets[0]).expect("encode");
+        let png = encode(&img, &opts.clone().with_threads(thread_budgets[0])).expect("encode");
         eprintln!(
             "rss probe: {name} input {} B -> png {} B (level {:?}, threads {})",
-            img.data.len(),
+            img.planes[0].data.len(),
             png.len(),
             levels[0],
             thread_budgets[0]
         );
         if mode == "decode" {
             drop(img);
-            let back = decode_png(&png).expect("decode");
-            eprintln!("rss probe: decoded {} B", back.data.len());
+            let back = decode(&png).expect("decode");
+            eprintln!("rss probe: decoded {} B", back.planes[0].data.len());
         }
         return;
     }
@@ -327,11 +327,11 @@ fn main() {
             if std::env::var_os("PNG_BENCH_STAGES").is_some() {
                 stages(name, &img, &levels);
             }
-            let raw_len = img.data.len();
+            let raw_len = img.planes[0].data.len();
             for &level in &levels {
                 for (fname, strategy) in &filters {
                     for &threads in &thread_budgets {
-                        let opts = PngEncoderOptions::default()
+                        let opts = EncodeOptions::default()
                             .with_compression_level(level)
                             .with_filter_strategy(*strategy);
                         let mut best_enc = f64::MAX;
@@ -340,7 +340,7 @@ fn main() {
                         for _ in 0..reps {
                             let t = Instant::now();
                             let png =
-                                encode_png_image_threaded(&img, &opts, threads).expect("encode");
+                                encode(&img, &opts.clone().with_threads(threads)).expect("encode");
                             best_enc = best_enc.min(t.elapsed().as_secs_f64() * 1e3);
                             bytes = png.len();
                             if let Ok(dir) = std::env::var("PNG_BENCH_OUT") {
@@ -352,9 +352,12 @@ fn main() {
                                 std::fs::write(&file, &png).expect("write PNG_BENCH_OUT file");
                             }
                             let t = Instant::now();
-                            let back = decode_png(&png).expect("decode");
+                            let back = decode(&png).expect("decode");
                             best_dec = best_dec.min(t.elapsed().as_secs_f64() * 1e3);
-                            assert_eq!(back.data, img.data, "{name} {fname} round-trip mismatch");
+                            assert_eq!(
+                                back.planes[0].data, img.planes[0].data,
+                                "{name} {fname} round-trip mismatch"
+                            );
                         }
                         println!(
                         "| {name} | {} | {} | {fname} | {threads} | {best_enc:.0} | {bytes} | {:.1}% | {best_dec:.0} |",

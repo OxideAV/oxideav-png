@@ -1,6 +1,9 @@
 //! Container probe: PNG magic bytes at offset 0 → score 100. Anything else
 //! → 0.
 
+// The framework path: needs `oxideav-core` (default-on `registry`).
+#![cfg(feature = "registry")]
+
 use oxideav_core::ProbeData;
 
 #[test]

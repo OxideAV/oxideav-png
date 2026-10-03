@@ -10,13 +10,15 @@
 //! * the framework-side encoder honours `set_execution_context` and
 //!   still produces the serial bytes.
 
+// The framework path: needs `oxideav-core` (default-on `registry`).
+#![cfg(feature = "registry")]
+
 use oxideav_core::{
     CodecId, CodecParameters, ExecutionContext, Frame, PixelFormat, VideoFrame, VideoPlane,
 };
 use oxideav_png::{
-    decode_apng, decode_png, encode_apng_frames_threaded, encode_apng_threaded,
-    encode_png_image_threaded, encode_png_image_with_options, ApngFrameSpec, FilterStrategy,
-    FilterType, PngEncoderOptions, PngImage, PngPixelFormat,
+    decode, decode_apng, encode, encode_apng_frames_threaded, encode_apng_threaded, ApngFrameSpec,
+    EncodeOptions, FilterStrategy, FilterType, PngImage, PngPixelFormat,
 };
 
 /// Deterministic "photographic" plane: gradients + 4 bits of noise, so
@@ -45,7 +47,7 @@ fn synth(width: u32, height: u32, pf: PngPixelFormat, stride_pad: usize) -> PngI
             cur[..row_bytes].copy_from_slice(&prev[(y - 1) * stride..(y - 1) * stride + row_bytes]);
         }
     }
-    PngImage::new(width, height, pf, stride, data).with_palette(Vec::new())
+    PngImage::packed(width, height, pf, stride, data)
 }
 
 /// Strip stride padding so a decoded (tightly packed) plane compares.
@@ -53,7 +55,7 @@ fn packed(img: &PngImage) -> Vec<u8> {
     let row_bytes = img.width as usize * img.bytes_per_pixel();
     (0..img.height as usize)
         .flat_map(|y| {
-            img.data[y * img.stride..y * img.stride + row_bytes]
+            img.planes[0].data[y * img.stride()..y * img.stride() + row_bytes]
                 .iter()
                 .copied()
         })
@@ -86,20 +88,24 @@ fn threaded_output_is_identical_to_serial_and_round_trips() {
             FilterStrategy::Adaptive,
             FilterStrategy::Fixed(FilterType::Paeth),
         ] {
-            let opts = PngEncoderOptions::default()
+            let opts = EncodeOptions::default()
                 .with_filter_strategy(strategy)
                 .with_compression_level(Some(1));
-            let serial = encode_png_image_with_options(&img, &opts).expect("serial encode");
+            let serial = encode(&img, &opts).expect("serial encode");
             for threads in [2usize, 8] {
-                let par = encode_png_image_threaded(&img, &opts, threads).expect("threaded");
+                let par = encode(&img, &opts.clone().with_threads(threads)).expect("threaded");
                 assert_eq!(
                     par, serial,
                     "{pf:?} {strategy:?} threads={threads}: bytes differ"
                 );
             }
-            let back = decode_png(&serial).expect("decode");
-            assert_eq!(back.pixel_format, pf);
-            assert_eq!(back.data, packed(&img), "{pf:?} {strategy:?} round-trip");
+            let back = decode(&serial).expect("decode");
+            assert_eq!(back.format, pf);
+            assert_eq!(
+                back.planes[0].data,
+                packed(&img),
+                "{pf:?} {strategy:?} round-trip"
+            );
         }
     }
 }
@@ -109,22 +115,22 @@ fn threaded_output_is_identical_to_serial_and_round_trips() {
 #[test]
 fn brute_is_thread_stable_and_smallest_on_segmented_streams() {
     let img = synth(W, H / 3, PngPixelFormat::Rgb24, 0);
-    let brute_opts = PngEncoderOptions::default()
+    let brute_opts = EncodeOptions::default()
         .with_filter_strategy(FilterStrategy::Brute)
         .with_compression_level(Some(1));
-    let brute = encode_png_image_with_options(&img, &brute_opts).unwrap();
+    let brute = encode(&img, &brute_opts).unwrap();
     assert_eq!(
-        encode_png_image_threaded(&img, &brute_opts, 4).unwrap(),
+        encode(&img, &brute_opts.clone().with_threads(4)).unwrap(),
         brute
     );
     for cand in FilterStrategy::BRUTE_CANDIDATES {
-        let opts = PngEncoderOptions::default()
+        let opts = EncodeOptions::default()
             .with_filter_strategy(cand)
             .with_compression_level(Some(1));
-        let len = encode_png_image_with_options(&img, &opts).unwrap().len();
+        let len = encode(&img, &opts).unwrap().len();
         assert!(brute.len() <= len, "brute {} > {cand:?} {len}", brute.len());
     }
-    assert_eq!(decode_png(&brute).unwrap().data, img.data);
+    assert_eq!(decode(&brute).unwrap().planes[0].data, img.planes[0].data);
 }
 
 /// Interlaced and sub-byte paths route their pass-concatenated stream
@@ -132,30 +138,33 @@ fn brute_is_thread_stable_and_smallest_on_segmented_streams() {
 #[test]
 fn adam7_and_subbyte_are_thread_stable() {
     let rgb = synth(W, H / 2, PngPixelFormat::Rgb24, 0);
-    let opts = PngEncoderOptions::default()
+    let opts = EncodeOptions::default()
         .with_interlace(true)
         .with_compression_level(Some(1));
-    let serial = encode_png_image_with_options(&rgb, &opts).unwrap();
-    assert_eq!(encode_png_image_threaded(&rgb, &opts, 6).unwrap(), serial);
-    assert_eq!(decode_png(&serial).unwrap().data, rgb.data);
+    let serial = encode(&rgb, &opts).unwrap();
+    assert_eq!(encode(&rgb, &opts.clone().with_threads(6)).unwrap(), serial);
+    assert_eq!(decode(&serial).unwrap().planes[0].data, rgb.planes[0].data);
 
     // 4-bit grayscale, 2048 wide × 1100 tall = 1 024 B/row → 1.1 MB.
     // The decoder scales 4-bit samples up by 17 (W3C PNG3 §13.12), so
     // compare against the scaled source.
     let mut gray = synth(2048, 1100, PngPixelFormat::Gray8, 0);
-    for b in gray.data.iter_mut() {
+    for b in gray.planes[0].data.iter_mut() {
         *b &= 0x0f;
     }
-    let scaled: Vec<u8> = gray.data.iter().map(|&v| v * 17).collect();
+    let scaled: Vec<u8> = gray.planes[0].data.iter().map(|&v| v * 17).collect();
     for interlace in [false, true] {
-        let opts = PngEncoderOptions::default()
+        let opts = EncodeOptions::default()
             .with_interlace(interlace)
             .with_bit_depth(Some(4))
             .with_compression_level(Some(1));
-        let serial = encode_png_image_with_options(&gray, &opts).unwrap();
-        assert_eq!(encode_png_image_threaded(&gray, &opts, 5).unwrap(), serial);
+        let serial = encode(&gray, &opts).unwrap();
         assert_eq!(
-            decode_png(&serial).unwrap().data,
+            encode(&gray, &opts.clone().with_threads(5)).unwrap(),
+            serial
+        );
+        assert_eq!(
+            decode(&serial).unwrap().planes[0].data,
             scaled,
             "interlace={interlace}"
         );
@@ -168,10 +177,10 @@ fn adam7_and_subbyte_are_thread_stable() {
 fn apng_frames_stream_into_chunks_thread_stably() {
     let a = synth(W, H / 4, PngPixelFormat::Rgba, 0);
     let mut b = a.clone();
-    for px in b.data.chunks_exact_mut(4) {
+    for px in b.planes[0].data.chunks_exact_mut(4) {
         px[0] = px[0].wrapping_add(40);
     }
-    let opts = PngEncoderOptions::default().with_compression_level(Some(1));
+    let opts = EncodeOptions::default().with_compression_level(Some(1));
     let serial = encode_apng_threaded(&[a.clone(), b.clone()], 5, 0, &opts, 1).unwrap();
     assert_eq!(
         encode_apng_threaded(&[a.clone(), b.clone()], 5, 0, &opts, 4).unwrap(),
@@ -179,8 +188,8 @@ fn apng_frames_stream_into_chunks_thread_stably() {
     );
     let anim = decode_apng(&serial).unwrap();
     assert_eq!(anim.frames.len(), 2);
-    assert_eq!(anim.frames[0].image.data, a.data);
-    assert_eq!(anim.frames[1].image.data, b.data);
+    assert_eq!(anim.frames[0].image.planes[0].data, a.planes[0].data);
+    assert_eq!(anim.frames[1].image.planes[0].data, b.planes[0].data);
 
     // Region-aware: a half-height sub-frame at an offset.
     let region = synth(W, H / 8, PngPixelFormat::Rgba, 0);
@@ -195,7 +204,7 @@ fn apng_frames_stream_into_chunks_thread_stably() {
     );
     let anim = decode_apng(&serial).unwrap();
     assert_eq!(anim.frames.len(), 2);
-    assert_eq!(anim.frames[0].image.data, a.data);
+    assert_eq!(anim.frames[0].image.planes[0].data, a.planes[0].data);
 }
 
 /// The framework encoder: `set_execution_context` is honoured (no
@@ -207,8 +216,8 @@ fn registry_encoder_honours_execution_context() {
     let frame = VideoFrame {
         pts: Some(7),
         planes: vec![VideoPlane {
-            stride: img.stride,
-            data: img.data.clone(),
+            stride: img.stride(),
+            data: img.planes[0].data.clone(),
         }],
     };
     let mut params = CodecParameters::video(CodecId::new("png"));
@@ -229,7 +238,10 @@ fn registry_encoder_honours_execution_context() {
         "framework encoder bytes depend on the thread budget"
     );
     assert_eq!(par.pts, Some(7));
-    assert_eq!(decode_png(&par.data).unwrap().data, img.data);
+    assert_eq!(
+        decode(&par.data).unwrap().planes[0].data,
+        img.planes[0].data
+    );
 }
 
 /// A plane shorter than `height × stride` is an encode error, not a
@@ -237,11 +249,11 @@ fn registry_encoder_honours_execution_context() {
 #[test]
 fn short_plane_is_an_error_not_a_panic() {
     let mut img = synth(64, 64, PngPixelFormat::Rgb24, 0);
-    img.data.truncate(img.data.len() - 1);
-    let err = encode_png_image_with_options(&img, &PngEncoderOptions::default()).unwrap_err();
+    img.planes[0].data.pop();
+    let err = encode(&img, &EncodeOptions::default()).unwrap_err();
     assert!(err.to_string().contains("bytes"), "{err}");
     let mut narrow = synth(64, 64, PngPixelFormat::Rgb24, 0);
-    narrow.stride = 100;
-    let err = encode_png_image_with_options(&narrow, &PngEncoderOptions::default()).unwrap_err();
+    narrow.planes[0].stride = 100;
+    let err = encode(&narrow, &EncodeOptions::default()).unwrap_err();
     assert!(err.to_string().contains("stride"), "{err}");
 }

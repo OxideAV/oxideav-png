@@ -1,8 +1,8 @@
-//! `decode_png_to_rgba` covers each input pixel format the standalone
+//! `decode_rgba8` covers each input pixel format the standalone
 //! decoder can produce, promoting them to a uniform 8-bit RGBA bitmap
 //! ready to blit. Tests below build a synthetic source image per
 //! pixel format, encode it via the standalone encoder, then re-decode
-//! through `decode_png_to_rgba` and check the post-promotion bytes.
+//! through `decode_rgba8` and check the post-promotion bytes.
 //!
 //! Coverage matrix (one test per row):
 //!   - Gray8     → (g,g,g,255)
@@ -15,11 +15,26 @@
 //!   - Rgba      → identity
 //!   - Rgba64Le  → (r_hi,g_hi,b_hi,a_hi)
 
-use oxideav_png::{decode_png_to_rgba, encode_png_image, PngImage, PngPixelFormat};
+use oxideav_png::{decode_rgba8, encode, EncodeOptions, Palette, PngImage, PngPixelFormat};
 
+/// `palette` is the legacy `PLTE || tRNS` blob: `plte_entries` RGB
+/// triples followed by the alpha tail.
 fn make(w: u32, h: u32, pf: PngPixelFormat, data: Vec<u8>, palette: Vec<u8>) -> PngImage {
     let bpp = pf.bytes_per_pixel();
-    PngImage::new(w, h, pf, w as usize * bpp, data).with_palette(palette)
+    let img = PngImage::packed(w, h, pf, w as usize * bpp, data);
+    if palette.is_empty() {
+        return img;
+    }
+    let plte_entries = data_max(&img) + 1;
+    let (plte, trns) = palette.split_at((plte_entries * 3).min(palette.len()));
+    img.with_palette(Palette::from_rgb(
+        plte,
+        if trns.is_empty() { None } else { Some(trns) },
+    ))
+}
+
+fn data_max(img: &PngImage) -> usize {
+    img.planes[0].data.iter().copied().max().unwrap_or(0) as usize
 }
 
 #[test]
@@ -27,8 +42,8 @@ fn gray8_to_rgba_alpha_255_grey_replicated() {
     // 4x2 ramp.
     let raw: Vec<u8> = (0..8u8).map(|x| x * 10).collect();
     let img = make(4, 2, PngPixelFormat::Gray8, raw.clone(), Vec::new());
-    let bytes = encode_png_image(&img).expect("encode");
-    let rgba = decode_png_to_rgba(&bytes).expect("decode");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode");
+    let rgba = decode_rgba8(&bytes).expect("decode");
     assert_eq!(rgba.width, 4);
     assert_eq!(rgba.height, 2);
     assert_eq!(rgba.data.len(), 4 * 2 * 4);
@@ -50,8 +65,8 @@ fn gray16le_to_rgba_high_byte_replicated() {
         raw.push((s >> 8) as u8);
     }
     let img = make(2, 2, PngPixelFormat::Gray16Le, raw, Vec::new());
-    let bytes = encode_png_image(&img).expect("encode");
-    let rgba = decode_png_to_rgba(&bytes).expect("decode");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode");
+    let rgba = decode_rgba8(&bytes).expect("decode");
     assert_eq!(rgba.width, 2);
     assert_eq!(rgba.height, 2);
     assert_eq!(rgba.data.len(), 16);
@@ -74,8 +89,8 @@ fn rgb24_to_rgba_alpha_255() {
         128, 64, 32, // brownish
     ];
     let img = make(2, 2, PngPixelFormat::Rgb24, raw.clone(), Vec::new());
-    let bytes = encode_png_image(&img).expect("encode");
-    let rgba = decode_png_to_rgba(&bytes).expect("decode");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode");
+    let rgba = decode_rgba8(&bytes).expect("decode");
     assert_eq!(rgba.data.len(), 16);
     for i in 0..4 {
         assert_eq!(rgba.data[i * 4], raw[i * 3]);
@@ -99,8 +114,8 @@ fn rgb48le_to_rgba_high_byte_per_channel() {
         raw.push((b >> 8) as u8);
     }
     let img = make(1, 2, PngPixelFormat::Rgb48Le, raw, Vec::new());
-    let bytes = encode_png_image(&img).expect("encode");
-    let rgba = decode_png_to_rgba(&bytes).expect("decode");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode");
+    let rgba = decode_rgba8(&bytes).expect("decode");
     assert_eq!(rgba.data.len(), 8);
     for (i, (r, g, b)) in samples.iter().enumerate() {
         assert_eq!(rgba.data[i * 4], (r >> 8) as u8, "px{i} R");
@@ -122,8 +137,8 @@ fn pal8_no_trns_to_rgba_alpha_255() {
     // 2x2 picking each entry.
     let raw: Vec<u8> = vec![0, 1, 2, 3];
     let img = make(2, 2, PngPixelFormat::Pal8, raw, palette);
-    let bytes = encode_png_image(&img).expect("encode");
-    let rgba = decode_png_to_rgba(&bytes).expect("decode");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode");
+    let rgba = decode_rgba8(&bytes).expect("decode");
     let expected: Vec<u8> = vec![
         0, 0, 0, 255, // black
         255, 0, 0, 255, // red
@@ -148,8 +163,8 @@ fn pal8_with_trns_to_rgba_per_entry_alpha() {
     // 4 pixels, one per palette entry.
     let raw: Vec<u8> = vec![0, 1, 2, 3];
     let img = make(2, 2, PngPixelFormat::Pal8, raw, palette);
-    let bytes = encode_png_image(&img).expect("encode");
-    let rgba = decode_png_to_rgba(&bytes).expect("decode");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode");
+    let rgba = decode_rgba8(&bytes).expect("decode");
     let expected: Vec<u8> = vec![
         10, 20, 30, 0, // entry 0, alpha 0
         40, 50, 60, 64, // entry 1, alpha 64
@@ -164,8 +179,8 @@ fn ya8_to_rgba_grey_with_alpha() {
     // 2x1 grey+alpha pixels.
     let raw: Vec<u8> = vec![100, 50, 200, 255];
     let img = make(2, 1, PngPixelFormat::Ya8, raw, Vec::new());
-    let bytes = encode_png_image(&img).expect("encode");
-    let rgba = decode_png_to_rgba(&bytes).expect("decode");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode");
+    let rgba = decode_rgba8(&bytes).expect("decode");
     let expected: Vec<u8> = vec![
         100, 100, 100, 50, // px0
         200, 200, 200, 255, // px1
@@ -183,8 +198,8 @@ fn rgba_to_rgba_identity() {
         128, 128, 128, 255, // grey opaque
     ];
     let img = make(2, 2, PngPixelFormat::Rgba, raw.clone(), Vec::new());
-    let bytes = encode_png_image(&img).expect("encode");
-    let rgba = decode_png_to_rgba(&bytes).expect("decode");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode");
+    let rgba = decode_rgba8(&bytes).expect("decode");
     assert_eq!(rgba.data, raw);
 }
 
@@ -207,8 +222,8 @@ fn rgba64le_to_rgba_high_byte_per_channel() {
         raw.push((a >> 8) as u8);
     }
     let img = make(1, 2, PngPixelFormat::Rgba64Le, raw, Vec::new());
-    let bytes = encode_png_image(&img).expect("encode");
-    let rgba = decode_png_to_rgba(&bytes).expect("decode");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode");
+    let rgba = decode_rgba8(&bytes).expect("decode");
     assert_eq!(rgba.data.len(), 8);
     for (i, (r, g, b, a)) in samples.iter().enumerate() {
         assert_eq!(rgba.data[i * 4], (r >> 8) as u8, "px{i} R");
@@ -223,7 +238,7 @@ fn rgba_bitmap_stride_helper() {
     // Tiny smoke-test of the stride() helper (always 4*width).
     let raw: Vec<u8> = vec![1; 16];
     let img = make(2, 2, PngPixelFormat::Rgba, raw, Vec::new());
-    let bytes = encode_png_image(&img).expect("encode");
-    let rgba = decode_png_to_rgba(&bytes).expect("decode");
+    let bytes = encode(&img, &EncodeOptions::default()).expect("encode");
+    let rgba = decode_rgba8(&bytes).expect("decode");
     assert_eq!(rgba.stride(), 8);
 }

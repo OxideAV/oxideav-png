@@ -15,7 +15,7 @@ use compcol::zlib::{EncoderConfig, Zlib};
 use oxideav_png::chunk::write_chunk;
 use oxideav_png::metadata::{Iccp, Itxt, Ztxt};
 use oxideav_png::{
-    decode_apng, decode_png, encode_apng, encode_png_image, parse_metadata, Ihdr, PngImage,
+    decode, decode_apng, encode, encode_apng, parse_metadata, EncodeOptions, Ihdr, PngImage,
     PngPixelFormat, MAX_INFLATED_METADATA_LEN,
 };
 
@@ -27,7 +27,7 @@ fn deflate(data: &[u8]) -> Vec<u8> {
 }
 
 fn gray_1x1() -> PngImage {
-    PngImage::new(1, 1, PngPixelFormat::Gray8, 1, vec![0x7F]).with_palette(Vec::new())
+    PngImage::packed(1, 1, PngPixelFormat::Gray8, 1, vec![0x7F])
 }
 
 /// Walk a PNG datastream's chunks, returning `(type, whole-chunk byte
@@ -102,7 +102,7 @@ fn itxt_compressed_decompression_bomb_rejected() {
 fn ztxt_bomb_spliced_into_file_fails_parse_metadata() {
     // The full-file path must reject the same bomb (the per-chunk parse
     // routines are what parse_metadata dispatches into).
-    let bytes = encode_png_image(&gray_1x1()).expect("encode");
+    let bytes = encode(&gray_1x1(), &EncodeOptions::default()).expect("encode");
     let mut payload = b"Comment\0\0".to_vec();
     payload.extend_from_slice(&metadata_bomb_body());
     let mut chunk = Vec::new();
@@ -175,7 +175,7 @@ fn idat_bomb_behind_1x1_ihdr_rejected() {
     // byte + 1 sample byte). Hand the decoder an IDAT that inflates to
     // 64 KiB instead: the capped inflate must cut it off at
     // expected + 1 = 3 bytes and error, without materialising the rest.
-    let good = encode_png_image(&gray_1x1()).expect("encode");
+    let good = encode(&gray_1x1(), &EncodeOptions::default()).expect("encode");
     let bomb_idat = deflate(&vec![0u8; 64 * 1024]);
     let mut tampered = good[..8].to_vec();
     for (ty, range) in chunk_ranges(&good) {
@@ -187,7 +187,7 @@ fn idat_bomb_behind_1x1_ihdr_rejected() {
             tampered.extend_from_slice(&good[range]);
         }
     }
-    let err = decode_png(&tampered).expect_err("bomb IDAT must be rejected");
+    let err = decode(&tampered).expect_err("bomb IDAT must be rejected");
     let msg = format!("{err}");
     assert!(
         msg.contains("filtered-stream size"),
@@ -200,7 +200,7 @@ fn idat_short_stream_still_reports_length_mismatch() {
     // The cap must not swallow the pre-existing too-short diagnostics:
     // a stream inflating *under* the expected size is a plain length
     // mismatch, not a bomb.
-    let good = encode_png_image(&gray_1x1()).expect("encode");
+    let good = encode(&gray_1x1(), &EncodeOptions::default()).expect("encode");
     let short_idat = deflate(&[0u8; 1]); // 1 byte < expected 2
     let mut tampered = good[..8].to_vec();
     for (ty, range) in chunk_ranges(&good) {
@@ -212,7 +212,7 @@ fn idat_short_stream_still_reports_length_mismatch() {
             tampered.extend_from_slice(&good[range]);
         }
     }
-    assert!(decode_png(&tampered).is_err());
+    assert!(decode(&tampered).is_err());
 }
 
 // ---- fdAT bomb behind a small fcTL region ----------------------------
@@ -222,7 +222,7 @@ fn fdat_bomb_behind_small_fctl_rejected() {
     // Build a valid 2-frame 2x2 APNG, then swell the second frame's
     // fdAT into a stream that inflates far past the fcTL-implied
     // filtered size. The per-frame capped inflate must reject it.
-    let f = PngImage::new(2, 2, PngPixelFormat::Rgba, 8, vec![0x40; 16]).with_palette(Vec::new());
+    let f = PngImage::packed(2, 2, PngPixelFormat::Rgba, 8, vec![0x40; 16]);
     let good = encode_apng(&[f.clone(), f], 10, 0).expect("encode apng");
     let bomb = deflate(&vec![0u8; 64 * 1024]);
     let mut tampered = good[..8].to_vec();
@@ -374,7 +374,7 @@ fn with_idat(good: &[u8], idat: &[u8]) -> Vec<u8> {
 fn rgb_16x9() -> PngImage {
     let (w, h) = (16u32, 9u32);
     let data: Vec<u8> = (0..w * h * 3).map(|i| (i * 37 % 251) as u8).collect();
-    PngImage::new(w, h, PngPixelFormat::Rgb24, (w * 3) as usize, data).with_palette(Vec::new())
+    PngImage::packed(w, h, PngPixelFormat::Rgb24, (w * 3) as usize, data)
 }
 
 /// The non-interlaced decoder inflates one wire row at a time straight
@@ -384,14 +384,14 @@ fn rgb_16x9() -> PngImage {
 #[test]
 fn idat_truncated_mid_stream_is_an_error() {
     let img = rgb_16x9();
-    let good = encode_png_image(&img).expect("encode");
+    let good = encode(&img, &EncodeOptions::default()).expect("encode");
     let idat: Vec<u8> = chunk_ranges(&good)
         .into_iter()
         .find(|(ty, _)| ty == b"IDAT")
         .map(|(_, r)| good[r.start + 8..r.end - 4].to_vec())
         .expect("IDAT");
     for cut in [1usize, idat.len() / 2, idat.len() - 5, idat.len() - 1] {
-        let err = decode_png(&with_idat(&good, &idat[..cut])).expect_err("truncated");
+        let err = decode(&with_idat(&good, &idat[..cut])).expect_err("truncated");
         let msg = format!("{err}");
         assert!(
             msg.contains("ends before") || msg.contains("decompress failed"),
@@ -405,15 +405,15 @@ fn idat_truncated_mid_stream_is_an_error() {
 #[test]
 fn idat_one_byte_overlong_is_rejected_as_bomb() {
     let img = rgb_16x9();
-    let good = encode_png_image(&img).expect("encode");
+    let good = encode(&img, &EncodeOptions::default()).expect("encode");
     let expected = (1 + 16 * 3) * 9;
     let overlong = deflate(&vec![0u8; expected + 1]);
-    let err = decode_png(&with_idat(&good, &overlong)).expect_err("overlong");
+    let err = decode(&with_idat(&good, &overlong)).expect_err("overlong");
     assert!(format!("{err}").contains("inflates past"), "{err}");
     // And exactly the implied size decodes (all-None rows of zeros).
     let exact = deflate(&vec![0u8; expected]);
-    let back = decode_png(&with_idat(&good, &exact)).expect("exact-size stream");
-    assert!(back.data.iter().all(|&b| b == 0));
+    let back = decode(&with_idat(&good, &exact)).expect("exact-size stream");
+    assert!(back.planes[0].data.iter().all(|&b| b == 0));
 }
 
 /// Bytes after the zlib trailer inside the IDAT run are ignored, as the
@@ -421,13 +421,13 @@ fn idat_one_byte_overlong_is_rejected_as_bomb() {
 #[test]
 fn idat_trailing_bytes_after_stream_are_ignored() {
     let img = rgb_16x9();
-    let good = encode_png_image(&img).expect("encode");
+    let good = encode(&img, &EncodeOptions::default()).expect("encode");
     let mut idat: Vec<u8> = chunk_ranges(&good)
         .into_iter()
         .find(|(ty, _)| ty == b"IDAT")
         .map(|(_, r)| good[r.start + 8..r.end - 4].to_vec())
         .expect("IDAT");
     idat.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
-    let back = decode_png(&with_idat(&good, &idat)).expect("trailing bytes tolerated");
-    assert_eq!(back.data, img.data);
+    let back = decode(&with_idat(&good, &idat)).expect("trailing bytes tolerated");
+    assert_eq!(back.planes[0].data, img.planes[0].data);
 }

@@ -12,7 +12,7 @@
 
 use oxideav_png::{
     decode_apng, encode_apng_frames, encode_apng_frames_with_options, ApngBlend, ApngDisposal,
-    ApngFrameSpec, PngEncoderOptions, PngImage, PngPixelFormat,
+    ApngFrameSpec, EncodeOptions, PngImage, PngPixelFormat,
 };
 
 /// A solid-colour RGBA region of the given extent.
@@ -21,13 +21,13 @@ fn solid_rgba(w: u32, h: u32, rgba: [u8; 4]) -> PngImage {
     for px in data.chunks_exact_mut(4) {
         px.copy_from_slice(&rgba);
     }
-    PngImage::new(w, h, PngPixelFormat::Rgba, w as usize * 4, data).with_palette(Vec::new())
+    PngImage::packed(w, h, PngPixelFormat::Rgba, w as usize * 4, data)
 }
 
 /// Read the canvas pixel at (x, y) from a composited RGBA frame.
 fn pixel(img: &PngImage, x: u32, y: u32) -> [u8; 4] {
-    let off = y as usize * img.stride + x as usize * 4;
-    img.data[off..off + 4].try_into().unwrap()
+    let off = y as usize * img.stride() + x as usize * 4;
+    img.planes[0].data[off..off + 4].try_into().unwrap()
 }
 
 #[test]
@@ -256,7 +256,7 @@ fn region_frame_mismatched_format_is_rejected() {
     let h = 2u32;
     let f0 = ApngFrameSpec::full_canvas(solid_rgba(w, h, [0, 0, 0, 255]), 10);
     let mut f1 = ApngFrameSpec::full_canvas(solid_rgba(w, h, [0, 0, 0, 255]), 10);
-    f1.image.pixel_format = PngPixelFormat::Gray8;
+    f1.image.format = PngPixelFormat::Gray8;
     let err = encode_apng_frames(w, h, None, &[f0, f1], 0).unwrap_err();
     assert!(format!("{err}").contains("pixel_format"));
 }
@@ -268,7 +268,7 @@ fn region_frames_interlaced_roundtrip() {
     let h = 8u32;
     let f0 = ApngFrameSpec::full_canvas(solid_rgba(w, h, [200, 100, 50, 255]), 10);
     let f1 = ApngFrameSpec::full_canvas(solid_rgba(w, h, [50, 100, 200, 255]), 10);
-    let opts = PngEncoderOptions::default().with_interlace(true);
+    let opts = EncodeOptions::default().with_interlace(true);
     let bytes = encode_apng_frames_with_options(w, h, None, &[f0, f1], 0, &opts)
         .expect("encode interlaced");
     let anim = decode_apng(&bytes).expect("decode");

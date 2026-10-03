@@ -23,12 +23,12 @@ fn solid_rgba(w: u32, h: u32, rgba: [u8; 4]) -> PngImage {
     for px in data.chunks_exact_mut(4) {
         px.copy_from_slice(&rgba);
     }
-    PngImage::new(w, h, PngPixelFormat::Rgba, w as usize * 4, data).with_palette(Vec::new())
+    PngImage::packed(w, h, PngPixelFormat::Rgba, w as usize * 4, data)
 }
 
 fn pixel(img: &PngImage, x: u32, y: u32) -> [u8; 4] {
-    let off = y as usize * img.stride + x as usize * 4;
-    img.data[off..off + 4].try_into().unwrap()
+    let off = y as usize * img.stride() + x as usize * 4;
+    img.planes[0].data[off..off + 4].try_into().unwrap()
 }
 
 /// 8-bit OVER of a single channel: matches the compositor's rounded integer
@@ -189,7 +189,7 @@ fn over_fully_opaque_equals_source() {
     let over = decode_apng(&mk(ApngBlend::Over)).expect("decode over");
     let source = decode_apng(&mk(ApngBlend::Source)).expect("decode source");
     assert_eq!(
-        over.frames[1].image.data, source.frames[1].image.data,
+        over.frames[1].image.planes[0].data, source.frames[1].image.planes[0].data,
         "opaque OVER must equal SOURCE"
     );
 }

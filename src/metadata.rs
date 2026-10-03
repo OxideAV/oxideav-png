@@ -739,7 +739,7 @@ impl Bkgd {
 pub enum Trns {
     /// Colour type 0: a single transparent gray sample, stored as a
     /// `u16` at the IHDR bit depth's natural range. Sample values that
-    /// match this exactly emerge from `decode_png_to_rgba` with α=0.
+    /// match this exactly emerge from `decode_rgba8` with α=0.
     Grayscale(u16),
     /// Colour type 2: a single transparent RGB sample triple, each
     /// channel a `u16` at the IHDR bit depth's natural range.
@@ -2575,7 +2575,7 @@ impl UnknownChunk {
 /// Bundle of metadata chunks that round-trip through the encoder.
 ///
 /// Populated by [`crate::parse_metadata`] on decode and consumed by
-/// [`crate::PngEncoderOptions::metadata`] on encode. Any `None` field is
+/// [`crate::EncodeOptions::metadata`] on encode. Any `None` field is
 /// simply omitted from the output PNG; the `splt`, `texts`, `ztxts`,
 /// `itxts`, and `unknowns` `Vec`s are omitted when empty.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2591,9 +2591,8 @@ pub struct PngMetadata {
     /// `Grayscale` for ct=0, `Rgb` for ct=2, `Palette` for ct=3. Colour
     /// types 4 / 6 are rejected outright (a full alpha channel is
     /// already present). The encoder emits this chunk for ct=0 / ct=2
-    /// inputs (`Pal8` ct=3 still rides via `image.palette`'s `PLTE ||
-    /// tRNS` tail for backwards-compat; setting both is a duplicate-
-    /// emission error).
+    /// inputs (`Pal8` ct=3 normally rides on the palette's alpha
+    /// entries; setting both is a duplicate-emission error).
     pub trns: Option<Trns>,
     pub exif: Option<Exif>,
     pub srgb: Option<Srgb>,

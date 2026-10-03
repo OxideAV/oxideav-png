@@ -34,8 +34,7 @@ fn fill16(count: usize, mut state: u32) -> Vec<u8> {
 fn image(format: PngPixelFormat, w: u32, h: u32) -> PngImage {
     let bpp = format.bytes_per_pixel();
     let samples = w as usize * h as usize * (bpp / 2);
-    PngImage::new(w, h, format, w as usize * bpp, fill16(samples, 0x9e37_79b9))
-        .with_palette(Vec::new())
+    PngImage::packed(w, h, format, w as usize * bpp, fill16(samples, 0x9e37_79b9))
 }
 
 fn bench_rescale(c: &mut Criterion) {
@@ -67,7 +66,7 @@ fn bench_rescale(c: &mut Criterion) {
     let mut plain = c.benchmark_group("rescale_16bit_to_8bit");
     for (label, fmt, w, h, _) in cases {
         let img = image(fmt, w, h);
-        plain.throughput(Throughput::Bytes(img.data.len() as u64));
+        plain.throughput(Throughput::Bytes(img.planes[0].data.len() as u64));
         plain.bench_function(BenchmarkId::from_parameter(label), |b| {
             b.iter(|| criterion::black_box(rescale_16bit_to_8bit(criterion::black_box(&img))));
         });
@@ -77,7 +76,7 @@ fn bench_rescale(c: &mut Criterion) {
     let mut via = c.benchmark_group("rescale_16bit_to_8bit_via_sbit");
     for (label, fmt, w, h, sbit) in cases {
         let img = image(fmt, w, h);
-        via.throughput(Throughput::Bytes(img.data.len() as u64));
+        via.throughput(Throughput::Bytes(img.planes[0].data.len() as u64));
         via.bench_function(BenchmarkId::from_parameter(label), |b| {
             b.iter(|| {
                 criterion::black_box(rescale_16bit_to_8bit_via_sbit(

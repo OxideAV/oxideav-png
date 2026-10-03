@@ -13,7 +13,7 @@ use oxideav_png::depth::{
 };
 use oxideav_png::image::{PngImage, PngPixelFormat};
 use oxideav_png::metadata::Sbit;
-use oxideav_png::{decode_png, encode_png_image};
+use oxideav_png::{decode, encode, EncodeOptions};
 
 fn png16(format: PngPixelFormat, w: u32, h: u32, samples: &[u16]) -> PngImage {
     let mut data = Vec::with_capacity(samples.len() * 2);
@@ -22,7 +22,7 @@ fn png16(format: PngPixelFormat, w: u32, h: u32, samples: &[u16]) -> PngImage {
     }
     let bpp = format.bytes_per_pixel();
     assert_eq!(data.len(), w as usize * h as usize * bpp);
-    PngImage::new(w, h, format, w as usize * bpp, data).with_palette(Vec::new())
+    PngImage::packed(w, h, format, w as usize * bpp, data)
 }
 
 fn gradient16(w: u32, h: u32, samples_per_px: usize) -> Vec<u16> {
@@ -43,13 +43,16 @@ fn gradient16(w: u32, h: u32, samples_per_px: usize) -> Vec<u16> {
 /// is byte-exact — the precondition for asserting anything about the
 /// rescale of the decoded buffer.
 fn encode_decode(image: &PngImage) -> PngImage {
-    let bytes = encode_png_image(image).expect("encode 16-bit PNG");
-    let decoded = decode_png(&bytes).expect("decode 16-bit PNG");
-    assert_eq!(decoded.pixel_format, image.pixel_format);
+    let bytes = encode(image, &EncodeOptions::default()).expect("encode 16-bit PNG");
+    let decoded = decode(&bytes).expect("decode 16-bit PNG");
+    assert_eq!(decoded.format, image.format);
     assert_eq!(decoded.width, image.width);
     assert_eq!(decoded.height, image.height);
     // Decoder output is tightly packed; compare the live sample bytes.
-    assert_eq!(decoded.data, image.data, "16-bit round-trip must be exact");
+    assert_eq!(
+        decoded.planes[0].data, image.planes[0].data,
+        "16-bit round-trip must be exact"
+    );
     decoded
 }
 
@@ -61,12 +64,12 @@ fn gray16_rescale_matches_linear_equation() {
     let decoded = encode_decode(&src);
 
     let out = rescale_16bit_to_8bit(&decoded);
-    assert_eq!(out.pixel_format, PngPixelFormat::Gray8);
-    assert_eq!(out.stride, w as usize);
-    assert_eq!(out.data.len(), (w * h) as usize);
+    assert_eq!(out.format, PngPixelFormat::Gray8);
+    assert_eq!(out.stride(), w as usize);
+    assert_eq!(out.planes[0].data.len(), (w * h) as usize);
     for (i, &s) in samples.iter().enumerate() {
         assert_eq!(
-            out.data[i],
+            out.planes[0].data[i],
             rescale_sample(s, u16::MAX, 255) as u8,
             "px {i}"
         );
@@ -81,11 +84,11 @@ fn rgb48_rescale_matches_linear_equation() {
     let decoded = encode_decode(&src);
 
     let out = rescale_16bit_to_8bit(&decoded);
-    assert_eq!(out.pixel_format, PngPixelFormat::Rgb24);
-    assert_eq!(out.data.len(), (w * h * 3) as usize);
+    assert_eq!(out.format, PngPixelFormat::Rgb24);
+    assert_eq!(out.planes[0].data.len(), (w * h * 3) as usize);
     for (i, &s) in samples.iter().enumerate() {
         assert_eq!(
-            out.data[i],
+            out.planes[0].data[i],
             rescale_sample(s, u16::MAX, 255) as u8,
             "sample {i}"
         );
@@ -100,13 +103,13 @@ fn rgba64_rescale_reduces_every_channel_including_alpha() {
     let decoded = encode_decode(&src);
 
     let out = rescale_16bit_to_8bit(&decoded);
-    assert_eq!(out.pixel_format, PngPixelFormat::Rgba);
-    assert_eq!(out.data.len(), (w * h * 4) as usize);
+    assert_eq!(out.format, PngPixelFormat::Rgba);
+    assert_eq!(out.planes[0].data.len(), (w * h * 4) as usize);
     for (i, &s) in samples.iter().enumerate() {
         // Alpha (every 4th sample) is depth-reduced the same way — this
         // is a rescale, not gamma correction.
         assert_eq!(
-            out.data[i],
+            out.planes[0].data[i],
             rescale_sample(s, u16::MAX, 255) as u8,
             "sample {i}"
         );
@@ -129,13 +132,13 @@ fn via_sbit_recovers_low_depth_source_through_the_real_codec() {
     let decoded = encode_decode(&src);
 
     let via = rescale_16bit_to_8bit_via_sbit(&decoded, Sbit::Grayscale(5));
-    assert_eq!(via.pixel_format, PngPixelFormat::Gray8);
+    assert_eq!(via.format, PngPixelFormat::Gray8);
     for (i, &v5) in source_5bit.iter().enumerate() {
         // Recover to 5 bits, then scale 5 -> 8.
         let recovered = recover_sbit(stored[i], 16, 5);
         assert_eq!(recovered, v5, "recovery px {i}");
         let expected = rescale_sample(v5, max_sample(5), 255) as u8;
-        assert_eq!(via.data[i], expected, "sbit rescale px {i}");
+        assert_eq!(via.planes[0].data[i], expected, "sbit rescale px {i}");
     }
 }
 
@@ -144,11 +147,10 @@ fn eight_bit_decode_is_returned_unchanged() {
     // An 8-bit source never enters the 16->8 reduction path.
     let w = 4u32;
     let data: Vec<u8> = (0..(w * 3) as u8).collect();
-    let src =
-        PngImage::new(w, 1, PngPixelFormat::Rgb24, (w * 3) as usize, data).with_palette(Vec::new());
-    let bytes = encode_png_image(&src).expect("encode 8-bit");
-    let decoded = decode_png(&bytes).expect("decode 8-bit");
+    let src = PngImage::packed(w, 1, PngPixelFormat::Rgb24, (w * 3) as usize, data);
+    let bytes = encode(&src, &EncodeOptions::default()).expect("encode 8-bit");
+    let decoded = decode(&bytes).expect("decode 8-bit");
     let out = rescale_16bit_to_8bit(&decoded);
-    assert_eq!(out.pixel_format, PngPixelFormat::Rgb24);
-    assert_eq!(out.data, decoded.data);
+    assert_eq!(out.format, PngPixelFormat::Rgb24);
+    assert_eq!(out.planes[0].data, decoded.planes[0].data);
 }

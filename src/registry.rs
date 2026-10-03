@@ -9,10 +9,12 @@
 //!   `CodecRegistry` / `ContainerRegistry` entry points the umbrella
 //!   `oxideav` crate calls during framework initialisation.
 //! * [`PngDecoder`] / [`PngEncoder`] — the trait-side surface that
-//!   wraps the framework-free [`crate::decode_png`] /
-//!   [`crate::encode_png_image`] entry points.
+//!   wraps the framework-free [`crate::decode`] / [`crate::encode`]
+//!   entry points.
+//! * `From<PngImage> for VideoFrame` and [`PngImage::from_video_frame`]
+//!   — the plane plus the palette / colour-signal side-channels.
 //! * The `From<PngError> for oxideav_core::Error` conversion + the
-//!   `CodecOptionsStruct` impl for [`PngEncoderOptions`].
+//!   `CodecOptionsStruct` impl for [`EncodeOptions`].
 //! * [`decode_png_to_frame`] / [`encode_single`] /
 //!   [`encode_single_with_options`] — `VideoFrame`-flavoured wrappers
 //!   preserved for existing callers that pre-date the `PngImage` API.
@@ -24,17 +26,16 @@ use oxideav_core::Encoder;
 use oxideav_core::RuntimeContext;
 use oxideav_core::{
     parse_options, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters,
-    CodecRegistry, ContainerRegistry, ExecutionContext, Frame, MediaType, OptionField, OptionKind,
-    OptionValue, Packet, PixelFormat, Rational, TimeBase, VideoFrame, VideoPlane,
+    CodecRegistry, ColorPrimaries, ColorSignal, ContainerRegistry, ExecutionContext, Frame,
+    MatrixCoefficients, MediaType, OptionField, OptionKind, OptionValue, Packet, PixelFormat,
+    Rational, TimeBase, TransferCharacteristics, VideoFrame, VideoPlane,
 };
 
-use crate::decoder::{decode_png, CODEC_ID_STR};
-use crate::encoder::{
-    encode_apng_threaded, encode_png_image_threaded, encode_png_image_with_options,
-    PngEncoderOptions,
-};
+use crate::decoder::CODEC_ID_STR;
+use crate::encoder::{encode_apng_threaded, encode_threaded, EncodeOptions};
 use crate::error::PngError;
-use crate::image::{PngImage, PngPixelFormat};
+use crate::image::{ColorInfo, ColorRange, Palette, PngImage, PngPixelFormat};
+use crate::options::DecodeOptions;
 
 /// Convert a [`PngError`] into the framework-shared
 /// `oxideav_core::Error` so trait impls in this crate can use `?` on
@@ -44,6 +45,8 @@ impl From<PngError> for oxideav_core::Error {
         match e {
             PngError::InvalidData(s) => oxideav_core::Error::InvalidData(s),
             PngError::Unsupported(s) => oxideav_core::Error::Unsupported(s),
+            PngError::LimitExceeded(s) => oxideav_core::Error::ResourceExhausted(s),
+            PngError::Io(e) => oxideav_core::Error::Io(e),
             PngError::Eof => oxideav_core::Error::Eof,
             PngError::NeedMore => oxideav_core::Error::NeedMore,
             PngError::Other(s) => oxideav_core::Error::other(s),
@@ -71,9 +74,82 @@ fn from_core_pixel_format(pf: PixelFormat) -> oxideav_core::Result<PngPixelForma
     })
 }
 
-/// Convert a framework `VideoFrame` (single planar layout) into a
-/// [`PngImage`]. Used by the `Encoder` trait impl to feed the
-/// standalone encoder.
+/// The 1:1 name mapping from [`PngPixelFormat`] to the framework enum.
+pub fn to_core_pixel_format(pf: PngPixelFormat) -> PixelFormat {
+    match pf {
+        PngPixelFormat::Gray8 => PixelFormat::Gray8,
+        PngPixelFormat::Gray16Le => PixelFormat::Gray16Le,
+        PngPixelFormat::Rgb24 => PixelFormat::Rgb24,
+        PngPixelFormat::Rgb48Le => PixelFormat::Rgb48Le,
+        PngPixelFormat::Pal8 => PixelFormat::Pal8,
+        PngPixelFormat::Ya8 => PixelFormat::Ya8,
+        PngPixelFormat::Rgba => PixelFormat::Rgba,
+        PngPixelFormat::Rgba64Le => PixelFormat::Rgba64Le,
+    }
+}
+
+impl From<PngPixelFormat> for PixelFormat {
+    fn from(pf: PngPixelFormat) -> Self {
+        to_core_pixel_format(pf)
+    }
+}
+
+impl TryFrom<PixelFormat> for PngPixelFormat {
+    type Error = oxideav_core::Error;
+    fn try_from(pf: PixelFormat) -> oxideav_core::Result<Self> {
+        from_core_pixel_format(pf)
+    }
+}
+
+/// [`ColorInfo`] as the framework's [`ColorSignal`] (code points map
+/// 1:1; `Unspecified` range stays unspecified).
+pub fn to_color_signal(c: &ColorInfo) -> ColorSignal {
+    let range = match c.range {
+        ColorRange::Unspecified => oxideav_core::ColorRange::Unspecified,
+        ColorRange::Limited => oxideav_core::ColorRange::Limited,
+        ColorRange::Full => oxideav_core::ColorRange::Full,
+    };
+    ColorSignal::new(
+        range,
+        ColorPrimaries(c.primaries),
+        TransferCharacteristics(c.transfer),
+        MatrixCoefficients(c.matrix),
+    )
+}
+
+/// The inverse of [`to_color_signal`].
+pub fn from_color_signal(s: &ColorSignal) -> ColorInfo {
+    let range = match s.range {
+        oxideav_core::ColorRange::Limited => ColorRange::Limited,
+        oxideav_core::ColorRange::Full => ColorRange::Full,
+        _ => ColorRange::Unspecified,
+    };
+    ColorInfo::new(range, s.primaries.0, s.transfer.0, s.matrix.0)
+}
+
+/// Legacy palette convention of [`encode_single`] and the encoder's
+/// `CodecParameters::extradata`: one `PLTE || tRNS` byte blob with no
+/// recorded split point. The `PLTE` entry count is taken as the
+/// highest index the pixels use plus one (so the table is as long as
+/// the image needs) and whatever follows is the alpha tail.
+fn palette_from_legacy_blob(blob: &[u8], indices: &[u8]) -> Option<Palette> {
+    if blob.is_empty() {
+        return None;
+    }
+    let n = usize::from(indices.iter().copied().max().unwrap_or(0)) + 1;
+    let plte_len = (n * 3).min(blob.len());
+    let (plte, trns) = blob.split_at(plte_len);
+    Some(Palette::from_rgb(
+        plte,
+        if trns.is_empty() { None } else { Some(trns) },
+    ))
+}
+
+/// Convert a framework `VideoFrame` (single packed plane) into a
+/// [`PngImage`]. The palette, for `Pal8`, comes from the frame's
+/// palette side-channel when attached, else from the legacy `PLTE ||
+/// tRNS` `palette` blob; the frame's colour-signal side-channel, when
+/// attached, becomes `color`.
 fn video_frame_to_png_image(
     frame: &VideoFrame,
     width: u32,
@@ -82,17 +158,12 @@ fn video_frame_to_png_image(
     palette: &[u8],
 ) -> oxideav_core::Result<PngImage> {
     let plane = frame
-        .planes
+        .image_planes()
         .first()
         .ok_or_else(|| oxideav_core::Error::invalid("PNG encoder: frame has no planes"))?;
-    Ok(PngImage {
-        width,
-        height,
-        pixel_format: pix,
-        stride: plane.stride,
-        data: plane.data.clone(),
-        palette: palette.to_vec(),
-    })
+    let mut img = PngImage::packed(width, height, pix, plane.stride, plane.data.clone());
+    stamp_side_channels(&mut img, frame, palette);
+    Ok(img)
 }
 
 /// [`video_frame_to_png_image`] for a frame the encoder owns: the first
@@ -105,36 +176,121 @@ fn video_frame_into_png_image(
     pix: PngPixelFormat,
     palette: &[u8],
 ) -> oxideav_core::Result<PngImage> {
-    if frame.planes.is_empty() {
+    if frame.image_plane_count() == 0 {
         return Err(oxideav_core::Error::invalid(
             "PNG encoder: frame has no planes",
         ));
     }
     let plane = frame.planes.swap_remove(0);
-    Ok(PngImage {
-        width,
-        height,
-        pixel_format: pix,
-        stride: plane.stride,
-        data: plane.data,
-        palette: palette.to_vec(),
-    })
+    let mut img = PngImage::packed(width, height, pix, plane.stride, plane.data);
+    stamp_side_channels(&mut img, &frame, palette);
+    Ok(img)
 }
 
-/// Convert a [`PngImage`] into a framework `VideoFrame`.
-fn png_image_to_video_frame(image: &PngImage, pts: Option<i64>) -> VideoFrame {
-    VideoFrame {
-        pts,
-        planes: vec![VideoPlane {
-            stride: image.stride,
-            data: image.data.clone(),
-        }],
+/// Fill `palette` / `color` of `img` from the frame's side-channels
+/// (falling back to the legacy palette blob).
+fn stamp_side_channels(img: &mut PngImage, frame: &VideoFrame, legacy_palette: &[u8]) {
+    if img.format == PngPixelFormat::Pal8 {
+        img.palette = match frame.palette() {
+            Some(rgb) => Some(Palette::from_rgb(rgb, None)),
+            None => palette_from_legacy_blob(legacy_palette, img.data()),
+        };
+    }
+    if let Some(sig) = frame.color_signal() {
+        img.color = from_color_signal(&sig);
     }
 }
 
-// ---- CodecOptionsStruct (registry-only schema for PngEncoderOptions) ----
+/// Convert a [`PngImage`] into a framework `VideoFrame`: the pixel
+/// plane, plus the palette side-channel for `Pal8` and the
+/// colour-signal side-channel whenever the image signals more than
+/// PNG's default (a specified primaries / transfer, or limited range).
+fn png_image_to_video_frame(image: &PngImage, pts: Option<i64>) -> VideoFrame {
+    let mut frame = VideoFrame {
+        pts,
+        planes: vec![VideoPlane {
+            stride: image.stride(),
+            data: image.data().to_vec(),
+        }],
+    };
+    stamp_frame_side_channels(&mut frame, image);
+    frame
+}
 
-impl CodecOptionsStruct for PngEncoderOptions {
+/// [`png_image_to_video_frame`] moving the plane out of `image`.
+fn png_image_into_video_frame(mut image: PngImage, pts: Option<i64>) -> VideoFrame {
+    let stride = image.stride();
+    let data = if image.planes.is_empty() {
+        Vec::new()
+    } else {
+        std::mem::take(&mut image.planes[0].data)
+    };
+    let mut frame = VideoFrame {
+        pts,
+        planes: vec![VideoPlane { stride, data }],
+    };
+    stamp_frame_side_channels(&mut frame, &image);
+    frame
+}
+
+fn stamp_frame_side_channels(frame: &mut VideoFrame, image: &PngImage) {
+    if let (PngPixelFormat::Pal8, Some(p)) = (image.format, &image.palette) {
+        frame.set_palette(p.to_rgb());
+    }
+    let c = image.color;
+    if c.primaries != ColorInfo::UNSPECIFIED
+        || c.transfer != ColorInfo::UNSPECIFIED
+        || c.range == ColorRange::Limited
+    {
+        frame.set_color_signal(to_color_signal(&c));
+    }
+}
+
+impl From<PngImage> for VideoFrame {
+    /// The pixel plane (`pts` `None`), plus the palette side-channel
+    /// for `Pal8` and the colour-signal side-channel when the image
+    /// signals a colour space.
+    fn from(image: PngImage) -> Self {
+        png_image_into_video_frame(image, None)
+    }
+}
+
+impl From<&PngImage> for VideoFrame {
+    fn from(image: &PngImage) -> Self {
+        png_image_to_video_frame(image, None)
+    }
+}
+
+impl PngImage {
+    /// Rebuild an image from a framework frame and the stream
+    /// parameters that describe it (`width`, `height`, `pixel_format`
+    /// are required; `extradata` is read as the legacy `PLTE || tRNS`
+    /// blob when the frame carries no palette side-channel).
+    pub fn from_video_frame(
+        frame: &VideoFrame,
+        params: &CodecParameters,
+    ) -> oxideav_core::Result<Self> {
+        let width = params
+            .width
+            .ok_or_else(|| oxideav_core::Error::invalid("PNG: missing width"))?;
+        let height = params
+            .height
+            .ok_or_else(|| oxideav_core::Error::invalid("PNG: missing height"))?;
+        let pix = from_core_pixel_format(params.pixel_format.unwrap_or(PixelFormat::Rgba))?;
+        video_frame_to_png_image(frame, width, height, pix, &params.extradata)
+    }
+}
+
+impl TryFrom<(&VideoFrame, &CodecParameters)> for PngImage {
+    type Error = oxideav_core::Error;
+    fn try_from((frame, params): (&VideoFrame, &CodecParameters)) -> oxideav_core::Result<Self> {
+        PngImage::from_video_frame(frame, params)
+    }
+}
+
+// ---- CodecOptionsStruct (registry-only schema for EncodeOptions) ----
+
+impl CodecOptionsStruct for EncodeOptions {
     const SCHEMA: &'static [OptionField] = &[
         OptionField {
             name: "interlace",
@@ -175,7 +331,7 @@ impl CodecOptionsStruct for PngEncoderOptions {
                    0 (the default) selects the encoder default level 2 — \
                    12 MP RGB24 in ~0.4 s on one thread within ~8 % of the \
                    level-6 size; 4 trades +45 % time for −3 %, 6 is 8× \
-                   slower for −8 % (see PngEncoderOptions::compression_level).",
+                   slower for −8 % (see EncodeOptions::compression_level).",
         },
         OptionField {
             name: "level",
@@ -298,12 +454,13 @@ impl Decoder for PngDecoder {
     }
 }
 
-/// `VideoFrame`-flavoured wrapper around [`decode_png`]. Preserved for
-/// existing callers (and the container layer) that build frames
-/// directly.
+/// `VideoFrame`-flavoured wrapper around [`crate::decode`]. Preserved
+/// for existing callers (and the container layer) that build frames
+/// directly: the standalone decode, then [`From<PngImage>`] for
+/// `VideoFrame` with `pts` stamped.
 pub fn decode_png_to_frame(buf: &[u8], pts: Option<i64>) -> oxideav_core::Result<VideoFrame> {
-    let img = decode_png(buf)?;
-    Ok(png_image_to_video_frame(&img, pts))
+    let img = crate::decoder::decode_image(buf, &DecodeOptions::default())?;
+    Ok(png_image_into_video_frame(img, pts))
 }
 
 // ---- Encoder trait impl + factory ----
@@ -312,7 +469,7 @@ pub fn decode_png_to_frame(buf: &[u8], pts: Option<i64>) -> oxideav_core::Result
 /// registry and called by the framework when a `png` encode is
 /// requested.
 pub fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn Encoder>> {
-    let opts = parse_options::<PngEncoderOptions>(&params.options)?;
+    let opts = parse_options::<EncodeOptions>(&params.options)?;
     let width = params
         .width
         .ok_or_else(|| oxideav_core::Error::invalid("PNG encoder: missing width"))?;
@@ -369,7 +526,7 @@ pub struct PngEncoder {
     palette: Vec<u8>,
     animated_hint: bool,
     eof: bool,
-    opts: PngEncoderOptions,
+    opts: EncodeOptions,
     /// Thread budget granted through `set_execution_context`; `1`
     /// (serial) until the executor says otherwise.
     threads: usize,
@@ -459,7 +616,7 @@ impl PngEncoder {
                 self.pix,
                 &self.palette,
             )?;
-            encode_png_image_threaded(&img, &self.opts, self.threads)?
+            encode_threaded(&img, &self.opts, self.threads)?
         };
         let mut pkt = Packet::new(0, self.time_base, bytes);
         pkt.pts = first_pts;
@@ -470,8 +627,10 @@ impl PngEncoder {
     }
 }
 
-/// `VideoFrame`-flavoured wrapper around [`encode_png_image`].
-/// Preserved for existing callers.
+/// `VideoFrame`-flavoured wrapper around [`crate::encode`].
+/// Preserved for existing callers. `palette` is the legacy `PLTE ||
+/// tRNS` blob for `Pal8` (ignored when the frame carries a palette
+/// side-channel).
 pub fn encode_single(
     frame: &VideoFrame,
     width: u32,
@@ -485,23 +644,23 @@ pub fn encode_single(
         height,
         pix,
         palette,
-        &PngEncoderOptions::default(),
+        &EncodeOptions::default(),
     )
 }
 
-/// `VideoFrame`-flavoured wrapper around
-/// [`encode_png_image_with_options`]. Preserved for existing callers.
+/// `VideoFrame`-flavoured wrapper around [`crate::encode`] with
+/// options. Preserved for existing callers.
 pub fn encode_single_with_options(
     frame: &VideoFrame,
     width: u32,
     height: u32,
     pix: PixelFormat,
     palette: &[u8],
-    opts: &PngEncoderOptions,
+    opts: &EncodeOptions,
 ) -> oxideav_core::Result<Vec<u8>> {
     let pix = from_core_pixel_format(pix)?;
     let img = video_frame_to_png_image(frame, width, height, pix, palette)?;
-    Ok(encode_png_image_with_options(&img, opts)?)
+    Ok(crate::encoder::encode(&img, opts)?)
 }
 
 // ---- Container + registration ----
@@ -525,7 +684,7 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             .capabilities(caps)
             .decoder(make_decoder)
             .encoder(make_encoder)
-            .encoder_options::<PngEncoderOptions>(),
+            .encoder_options::<EncodeOptions>(),
     );
 }
 
@@ -575,7 +734,7 @@ mod register_tests {
 
         // `brute` (any case) maps to the whole-image exhaustive search.
         for raw in ["brute", "BRUTE", "Brute"] {
-            let mut opts = PngEncoderOptions::default();
+            let mut opts = EncodeOptions::default();
             opts.apply("filter", &OptionValue::String(raw.to_string()))
                 .expect("filter=brute should parse");
             assert_eq!(opts.filter_strategy, FilterStrategy::Brute, "raw {raw:?}");
@@ -583,7 +742,7 @@ mod register_tests {
 
         // An unknown filter value still errors, and the message now lists
         // `brute` among the accepted values.
-        let mut opts = PngEncoderOptions::default();
+        let mut opts = EncodeOptions::default();
         let err = opts
             .apply("filter", &OptionValue::String("wibble".into()))
             .unwrap_err();

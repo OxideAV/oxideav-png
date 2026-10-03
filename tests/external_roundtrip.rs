@@ -16,6 +16,8 @@
 //! so the main crate doesn't dev-depend on the fuzz crate (circular dep
 //! risk).
 
+// The framework path: needs `oxideav-core` (default-on `registry`).
+#![cfg(feature = "registry")]
 #![allow(unsafe_code)]
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};

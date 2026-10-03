@@ -5,22 +5,22 @@
 //! round-trips.
 
 use oxideav_png::{
-    decode_png, encode_png_image_with_options, parse_metadata, ApngFrameSpec, FilterStrategy,
-    FilterType, Gama, Ihdr, Itxt, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat, Text,
+    decode, encode, parse_metadata, ApngFrameSpec, EncodeOptions, FilterStrategy, FilterType, Gama,
+    Ihdr, Itxt, PngImage, PngMetadata, PngPixelFormat, Text,
 };
 
 #[test]
 fn readme_construction_example_encodes_and_round_trips() {
-    let image = PngImage::new(2, 1, PngPixelFormat::Rgb24, 6, vec![255, 0, 0, 0, 255, 0]);
+    let image = PngImage::packed(2, 1, PngPixelFormat::Rgb24, 6, vec![255, 0, 0, 0, 255, 0]);
     let meta = PngMetadata::default()
         .with_gama(Gama::new(45_455))
         .with_texts(vec![Text::new("Software".into(), "oxideav".into())]);
-    let opts = PngEncoderOptions::default()
+    let opts = EncodeOptions::default()
         .with_compression_level(4)
         .with_filter_strategy(FilterStrategy::Fixed(FilterType::Paeth))
         .with_metadata(meta.clone());
-    let png = encode_png_image_with_options(&image, &opts).expect("encode");
-    assert_eq!(decode_png(&png).unwrap().data, image.data);
+    let png = encode(&image, &opts).expect("encode");
+    assert_eq!(decode(&png).unwrap().planes[0].data, image.planes[0].data);
     assert_eq!(parse_metadata(&png).unwrap(), meta);
 
     // `Option` setters accept both the value and `None`.

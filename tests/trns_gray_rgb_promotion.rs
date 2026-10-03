@@ -1,11 +1,11 @@
 //! Coverage for `tRNS` keyed-transparency application during
-//! `decode_png_to_rgba` (RFC 2083 §4.2.9):
+//! `decode_rgba8` (RFC 2083 §4.2.9):
 //!
 //! * Colour type 0 (grayscale, 8 / 16-bit) — single transparent gray
 //!   sample. The match is done at the bit depth's value, before the
 //!   16→8 promotion drops the low byte.
 //! * Colour type 2 (RGB, 8 / 16-bit) — single transparent RGB triple.
-//! * Colour type 3 — already covered by `decode_png_to_rgba.rs`.
+//! * Colour type 3 — already covered by `decode_rgba8.rs`.
 //! * Colour type 4 / 6 — `tRNS` is prohibited (decoder rejects the
 //!   stream).
 //! * Length policing — ct=0 must be 2 bytes, ct=2 must be 6 bytes.
@@ -20,12 +20,12 @@
 
 use oxideav_png::{
     chunk::{write_chunk, PNG_MAGIC},
-    decode_png_to_rgba, encode_png_image, PngImage, PngPixelFormat,
+    decode_rgba8, encode, EncodeOptions, Palette, PngImage, PngPixelFormat,
 };
 
 fn make(w: u32, h: u32, pf: PngPixelFormat, data: Vec<u8>) -> PngImage {
     let bpp = pf.bytes_per_pixel();
-    PngImage::new(w, h, pf, w as usize * bpp, data).with_palette(Vec::new())
+    PngImage::packed(w, h, pf, w as usize * bpp, data)
 }
 
 /// Splice a new chunk with the given type + payload immediately before
@@ -66,13 +66,13 @@ fn gray8_trns_marks_matching_pixels_transparent() {
     // index 1 must come out alpha-0.
     let raw: Vec<u8> = (0..4u8).map(|x| x * 0x10 + 0x50).collect();
     let img = make(4, 1, PngPixelFormat::Gray8, raw.clone());
-    let png = encode_png_image(&img).expect("encode");
+    let png = encode(&img, &EncodeOptions::default()).expect("encode");
     // tRNS for ct=0 is a single 2-byte BE gray value at the image bit
     // depth (here 8 → high byte = 0).
     let trns_payload = [0x00, 0x60];
     let spliced = splice_chunk_before_idat(&png, b"tRNS", &trns_payload);
 
-    let rgba = decode_png_to_rgba(&spliced).expect("decode");
+    let rgba = decode_rgba8(&spliced).expect("decode");
     let alphas: Vec<u8> = (0..4).map(|i| rgba.data[i * 4 + 3]).collect();
     assert_eq!(alphas, vec![255, 0, 255, 255], "{:?}", rgba.data);
     // Colour bytes are still the source gray replicated 3×.
@@ -98,11 +98,11 @@ fn gray16le_trns_compares_both_bytes() {
         raw.push((s >> 8) as u8);
     }
     let img = make(4, 1, PngPixelFormat::Gray16Le, raw);
-    let png = encode_png_image(&img).expect("encode");
+    let png = encode(&img, &EncodeOptions::default()).expect("encode");
     let trns_payload = [0x00, 0x01]; // BE 16-bit
     let spliced = splice_chunk_before_idat(&png, b"tRNS", &trns_payload);
 
-    let rgba = decode_png_to_rgba(&spliced).expect("decode");
+    let rgba = decode_rgba8(&spliced).expect("decode");
     let alphas: Vec<u8> = (0..4).map(|i| rgba.data[i * 4 + 3]).collect();
     assert_eq!(
         alphas,
@@ -114,10 +114,10 @@ fn gray16le_trns_compares_both_bytes() {
 #[test]
 fn gray8_trns_payload_with_wrong_length_rejected() {
     let img = make(2, 1, PngPixelFormat::Gray8, vec![0, 1]);
-    let png = encode_png_image(&img).expect("encode");
+    let png = encode(&img, &EncodeOptions::default()).expect("encode");
     // 1-byte payload — spec is fixed at 2 bytes regardless of bit depth.
     let spliced = splice_chunk_before_idat(&png, b"tRNS", &[0x00]);
-    let err = decode_png_to_rgba(&spliced).expect_err("must reject");
+    let err = decode_rgba8(&spliced).expect_err("must reject");
     let msg = format!("{err}");
     assert!(
         msg.contains("colour type 0") && msg.contains("2 bytes"),
@@ -132,10 +132,10 @@ fn gray_trns_sample_within_bit_depth_accepted() {
     // (0xffff) doesn't trip the bounds gate that catches sub-16-bit
     // overflows elsewhere.
     let img = make(2, 1, PngPixelFormat::Gray16Le, vec![0, 0, 0, 0]);
-    let png = encode_png_image(&img).expect("encode");
+    let png = encode(&img, &EncodeOptions::default()).expect("encode");
     let trns_payload = [0xff, 0xff];
     let spliced = splice_chunk_before_idat(&png, b"tRNS", &trns_payload);
-    let _rgba = decode_png_to_rgba(&spliced).expect("16-bit gray accepts any u16 tRNS");
+    let _rgba = decode_rgba8(&spliced).expect("16-bit gray accepts any u16 tRNS");
 }
 
 // ---- ct=2 (truecolor) ---------------------------------------------------
@@ -150,12 +150,12 @@ fn rgb24_trns_marks_matching_pixels_transparent() {
         40, 50, 61, // p3 — one byte off, must stay opaque
     ];
     let img = make(4, 1, PngPixelFormat::Rgb24, raw.clone());
-    let png = encode_png_image(&img).expect("encode");
+    let png = encode(&img, &EncodeOptions::default()).expect("encode");
     // tRNS payload (RGB triple, each 2 bytes BE at bit_depth 8 → high byte 0).
     let trns_payload = [0, 40, 0, 50, 0, 60];
     let spliced = splice_chunk_before_idat(&png, b"tRNS", &trns_payload);
 
-    let rgba = decode_png_to_rgba(&spliced).expect("decode");
+    let rgba = decode_rgba8(&spliced).expect("decode");
     let alphas: Vec<u8> = (0..4).map(|i| rgba.data[i * 4 + 3]).collect();
     assert_eq!(alphas, vec![255, 0, 255, 255]);
     for (i, src) in raw.chunks_exact(3).enumerate() {
@@ -185,12 +185,12 @@ fn rgb48le_trns_compares_full_16bit_per_channel() {
         raw.push((b >> 8) as u8);
     }
     let img = make(3, 1, PngPixelFormat::Rgb48Le, raw);
-    let png = encode_png_image(&img).expect("encode");
+    let png = encode(&img, &EncodeOptions::default()).expect("encode");
     // tRNS payload: 2-byte BE per channel, R G B.
     let trns_payload = [0x00, 0x01, 0x00, 0x02, 0x00, 0x03];
     let spliced = splice_chunk_before_idat(&png, b"tRNS", &trns_payload);
 
-    let rgba = decode_png_to_rgba(&spliced).expect("decode");
+    let rgba = decode_rgba8(&spliced).expect("decode");
     let alphas: Vec<u8> = (0..3).map(|i| rgba.data[i * 4 + 3]).collect();
     assert_eq!(alphas, vec![0, 255, 0]);
 }
@@ -198,10 +198,10 @@ fn rgb48le_trns_compares_full_16bit_per_channel() {
 #[test]
 fn rgb24_trns_payload_with_wrong_length_rejected() {
     let img = make(2, 1, PngPixelFormat::Rgb24, vec![1, 2, 3, 4, 5, 6]);
-    let png = encode_png_image(&img).expect("encode");
+    let png = encode(&img, &EncodeOptions::default()).expect("encode");
     // Length 5 — spec is fixed at 6 bytes for ct=2.
     let spliced = splice_chunk_before_idat(&png, b"tRNS", &[0, 0, 0, 0, 0]);
-    let err = decode_png_to_rgba(&spliced).expect_err("must reject");
+    let err = decode_rgba8(&spliced).expect_err("must reject");
     let msg = format!("{err}");
     assert!(
         msg.contains("colour type 2") && msg.contains("6 bytes"),
@@ -213,10 +213,10 @@ fn rgb24_trns_payload_with_wrong_length_rejected() {
 fn rgb24_trns_sample_exceeds_bit_depth_rejected() {
     // Bit depth 8 → max sample 255. tRNS holds R=256 in 2 bytes.
     let img = make(1, 1, PngPixelFormat::Rgb24, vec![1, 2, 3]);
-    let png = encode_png_image(&img).expect("encode");
+    let png = encode(&img, &EncodeOptions::default()).expect("encode");
     let trns_payload = [0x01, 0x00, 0x00, 0x02, 0x00, 0x03];
     let spliced = splice_chunk_before_idat(&png, b"tRNS", &trns_payload);
-    let err = decode_png_to_rgba(&spliced).expect_err("must reject");
+    let err = decode_rgba8(&spliced).expect_err("must reject");
     let msg = format!("{err}");
     assert!(
         msg.contains("bit depth 8") && msg.contains("exceeds"),
@@ -229,10 +229,10 @@ fn rgb24_trns_sample_exceeds_bit_depth_rejected() {
 #[test]
 fn ya8_trns_is_prohibited() {
     let img = make(1, 1, PngPixelFormat::Ya8, vec![100, 50]);
-    let png = encode_png_image(&img).expect("encode");
+    let png = encode(&img, &EncodeOptions::default()).expect("encode");
     // 2-byte payload — would be valid for ct=0 but is prohibited here.
     let spliced = splice_chunk_before_idat(&png, b"tRNS", &[0, 100]);
-    let err = decode_png_to_rgba(&spliced).expect_err("must reject");
+    let err = decode_rgba8(&spliced).expect_err("must reject");
     let msg = format!("{err}");
     assert!(
         msg.contains("prohibited") && msg.contains("colour type 4"),
@@ -243,9 +243,9 @@ fn ya8_trns_is_prohibited() {
 #[test]
 fn rgba_trns_is_prohibited() {
     let img = make(1, 1, PngPixelFormat::Rgba, vec![10, 20, 30, 255]);
-    let png = encode_png_image(&img).expect("encode");
+    let png = encode(&img, &EncodeOptions::default()).expect("encode");
     let spliced = splice_chunk_before_idat(&png, b"tRNS", &[0, 10, 0, 20, 0, 30]);
-    let err = decode_png_to_rgba(&spliced).expect_err("must reject");
+    let err = decode_rgba8(&spliced).expect_err("must reject");
     let msg = format!("{err}");
     assert!(
         msg.contains("prohibited") && msg.contains("colour type 6"),
@@ -258,12 +258,12 @@ fn rgba_trns_is_prohibited() {
 #[test]
 fn pal8_trns_with_too_many_entries_rejected() {
     // 2-entry PLTE → tRNS may carry at most 2 alpha values.
-    let palette: Vec<u8> = vec![0, 0, 0, 255, 255, 255];
-    let img = PngImage::new(2, 1, PngPixelFormat::Pal8, 2, vec![0, 1]).with_palette(palette);
-    let png = encode_png_image(&img).expect("encode");
+    let palette = Palette::from_rgb(&[0, 0, 0, 255, 255, 255], None);
+    let img = PngImage::packed(2, 1, PngPixelFormat::Pal8, 2, vec![0, 1]).with_palette(palette);
+    let png = encode(&img, &EncodeOptions::default()).expect("encode");
     // Splice an over-long tRNS (3 bytes for a 2-entry PLTE).
     let spliced = splice_chunk_before_idat(&png, b"tRNS", &[0, 64, 128]);
-    let err = decode_png_to_rgba(&spliced).expect_err("must reject");
+    let err = decode_rgba8(&spliced).expect_err("must reject");
     let msg = format!("{err}");
     assert!(msg.contains("exceed") && msg.contains("PLTE"), "{msg}");
 }
@@ -271,16 +271,16 @@ fn pal8_trns_with_too_many_entries_rejected() {
 #[test]
 fn pal8_trns_shorter_than_plte_accepted_with_trailing_opaque() {
     // 3-entry PLTE + 2-byte tRNS → entry 2 stays opaque per spec.
-    let palette: Vec<u8> = vec![10, 20, 30, 40, 50, 60, 70, 80, 90];
-    let img = PngImage::new(3, 1, PngPixelFormat::Pal8, 3, vec![0, 1, 2]).with_palette(palette);
-    let png = encode_png_image(&img).expect("encode");
+    let palette = Palette::from_rgb(&[10, 20, 30, 40, 50, 60, 70, 80, 90], None);
+    let img = PngImage::packed(3, 1, PngPixelFormat::Pal8, 3, vec![0, 1, 2]).with_palette(palette);
+    let png = encode(&img, &EncodeOptions::default()).expect("encode");
     let spliced = splice_chunk_before_idat(&png, b"tRNS", &[0x10, 0x80]);
     // The encoder will have already written its own tRNS (none — palette
     // has no alpha tail), so the splice introduces the first tRNS. Decode
     // and assert per-entry alpha.
-    // Round-trip is via decode_png_to_rgba which walks the *splice*
+    // Round-trip is via decode_rgba8 which walks the *splice*
     // stream's chunks, so the per-entry alpha lookup picks up our values.
-    let rgba = decode_png_to_rgba(&spliced).expect("decode");
+    let rgba = decode_rgba8(&spliced).expect("decode");
     assert_eq!(rgba.data[3], 0x10, "entry 0 alpha");
     assert_eq!(rgba.data[7], 0x80, "entry 1 alpha");
     assert_eq!(rgba.data[11], 255, "entry 2 implicit opaque");

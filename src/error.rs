@@ -15,12 +15,16 @@ use std::fmt;
 /// the gated `From<PngError> for oxideav_core::Error` impl.
 pub type Result<T> = std::result::Result<T, PngError>;
 
+/// The contract name for [`PngError`].
+pub type Error = PngError;
+
 /// Error variants returned by `oxideav-png`'s standalone API.
 ///
 /// The variants mirror the subset of `oxideav_core::Error` the codec
-/// can hit. The crate intentionally avoids surfacing transport (`Io`)
-/// or framework-specific (`FormatNotFound`, `CodecNotFound`) errors —
-/// those originate in callers that are already linking `oxideav-core`.
+/// can hit plus the two the image-crate contract requires
+/// (`LimitExceeded`, `Io`). Framework-specific errors
+/// (`FormatNotFound`, `CodecNotFound`) originate in callers that are
+/// already linking `oxideav-core`.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum PngError {
@@ -31,6 +35,12 @@ pub enum PngError {
     /// or the encoder was asked to emit a frame format it doesn't
     /// support.
     Unsupported(String),
+    /// A [`crate::DecodeOptions`] limit (dimensions / pixels / bytes)
+    /// would be exceeded; nothing was allocated.
+    LimitExceeded(String),
+    /// A read / write on a caller-supplied stream failed
+    /// ([`crate::decode_from`] / [`crate::encode_to`]).
+    Io(std::io::Error),
     /// End of stream — no more packets / frames forthcoming.
     Eof,
     /// More input is required before another frame can be produced
@@ -56,6 +66,17 @@ impl PngError {
     pub fn other(msg: impl Into<String>) -> Self {
         Self::Other(msg.into())
     }
+
+    /// Construct a [`PngError::LimitExceeded`] from a stringy message.
+    pub fn limit(msg: impl Into<String>) -> Self {
+        Self::LimitExceeded(msg.into())
+    }
+}
+
+impl From<std::io::Error> for PngError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 impl fmt::Display for PngError {
@@ -63,6 +84,8 @@ impl fmt::Display for PngError {
         match self {
             Self::InvalidData(s) => write!(f, "invalid data: {s}"),
             Self::Unsupported(s) => write!(f, "unsupported: {s}"),
+            Self::LimitExceeded(s) => write!(f, "limit exceeded: {s}"),
+            Self::Io(e) => write!(f, "io: {e}"),
             Self::Eof => write!(f, "end of stream"),
             Self::NeedMore => write!(f, "need more data"),
             Self::Other(s) => write!(f, "{s}"),
@@ -70,4 +93,11 @@ impl fmt::Display for PngError {
     }
 }
 
-impl std::error::Error for PngError {}
+impl std::error::Error for PngError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}

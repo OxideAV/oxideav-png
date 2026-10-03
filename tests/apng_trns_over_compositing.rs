@@ -106,8 +106,8 @@ fn palette_over_skips_transparent_index() {
 
     let anim = decode_apng(&png).expect("decode");
     // Canvas is Pal8: stride = w, each byte is an index.
-    let stride = anim.frames[1].image.stride;
-    let d = &anim.frames[1].image.data;
+    let stride = anim.frames[1].image.stride();
+    let d = &anim.frames[1].image.planes[0].data;
     // Frame 1 OVER: transparent idx0 source leaves canvas at idx1 (green).
     assert_eq!(d[0], 1, "transparent OVER pixel should keep idx1");
     assert_eq!(d[stride - 1], 1, "second pixel also keeps idx1");
@@ -146,7 +146,7 @@ fn palette_over_writes_opaque_index() {
     write_chunk(&mut png, b"fdAT", &fdat);
     write_chunk(&mut png, b"IEND", &[]);
     let anim = decode_apng(&png).expect("decode");
-    let d = &anim.frames[1].image.data;
+    let d = &anim.frames[1].image.planes[0].data;
     assert_eq!(d[0], 1, "opaque OVER pixel should overwrite to idx1");
 }
 
@@ -182,7 +182,7 @@ fn grayscale_over_skips_keyed_sample() {
     write_chunk(&mut png, b"fdAT", &fdat);
     write_chunk(&mut png, b"IEND", &[]);
     let anim = decode_apng(&png).expect("decode");
-    let d = &anim.frames[1].image.data;
+    let d = &anim.frames[1].image.planes[0].data;
     assert_eq!(d[0], 0x80, "keyed-transparent gray should leave canvas");
 }
 
@@ -226,7 +226,7 @@ fn truecolour_over_skips_keyed_rgb() {
     write_chunk(&mut png, b"fdAT", &fdat);
     write_chunk(&mut png, b"IEND", &[]);
     let anim = decode_apng(&png).expect("decode");
-    let d = &anim.frames[1].image.data;
+    let d = &anim.frames[1].image.planes[0].data;
     // Pixel 0: keyed transparent → keeps frame-0 (10,20,30).
     assert_eq!(&d[0..3], &[10, 20, 30], "keyed RGB should leave canvas");
     // Pixel 1: opaque → overwrites to (99,88,77).
@@ -273,7 +273,7 @@ fn grayscale16_over_skips_keyed_sample() {
     write_chunk(&mut png, b"fdAT", &fdat);
     write_chunk(&mut png, b"IEND", &[]);
     let anim = decode_apng(&png).expect("decode");
-    let d = &anim.frames[1].image.data;
+    let d = &anim.frames[1].image.planes[0].data;
     // Canvas is Gray16Le: keyed source leaves frame-0 gray (LE 0xABCD).
     assert_eq!(
         u16::from_le_bytes([d[0], d[1]]),
@@ -325,7 +325,7 @@ fn truecolour48_over_skips_keyed_rgb() {
     write_chunk(&mut png, b"fdAT", &fdat);
     write_chunk(&mut png, b"IEND", &[]);
     let anim = decode_apng(&png).expect("decode");
-    let d = &anim.frames[1].image.data;
+    let d = &anim.frames[1].image.planes[0].data;
     // Canvas is Rgb48Le: keyed source leaves frame-0 colour (LE per channel).
     assert_eq!(u16::from_le_bytes([d[0], d[1]]), 0xAAAA, "R kept");
     assert_eq!(u16::from_le_bytes([d[2], d[3]]), 0xBBBB, "G kept");

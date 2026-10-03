@@ -1,6 +1,9 @@
 //! A synthetic PNG with a corrupted chunk CRC must produce an error rather
 //! than be silently accepted.
 
+// The framework path: needs `oxideav-core` (default-on `registry`).
+#![cfg(feature = "registry")]
+
 use oxideav_core::Error;
 
 #[test]

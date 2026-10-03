@@ -1,7 +1,6 @@
 //! PNG + APNG encoder.
 //!
-//! The standalone API ([`encode_png_image`] /
-//! [`encode_png_image_with_options`]) takes a single [`PngImage`] and
+//! The standalone API ([`encode`]) takes a single [`PngImage`] and
 //! emits a full standalone PNG file. The [`crate::registry`]-gated
 //! [`Encoder`](oxideav_core::Encoder) trait impl wraps these
 //! free-standing functions: it accepts a single video frame per
@@ -11,12 +10,12 @@
 //! buffered and an APNG is produced on `flush`.
 //!
 //! The IDAT / fdAT pixel stream is zlib-compressed at the level set by
-//! [`PngEncoderOptions::compression_level`] (`1..=9`); `None` selects
+//! [`EncodeOptions::compression_level`] (`1..=9`); `None` selects
 //! [`DEFAULT_COMPRESSION_LEVEL`] (2 — chosen by measurement in round
 //! 464, see the field docs). All rows use
 //! the PNG §12.8 "minimum sum of absolute differences" heuristic by
 //! default (i.e. try all 5 filters, pick the one with the smallest
-//! absolute byte sum) unless [`PngEncoderOptions::filter_strategy`]
+//! absolute byte sum) unless [`EncodeOptions::filter_strategy`]
 //! pins a fixed filter.
 
 use crate::error::{PngError as Error, Result};
@@ -40,10 +39,10 @@ use crate::zstream::{
 
 /// PNG encoder tuning knobs, attached via
 /// `CodecParameters::options` (when the `registry` feature is on) or
-/// passed directly to [`encode_png_image_with_options`].
+/// passed directly to [`crate::encode`].
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct PngEncoderOptions {
+pub struct EncodeOptions {
     /// Adam7 seven-pass interlaced encode. Sets `IHDR.interlace = 1`.
     /// Compressed payload gets ~5–15% larger but the image is
     /// progressively renderable.
@@ -67,7 +66,7 @@ pub struct PngEncoderOptions {
     /// * `bKGD` / `hIST` — after `PLTE`, before `IDAT`. `tRNS` (the
     ///   ct=0/ct=2 keyed-sample form, or the ct=3 alpha table when the
     ///   caller routes it through `metadata.trns` instead of the legacy
-    ///   `image.palette` tail) also rides in this bucket per RFC 2083
+    ///   palette alpha tail) also rides in this bucket per RFC 2083
     ///   §4.2.9 "must precede the first IDAT chunk, and must follow the
     ///   PLTE chunk, if any."
     /// * `pHYs` — before `IDAT`.
@@ -173,9 +172,36 @@ pub struct PngEncoderOptions {
     /// level since their payloads are small and their byte layout is
     /// pinned by round-trip tests.
     pub compression_level: Option<u8>,
+    /// Worker threads for the IDAT / fdAT DEFLATE pass (`0` or `1` =
+    /// serial). The emitted bytes never depend on this value.
+    pub threads: usize,
 }
 
-impl PngEncoderOptions {
+/// The pre-contract name of [`EncodeOptions`].
+#[deprecated(note = "use oxideav_png::EncodeOptions (IMAGE_CRATE_API)")]
+pub type PngEncoderOptions = EncodeOptions;
+
+impl EncodeOptions {
+    /// The defaults: no interlace, no metadata, natural bit depth,
+    /// heuristic filter, compression level [`DEFAULT_COMPRESSION_LEVEL`],
+    /// serial.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the DEFLATE level (`1..=9`) — the contract spelling of
+    /// [`Self::with_compression_level`].
+    pub fn with_level(mut self, level: u8) -> Self {
+        self.compression_level = Some(level);
+        self
+    }
+
+    /// Set the DEFLATE worker-thread budget.
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads;
+        self
+    }
+
     /// Adam7 interlaced output (`IHDR.interlace = 1`).
     pub fn with_interlace(mut self, interlace: bool) -> Self {
         self.interlace = interlace;
@@ -208,13 +234,13 @@ impl PngEncoderOptions {
 }
 
 /// DEFLATE level the pixel stream uses when
-/// [`PngEncoderOptions::compression_level`] is `None`. See the field
+/// [`EncodeOptions::compression_level`] is `None`. See the field
 /// docs for the measurement behind the value.
 pub const DEFAULT_COMPRESSION_LEVEL: u8 = 2;
 
 /// Resolve and validate the DEFLATE level for the pixel stream:
 /// `None` → [`DEFAULT_COMPRESSION_LEVEL`]; `Some(n)` must be `1..=9`.
-fn resolve_compression_level(opts: &PngEncoderOptions) -> Result<u8> {
+fn resolve_compression_level(opts: &EncodeOptions) -> Result<u8> {
     match opts.compression_level {
         None => Ok(DEFAULT_COMPRESSION_LEVEL),
         Some(level @ 1..=9) => Ok(level),
@@ -228,36 +254,57 @@ fn resolve_compression_level(opts: &PngEncoderOptions) -> Result<u8> {
 
 // ---- Single-image encode -----------------------------------------------
 
-/// Encode one [`PngImage`] as a standalone PNG using default options
-/// (non-interlaced). Standalone (no `oxideav-core`) entry point.
+/// The pre-contract name of [`encode`] with default options.
+#[deprecated(note = "use oxideav_png::encode (IMAGE_CRATE_API)")]
 pub fn encode_png_image(image: &PngImage) -> Result<Vec<u8>> {
-    encode_png_image_with_options(image, &PngEncoderOptions::default())
+    encode(image, &EncodeOptions::default())
 }
 
-/// Encode one [`PngImage`] as a standalone PNG, honouring the supplied
-/// options (e.g. `interlace: true` for Adam7). Standalone (no
-/// `oxideav-core`) entry point. Runs on the calling thread only — see
-/// [`encode_png_image_threaded`] for a thread budget.
-pub fn encode_png_image_with_options(
-    image: &PngImage,
-    opts: &PngEncoderOptions,
-) -> Result<Vec<u8>> {
-    encode_png_image_threaded(image, opts, 1)
+/// The pre-contract name of [`encode`].
+#[deprecated(note = "use oxideav_png::encode (IMAGE_CRATE_API)")]
+pub fn encode_png_image_with_options(image: &PngImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
+    encode(image, opts)
 }
 
-/// [`encode_png_image_with_options`] with a thread budget: the IDAT
-/// pixel stream is cut into independent DEFLATE segments (about 1 MiB
-/// of filtered rows each) that up to `threads` workers compress
-/// concurrently. The emitted bytes are identical for every budget —
-/// the segment grid depends only on the image — so `threads` is purely
-/// a wall-clock knob. `threads ≤ 1` runs serially on the calling
-/// thread, exactly like [`encode_png_image_with_options`].
+/// Encode `image` as a PNG file under `opts` (`opts.threads` sets the
+/// DEFLATE worker budget; the bytes never depend on it).
 ///
-/// The framework-side encoder maps `ExecutionContext::threads` onto
-/// this parameter; standalone callers pick their own budget.
+/// The image is written as given — its native layout becomes the IHDR
+/// colour type / bit depth, never a silent conversion — plus the
+/// chunks its side fields imply: `PLTE` / `tRNS` from `palette` and
+/// `transparency`, `gAMA` / `iCCP` / `eXIf` / XMP `iTXt` from
+/// `metadata`, `sRGB` or `cICP` from `color` (see [`crate`] docs for
+/// the exact mapping). A chunk given explicitly in
+/// [`EncodeOptions::metadata`] takes precedence over the image-derived
+/// one. A `transparency` / `palette` alpha pair that would put two
+/// `tRNS` chunks on the wire is [`crate::PngError::InvalidData`].
+pub fn encode(image: &PngImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
+    encode_threaded(image, opts, opts.threads.max(1))
+}
+
+/// The pre-contract spelling of [`encode`] with
+/// [`EncodeOptions::with_threads`].
+#[deprecated(note = "use oxideav_png::encode with EncodeOptions::with_threads (IMAGE_CRATE_API)")]
 pub fn encode_png_image_threaded(
     image: &PngImage,
-    opts: &PngEncoderOptions,
+    opts: &EncodeOptions,
+    threads: usize,
+) -> Result<Vec<u8>> {
+    encode_threaded(image, opts, threads)
+}
+
+/// [`encode`] with an explicit thread budget: the IDAT pixel stream is
+/// cut into independent DEFLATE segments (about 1 MiB of filtered rows
+/// each) that up to `threads` workers compress concurrently. The
+/// emitted bytes are identical for every budget — the segment grid
+/// depends only on the image — so `threads` is purely a wall-clock
+/// knob. `threads ≤ 1` runs serially on the calling thread.
+///
+/// The framework-side encoder maps `ExecutionContext::threads` onto
+/// this parameter; standalone callers set [`EncodeOptions::threads`].
+pub(crate) fn encode_threaded(
+    image: &PngImage,
+    opts: &EncodeOptions,
     threads: usize,
 ) -> Result<Vec<u8>> {
     let (mut ihdr, row_bytes, plte_bytes, trns_bytes) = ihdr_and_row_bytes(image, opts)?;
@@ -266,13 +313,15 @@ pub fn encode_png_image_threaded(
     }
     // Resolve the on-wire tRNS payload. Two sources can supply it: the
     // palette tail (`Pal8` only — `ihdr_and_row_bytes` splits
-    // `image.palette` into `PLTE || tRNS`), and `metadata.trns` (the
+    // palette's alpha tail), and `metadata.trns` (the
     // ct=0 / ct=2 path; opt-in for ct=3 too). The two are mutually
     // exclusive — emitting both would put two `tRNS` chunks on the
     // wire, violating §5.6 Table 1 "Multiple OK? No" — so the resolver
     // errors if both are populated and otherwise picks whichever is
     // present.
-    let trns_bytes = resolve_trns_bytes(&ihdr, trns_bytes.as_deref(), opts.metadata.as_ref())?;
+    let meta = effective_metadata(image, opts)?;
+    let meta = meta.as_ref();
+    let trns_bytes = resolve_trns_bytes(&ihdr, trns_bytes.as_deref(), meta)?;
     let level = resolve_compression_level(opts)?;
 
     // Reserve for the headers plus a typical photographic IDAT (about a
@@ -283,7 +332,7 @@ pub fn encode_png_image_threaded(
     out.extend_from_slice(&PNG_MAGIC);
     write_chunk(&mut out, b"IHDR", &ihdr.to_bytes());
     // sBIT must precede PLTE + IDAT (RFC 2083 §4.3 / §4.2.6).
-    write_metadata_before_plte(&mut out, opts.metadata.as_ref())?;
+    write_metadata_before_plte(&mut out, meta)?;
     if let Some(p) = plte_bytes.as_deref() {
         write_chunk(&mut out, b"PLTE", p);
     }
@@ -293,7 +342,7 @@ pub fn encode_png_image_threaded(
     // pHYs + tIME go between PLTE/tRNS and IDAT (pHYs MUST be before
     // IDAT per RFC 2083 §4.2.5; tIME has no ordering constraint but we
     // bucket it here for determinism). sPLT also rides here.
-    write_metadata_before_idat(&mut out, opts.metadata.as_ref())?;
+    write_metadata_before_idat(&mut out, meta)?;
     // The pixel stream is filtered row by row and deflated straight
     // into the IDAT chunk — no filtered-image intermediate, no
     // compressed-stream intermediate.
@@ -308,9 +357,108 @@ pub fn encode_png_image_threaded(
         level,
         threads,
     )?;
-    write_metadata_after_idat(&mut out, opts.metadata.as_ref());
+    write_metadata_after_idat(&mut out, meta);
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
+}
+
+/// The metadata chunk set `encode` writes for `image` under `opts`:
+/// [`EncodeOptions::metadata`] as given, with the image's own
+/// `metadata` / `color` / `transparency` filling every record the
+/// options leave unset:
+///
+/// * `metadata.gamma` → `gAMA` (`round(gamma × 100 000)`);
+/// * `metadata.icc` → `iCCP` named `"ICC Profile"`;
+/// * `metadata.exif` → `eXIf`;
+/// * `metadata.xmp` → an uncompressed `iTXt` keyed
+///   [`crate::XMP_KEYWORD`] (the packet must be UTF-8);
+/// * `color` — exactly [`ColorInfo::srgb`](crate::ColorInfo::srgb) →
+///   `sRGB` (perceptual intent) unless an ICC profile is present
+///   (W3C PNG3 §11.3.2.3: at most one profile); otherwise, whenever a
+///   code point is specified or the range is limited → `cICP` with
+///   `matrix` 0, which requires `color.matrix ∈ {0, 2}`
+///   (`PngError::Unsupported` otherwise — PNG is RGB-only,
+///   §11.3.2.6);
+/// * `transparency` → `tRNS` (resolved against the palette tail by
+///   [`resolve_trns_bytes`]).
+///
+/// Returns `None` when the options carry no metadata and the image has
+/// nothing to add, so a plain image encodes exactly as before.
+fn effective_metadata(image: &PngImage, opts: &EncodeOptions) -> Result<Option<PngMetadata>> {
+    use crate::image::{ColorInfo, ColorRange};
+    use crate::metadata::{Cicp, Exif, Gama, Iccp, Itxt, RenderingIntent, Srgb};
+
+    let mut meta = opts.metadata.clone().unwrap_or_default();
+    let mut added = false;
+
+    if meta.gama.is_none() {
+        if let Some(g) = image.metadata.gamma {
+            if g.is_finite() && g >= 0.0 {
+                meta.gama = Some(Gama::new((g * 100_000.0).round() as u32));
+                added = true;
+            }
+        }
+    }
+    if meta.iccp.is_none() {
+        if let Some(icc) = &image.metadata.icc {
+            meta.iccp = Some(Iccp::new("ICC Profile".to_string(), icc.clone()));
+            added = true;
+        }
+    }
+    if meta.exif.is_none() {
+        if let Some(exif) = &image.metadata.exif {
+            meta.exif = Some(Exif::new(exif.clone()));
+            added = true;
+        }
+    }
+    if let Some(xmp) = &image.metadata.xmp {
+        if !meta
+            .itxts
+            .iter()
+            .any(|t| t.keyword == crate::sideinfo::XMP_KEYWORD)
+        {
+            let text = String::from_utf8(xmp.clone()).map_err(|_| {
+                Error::invalid("PNG encoder: metadata.xmp is not UTF-8 (W3C PNG3 §11.3.3.4)")
+            })?;
+            meta.itxts
+                .push(Itxt::new(crate::sideinfo::XMP_KEYWORD.to_string(), text));
+            added = true;
+        }
+    }
+    if meta.srgb.is_none() && meta.cicp.is_none() {
+        let c = image.color;
+        if c == ColorInfo::srgb() {
+            if meta.iccp.is_none() {
+                meta.srgb = Some(Srgb::new(RenderingIntent::Perceptual));
+                added = true;
+            }
+        } else if c.primaries != ColorInfo::UNSPECIFIED
+            || c.transfer != ColorInfo::UNSPECIFIED
+            || c.range == ColorRange::Limited
+        {
+            if c.matrix != ColorInfo::MATRIX_IDENTITY && c.matrix != ColorInfo::UNSPECIFIED {
+                return Err(Error::unsupported(format!(
+                    "PNG encoder: color.matrix {} cannot be carried — PNG is RGB-only, \
+                     cICP matrix_coefficients shall be 0 (W3C PNG3 §11.3.2.6)",
+                    c.matrix
+                )));
+            }
+            let full = u8::from(c.range != ColorRange::Limited);
+            meta.cicp = Some(Cicp::new(c.primaries, c.transfer, 0, full));
+            added = true;
+        }
+    }
+    if meta.trns.is_none() {
+        if let Some(t) = &image.transparency {
+            meta.trns = Some(t.clone());
+            added = true;
+        }
+    }
+
+    if opts.metadata.is_none() && !added {
+        return Ok(None);
+    }
+    Ok(Some(meta))
 }
 
 /// Compress `image`'s pixels under `ihdr` (whose `width` / `height`
@@ -328,7 +476,7 @@ fn write_pixel_stream(
     image: &PngImage,
     ihdr: &Ihdr,
     row_bytes: usize,
-    opts: &PngEncoderOptions,
+    opts: &EncodeOptions,
     level: u8,
     threads: usize,
 ) -> Result<()> {
@@ -536,7 +684,7 @@ fn write_metadata_after_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
 
 /// Pick the on-wire `tRNS` payload bytes given the IHDR + the two
 /// possible sources: the palette tail (`Pal8` only — derived from
-/// `image.palette`'s `PLTE || tRNS` blob in [`ihdr_and_row_bytes`]) and
+/// `image.palette`'s alpha entries in [`ihdr_and_row_bytes`]) and
 /// the optional `metadata.trns` field. The PNG spec allows at most one
 /// `tRNS` chunk per file (W3C PNG3 §5.6 Table 1 "Multiple OK? No"),
 /// so:
@@ -593,7 +741,7 @@ fn resolve_trns_bytes(
                 crate::metadata::Trns::Palette(_) => {
                     // No bit-depth bound on indexed alpha tables — the
                     // chunk's length-vs-PLTE-entry-count constraint is
-                    // enforced when the encoder splits image.palette,
+                    // enforced when the encoder reads image.palette,
                     // not here (since we landed in the "no palette tail"
                     // branch).
                 }
@@ -618,7 +766,7 @@ type IhdrAndRowInfo = (Ihdr, usize, Option<Vec<u8>>, Option<Vec<u8>>);
 /// types PNG allows sub-byte depths for — RFC 2083 §11.2.2 / Table 11.1
 /// rejects RGB / Ya / RGBA sub-byte combinations). `Some(8)` is a
 /// no-op for `Gray8` / `Pal8`. Anything else is an encode error.
-fn resolve_bit_depth(base: u8, colour_type: u8, opts: &PngEncoderOptions) -> Result<u8> {
+fn resolve_bit_depth(base: u8, colour_type: u8, opts: &EncodeOptions) -> Result<u8> {
     let Some(requested) = opts.bit_depth else {
         return Ok(base);
     };
@@ -653,8 +801,8 @@ fn resolve_bit_depth(base: u8, colour_type: u8, opts: &PngEncoderOptions) -> Res
 /// is the *packed* on-wire row length (`(width * bit_depth + 7) / 8`)
 /// rather than the source `image.data` row stride. The packing itself
 /// happens in [`flatten_and_normalise_pixels`].
-fn ihdr_and_row_bytes(image: &PngImage, opts: &PngEncoderOptions) -> Result<IhdrAndRowInfo> {
-    let (base_bit_depth, colour_type, channels): (u8, u8, usize) = match image.pixel_format {
+fn ihdr_and_row_bytes(image: &PngImage, opts: &EncodeOptions) -> Result<IhdrAndRowInfo> {
+    let (base_bit_depth, colour_type, channels): (u8, u8, usize) = match image.format {
         PngPixelFormat::Gray8 => (8, 0, 1),
         PngPixelFormat::Gray16Le => (16, 0, 1),
         PngPixelFormat::Rgb24 => (8, 2, 3),
@@ -685,26 +833,26 @@ fn ihdr_and_row_bytes(image: &PngImage, opts: &PngEncoderOptions) -> Result<Ihdr
         interlace: 0,
     };
 
-    // Split palette bytes into PLTE + tRNS. Caller convention: `palette`
-    // is `PLTE || tRNS` as one buffer. We derive PLTE entry count from
-    // the frame's max-index + 1.
+    // `PLTE` carries every palette entry; `tRNS` the alpha tail up to
+    // the last non-opaque entry (W3C PNG3 §11.3.1.1 — entries past the
+    // tail are opaque, so a longer table would say the same thing).
     let (plte, trns) = if colour_type == 3 {
-        if image.palette.is_empty() {
-            // Default: 1-entry black palette — useful fallback, but the test
-            // harness will usually supply one.
-            (Some(vec![0u8, 0, 0]), None)
-        } else {
-            let max_idx = image.data.iter().copied().max().unwrap_or(0) as usize;
-            let n = max_idx + 1;
-            let plte_len = (n * 3).min(image.palette.len());
-            let trns_len = image.palette.len().saturating_sub(plte_len);
-            let plte = image.palette[..plte_len].to_vec();
-            let trns = if trns_len > 0 {
-                Some(image.palette[plte_len..plte_len + trns_len].to_vec())
-            } else {
-                None
-            };
-            (Some(plte), trns)
+        match image.palette.as_ref().filter(|p| !p.is_empty()) {
+            None => {
+                // Default: 1-entry black palette — useful fallback, but
+                // callers normally supply one.
+                (Some(vec![0u8, 0, 0]), None)
+            }
+            Some(p) => {
+                if p.len() > 256 {
+                    return Err(Error::invalid(format!(
+                        "PNG encoder: palette has {} entries, PLTE allows at most 256 \
+                         (W3C PNG3 §11.2.2)",
+                        p.len()
+                    )));
+                }
+                (Some(p.to_rgb()), p.alpha_tail())
+            }
         }
     } else {
         (None, None)
@@ -724,7 +872,7 @@ fn flatten_and_normalise_pixels(
     row_bytes: usize,
 ) -> Result<Vec<u8>> {
     let h = image.height as usize;
-    let stride = image.stride;
+    let stride = image.stride();
 
     // Sub-byte: source is Gray8 / Pal8 (one byte per pixel in
     // image.data); pack into MSB-first sub-byte cells per PNG §2.3.
@@ -734,7 +882,7 @@ fn flatten_and_normalise_pixels(
 
     let mut out = vec![0u8; row_bytes * h];
 
-    match image.pixel_format {
+    match image.format {
         PngPixelFormat::Gray8
         | PngPixelFormat::Rgb24
         | PngPixelFormat::Rgba
@@ -742,14 +890,14 @@ fn flatten_and_normalise_pixels(
         | PngPixelFormat::Ya8 => {
             if stride == row_bytes {
                 // Tightly-packed source: one whole-plane memcpy.
-                out.copy_from_slice(&image.data[..row_bytes * h]);
+                out.copy_from_slice(&image.data()[..row_bytes * h]);
             } else {
                 // Row-by-row copy; honour source stride.
                 for y in 0..h {
                     let sstart = y * stride;
                     let dstart = y * row_bytes;
                     out[dstart..dstart + row_bytes]
-                        .copy_from_slice(&image.data[sstart..sstart + row_bytes]);
+                        .copy_from_slice(&image.data()[sstart..sstart + row_bytes]);
                 }
             }
         }
@@ -758,7 +906,7 @@ fn flatten_and_normalise_pixels(
         // per-sample index arithmetic.
         PngPixelFormat::Gray16Le | PngPixelFormat::Rgb48Le | PngPixelFormat::Rgba64Le => {
             for y in 0..h {
-                let src = &image.data[y * stride..y * stride + row_bytes];
+                let src = &image.data()[y * stride..y * stride + row_bytes];
                 let dst = &mut out[y * row_bytes..(y + 1) * row_bytes];
                 for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)) {
                     d[0] = s[1];
@@ -805,13 +953,13 @@ fn pack_subbyte_rows(image: &PngImage, bit_depth: u8, row_bytes: usize) -> Resul
 fn pack_subbyte_rows_const<const BD: usize>(image: &PngImage, row_bytes: usize) -> Result<Vec<u8>> {
     let h = image.height as usize;
     let w = image.width as usize;
-    let stride = image.stride;
+    let stride = image.stride();
     let max: u8 = ((1u16 << BD) - 1) as u8;
     let ppb = 8 / BD; // pixels per packed byte
 
     let mut out = vec![0u8; row_bytes * h];
     for y in 0..h {
-        let src_row = &image.data[y * stride..y * stride + w];
+        let src_row = &image.data()[y * stride..y * stride + w];
         let dst_row = &mut out[y * row_bytes..(y + 1) * row_bytes];
         let mut groups = src_row.chunks_exact(ppb);
         let mut dst = dst_row.iter_mut();
@@ -883,7 +1031,7 @@ impl<'a> RowPlane<'a> {
                 swap16: false,
             });
         }
-        let stride = image.stride;
+        let stride = image.stride();
         if stride < row_bytes {
             return Err(Error::invalid(format!(
                 "PNG encoder: stride {stride} is shorter than the {row_bytes}-byte row"
@@ -897,15 +1045,15 @@ impl<'a> RowPlane<'a> {
                 .and_then(|v| v.checked_add(row_bytes))
                 .ok_or_else(|| Error::invalid("PNG encoder: plane size overflows usize"))?
         };
-        if image.data.len() < needed {
+        if image.data().len() < needed {
             return Err(Error::invalid(format!(
                 "PNG encoder: pixel buffer holds {} bytes but {height} rows at stride \
                  {stride} need {needed}",
-                image.data.len()
+                image.data().len()
             )));
         }
         Ok(Self {
-            data: std::borrow::Cow::Borrowed(&image.data),
+            data: std::borrow::Cow::Borrowed(image.data()),
             stride,
             row_bytes,
             height,
@@ -1233,7 +1381,7 @@ fn pack_subbyte_adam7_passes(image: &PngImage, ihdr: &Ihdr) -> Result<Vec<Packed
     let pixels_per_byte = 8 / bd;
     let img_w = image.width as usize;
     let img_h = image.height as usize;
-    let src_stride = image.stride;
+    let src_stride = image.stride();
 
     let mut passes = Vec::new();
     for (pass, &(sr, sc, rs, cs)) in ADAM7.iter().enumerate() {
@@ -1256,7 +1404,7 @@ fn pack_subbyte_adam7_passes(image: &PngImage, ihdr: &Ihdr) -> Result<Vec<Packed
             let dst_row = &mut pass_raw[py * pass_row_bytes..(py + 1) * pass_row_bytes];
             for px in 0..pw {
                 let src_x = sc + px * cs;
-                let v = image.data[src_y * src_stride + src_x];
+                let v = image.data()[src_y * src_stride + src_x];
                 if v > max {
                     return Err(Error::invalid(format!(
                         "PNG encoder: sub-byte sample {v} at pixel ({src_x},{src_y}) \
@@ -1332,29 +1480,29 @@ pub fn encode_apng(
         frames,
         delay_centiseconds,
         num_plays,
-        &PngEncoderOptions::default(),
+        &EncodeOptions::default(),
     )
 }
 
-/// Same as [`encode_apng`] but honours [`PngEncoderOptions`]
+/// Same as [`encode_apng`] but honours [`EncodeOptions`]
 /// (e.g. `interlace: true` for Adam7).
 pub fn encode_apng_with_options(
     frames: &[PngImage],
     delay_centiseconds: u16,
     num_plays: u32,
-    opts: &PngEncoderOptions,
+    opts: &EncodeOptions,
 ) -> Result<Vec<u8>> {
     encode_apng_threaded(frames, delay_centiseconds, num_plays, opts, 1)
 }
 
 /// [`encode_apng_with_options`] with a thread budget for each frame's
-/// pixel stream — see [`encode_png_image_threaded`] for the contract
+/// pixel stream — see [`EncodeOptions::threads`] for the contract
 /// (`threads ≤ 1` is serial; the bytes do not depend on the budget).
 pub fn encode_apng_threaded(
     frames: &[PngImage],
     delay_centiseconds: u16,
     num_plays: u32,
-    opts: &PngEncoderOptions,
+    opts: &EncodeOptions,
     threads: usize,
 ) -> Result<Vec<u8>> {
     use crate::apng::{Actl, Fctl};
@@ -1362,11 +1510,11 @@ pub fn encode_apng_threaded(
     if frames.is_empty() {
         return Err(Error::invalid("PNG encoder: no frames for APNG"));
     }
-    let pix = frames[0].pixel_format;
+    let pix = frames[0].format;
     let w = frames[0].width;
     let h = frames[0].height;
     for f in &frames[1..] {
-        if f.width != w || f.height != h || f.pixel_format != pix {
+        if f.width != w || f.height != h || f.format != pix {
             return Err(Error::invalid(
                 "PNG encoder: APNG frames must share width / height / pixel_format",
             ));
@@ -1596,11 +1744,11 @@ pub fn encode_apng_frames(
         default_image,
         frames,
         num_plays,
-        &PngEncoderOptions::default(),
+        &EncodeOptions::default(),
     )
 }
 
-/// Encode a region-aware APNG, honouring [`PngEncoderOptions`].
+/// Encode a region-aware APNG, honouring [`EncodeOptions`].
 ///
 /// Layout produced (W3C PNG 3rd Edition §4.9 / §11.3.6):
 ///
@@ -1636,7 +1784,7 @@ pub fn encode_apng_frames_with_options(
     default_image: Option<&PngImage>,
     frames: &[ApngFrameSpec],
     num_plays: u32,
-    opts: &PngEncoderOptions,
+    opts: &EncodeOptions,
 ) -> Result<Vec<u8>> {
     encode_apng_frames_threaded(
         canvas_width,
@@ -1650,7 +1798,7 @@ pub fn encode_apng_frames_with_options(
 }
 
 /// [`encode_apng_frames_with_options`] with a thread budget for each
-/// frame's pixel stream — see [`encode_png_image_threaded`] for the
+/// frame's pixel stream — see [`EncodeOptions::threads`] for the
 /// contract (`threads ≤ 1` is serial; the bytes do not depend on the
 /// budget).
 #[allow(clippy::too_many_arguments)]
@@ -1660,7 +1808,7 @@ pub fn encode_apng_frames_threaded(
     default_image: Option<&PngImage>,
     frames: &[ApngFrameSpec],
     num_plays: u32,
-    opts: &PngEncoderOptions,
+    opts: &EncodeOptions,
     threads: usize,
 ) -> Result<Vec<u8>> {
     use crate::apng::{Actl, Fctl};
@@ -1678,11 +1826,11 @@ pub fn encode_apng_frames_threaded(
     // one is supplied (it fills the IDAT and fixes the IHDR), otherwise
     // from the first animation frame (which doubles as the default image).
     let canvas_fmt = match default_image {
-        Some(d) => d.pixel_format,
-        None => frames[0].image.pixel_format,
+        Some(d) => d.format,
+        None => frames[0].image.format,
     };
     for (i, f) in frames.iter().enumerate() {
-        if f.image.pixel_format != canvas_fmt {
+        if f.image.format != canvas_fmt {
             return Err(Error::invalid(format!(
                 "PNG encoder: APNG frame {i} pixel_format differs from the canvas \
                  format — a PNG file carries a single IHDR"
@@ -1745,14 +1893,14 @@ pub fn encode_apng_frames_threaded(
         Some(d) => d,
         None => &frames[0].image,
     };
-    let canvas_probe = PngImage {
-        width: canvas_width,
-        height: canvas_height,
-        pixel_format: canvas_fmt,
-        stride: canvas_width as usize * canvas_fmt.bytes_per_pixel(),
-        data: Vec::new(),
-        palette: palette_src.palette.clone(),
-    };
+    let canvas_probe = PngImage::packed(
+        canvas_width,
+        canvas_height,
+        canvas_fmt,
+        canvas_width as usize * canvas_fmt.bytes_per_pixel(),
+        Vec::new(),
+    )
+    .with_palette(palette_src.palette.clone());
     let (mut ihdr, _canvas_row_bytes, plte, trns) = ihdr_and_row_bytes(&canvas_probe, opts)?;
     if opts.interlace {
         ihdr.interlace = 1;

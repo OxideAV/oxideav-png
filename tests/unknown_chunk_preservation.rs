@@ -10,12 +10,12 @@
 //! malformed) is dropped rather than re-emitted.
 
 use oxideav_png::{
-    decode_png, encode_apng, encode_png_image, encode_png_image_with_options, parse_apng,
-    parse_metadata, PngEncoderOptions, PngImage, PngPixelFormat, UnknownChunk,
+    decode, encode, encode_apng, parse_apng, parse_metadata, EncodeOptions, PngImage,
+    PngPixelFormat, UnknownChunk,
 };
 
 fn rgba_2x2() -> PngImage {
-    PngImage::new(
+    PngImage::packed(
         2,
         2,
         PngPixelFormat::Rgba,
@@ -24,7 +24,6 @@ fn rgba_2x2() -> PngImage {
             255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ],
     )
-    .with_palette(Vec::new())
 }
 
 /// Append a length|type|data|CRC chunk to `out` using the production
@@ -70,7 +69,7 @@ fn splice_before_iend(bytes: &[u8], chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
 
 #[test]
 fn unknown_ancillary_before_idat_is_captured() {
-    let base = encode_png_image(&rgba_2x2()).expect("encode");
+    let base = encode(&rgba_2x2(), &EncodeOptions::default()).expect("encode");
     // `prVt`: ancillary (lowercase 1st), private (lowercase 2nd),
     // reserved-clear (uppercase 3rd), safe-to-copy (lowercase 4th).
     let payload = b"hello-extension".to_vec();
@@ -88,7 +87,7 @@ fn unknown_ancillary_before_idat_is_captured() {
 
 #[test]
 fn unknown_ancillary_after_idat_is_captured() {
-    let base = encode_png_image(&rgba_2x2()).expect("encode");
+    let base = encode(&rgba_2x2(), &EncodeOptions::default()).expect("encode");
     // `unSafe`-shaped: `prVT` is unsafe-to-copy (uppercase 4th letter).
     let payload = vec![1u8, 2, 3, 4];
     let tampered = splice_before_iend(&base, &[(b"prVT", &payload)]);
@@ -104,7 +103,7 @@ fn unknown_ancillary_after_idat_is_captured() {
 
 #[test]
 fn unknown_chunks_round_trip_on_correct_side_of_idat() {
-    let base = encode_png_image(&rgba_2x2()).expect("encode");
+    let base = encode(&rgba_2x2(), &EncodeOptions::default()).expect("encode");
     let before = b"prVt".to_owned();
     let after = b"prVT".to_owned();
     let before_payload = b"BEFORE".to_vec();
@@ -116,8 +115,8 @@ fn unknown_chunks_round_trip_on_correct_side_of_idat() {
     assert_eq!(meta.unknowns.len(), 2);
 
     // Re-encode carrying the captured unknowns forward.
-    let opts = PngEncoderOptions::default().with_metadata(Some(meta.clone()));
-    let reencoded = encode_png_image_with_options(&rgba_2x2(), &opts).expect("re-encode");
+    let opts = EncodeOptions::default().with_metadata(Some(meta.clone()));
+    let reencoded = encode(&rgba_2x2(), &opts).expect("re-encode");
 
     // The re-decoded metadata must match exactly (same types, payloads,
     // and IDAT sides).
@@ -133,14 +132,14 @@ fn unknown_chunks_round_trip_on_correct_side_of_idat() {
     assert!(p_after > idat, "unsafe-to-copy chunk stays after IDAT");
 
     // The pixel payload is unaffected by the spliced chunks.
-    let img = decode_png(&reencoded).expect("decode");
+    let img = decode(&reencoded).expect("decode");
     assert_eq!(img.width, 2);
     assert_eq!(img.height, 2);
 }
 
 #[test]
 fn unrecognised_critical_chunk_is_a_decode_error() {
-    let base = encode_png_image(&rgba_2x2()).expect("encode");
+    let base = encode(&rgba_2x2(), &EncodeOptions::default()).expect("encode");
     // `PrIv`: ancillary bit CLEAR (uppercase 1st letter `P`) → a
     // critical chunk the codec does not recognise. §14.2 mandates
     // termination.
@@ -158,9 +157,9 @@ fn decode_png_rejects_unrecognised_critical_chunk() {
     // §5.4 / §13.1: the pixel-decode path must also refuse an unknown
     // critical chunk rather than silently produce a possibly-wrong
     // image. `PrIv` has the ancillary bit clear (uppercase `P`).
-    let base = encode_png_image(&rgba_2x2()).expect("encode");
+    let base = encode(&rgba_2x2(), &EncodeOptions::default()).expect("encode");
     let tampered = splice_before_idat(&base, &[(b"PrIv", b"x")]);
-    let err = decode_png(&tampered).expect_err("decode must refuse unknown critical");
+    let err = decode(&tampered).expect_err("decode must refuse unknown critical");
     assert!(format!("{err:?}").contains("critical"));
 }
 
@@ -169,15 +168,15 @@ fn decode_png_ignores_unknown_ancillary_chunk() {
     // An unrecognised *ancillary* chunk is skipped by the pixel-decode
     // path (it carries no image-data dependency the decoder must
     // honour); only `parse_metadata` captures it.
-    let base = encode_png_image(&rgba_2x2()).expect("encode");
+    let base = encode(&rgba_2x2(), &EncodeOptions::default()).expect("encode");
     let tampered = splice_before_idat(&base, &[(b"prVt", b"ignored")]);
-    let img = decode_png(&tampered).expect("decode tolerates unknown ancillary");
+    let img = decode(&tampered).expect("decode tolerates unknown ancillary");
     assert_eq!((img.width, img.height), (2, 2));
 }
 
 #[test]
 fn malformed_name_chunk_is_dropped_not_captured() {
-    let base = encode_png_image(&rgba_2x2()).expect("encode");
+    let base = encode(&rgba_2x2(), &EncodeOptions::default()).expect("encode");
     // A name with a digit byte (`pH1s`) is §13.1-malformed. It has the
     // ancillary bit set (lowercase 'p') so it is not a critical-chunk
     // error, but it is not a conformant extension either — drop it
@@ -192,7 +191,7 @@ fn malformed_name_chunk_is_dropped_not_captured() {
 
 #[test]
 fn file_order_of_multiple_unknowns_is_preserved() {
-    let base = encode_png_image(&rgba_2x2()).expect("encode");
+    let base = encode(&rgba_2x2(), &EncodeOptions::default()).expect("encode");
     let tampered = splice_before_idat(
         &base,
         &[(b"prVt", b"one"), (b"qrVt", b"two"), (b"srVt", b"three")],
@@ -211,7 +210,7 @@ fn file_order_of_multiple_unknowns_is_preserved() {
 #[test]
 fn parse_apng_rejects_unrecognised_critical_chunk() {
     // The APNG decode path applies the same §5.4 / §14.2 unknown-critical
-    // gate as `decode_png`. acTL / fcTL / fdAT are ancillary, so the
+    // gate as `decode`. acTL / fcTL / fdAT are ancillary, so the
     // critical allow-set is the four core chunks; `PrIv` is rejected.
     let frames = [rgba_2x2(), rgba_2x2()];
     let base = encode_apng(&frames, 10, 0).expect("encode apng");
@@ -222,7 +221,7 @@ fn parse_apng_rejects_unrecognised_critical_chunk() {
 
 #[test]
 fn no_unknowns_when_stream_has_none() {
-    let base = encode_png_image(&rgba_2x2()).expect("encode");
+    let base = encode(&rgba_2x2(), &EncodeOptions::default()).expect("encode");
     let meta = parse_metadata(&base).expect("parse");
     assert!(meta.unknowns.is_empty());
     assert!(meta.is_empty(), "a bare image has no metadata at all");
@@ -281,7 +280,7 @@ fn unknown_round_trip_property_sweep() {
             specs.push((ty, payload, after));
         }
 
-        let base = encode_png_image(&rgba_2x2()).expect("encode");
+        let base = encode(&rgba_2x2(), &EncodeOptions::default()).expect("encode");
         let before: Vec<(&[u8; 4], &[u8])> = specs
             .iter()
             .filter(|s| !s.2)
@@ -309,8 +308,8 @@ fn unknown_round_trip_property_sweep() {
         assert_eq!(meta.unknowns, expected, "captured unknowns mismatch");
 
         // Re-encode carrying them forward and re-capture.
-        let opts = PngEncoderOptions::default().with_metadata(Some(meta.clone()));
-        let reencoded = encode_png_image_with_options(&rgba_2x2(), &opts).expect("re-encode");
+        let opts = EncodeOptions::default().with_metadata(Some(meta.clone()));
+        let reencoded = encode(&rgba_2x2(), &opts).expect("re-encode");
         let meta2 = parse_metadata(&reencoded).expect("re-parse");
         assert_eq!(meta2.unknowns, meta.unknowns, "round-trip drift");
 

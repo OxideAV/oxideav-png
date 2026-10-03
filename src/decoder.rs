@@ -30,7 +30,8 @@
 //! a time per §A.8 and scattered into the final canvas.
 
 use crate::error::{PngError as Error, Result};
-use crate::image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
+use crate::image::{ApngFrameImage, ApngImage, Palette, PngImage, PngPixelFormat, RgbaImage};
+use crate::options::DecodeOptions;
 
 // Backward-compat re-exports: existing callers reach for
 // `oxideav_png::decoder::make_decoder` and
@@ -67,8 +68,8 @@ pub fn decode_apng_frames(info: &ApngInfo) -> oxideav_core::Result<Vec<oxideav_c
         out.push(oxideav_core::VideoFrame {
             pts: Some(pts),
             planes: vec![oxideav_core::VideoPlane {
-                stride: f.image.stride,
-                data: f.image.data.clone(),
+                stride: f.image.stride(),
+                data: f.image.data().to_vec(),
             }],
         });
         pts += f.delay_cs as i64;
@@ -150,7 +151,7 @@ impl Ihdr {
     /// spec states outright; a value outside those bounds is *invalid
     /// data*, not an unsupported feature, so each path returns
     /// [`Error::invalid`]. Run once at the wire-decode boundary (from
-    /// [`Ihdr::parse`]) so `decode_png` / `parse_metadata` / `parse_apng`
+    /// [`Ihdr::parse`]) so `decode` / `parse_metadata` / `parse_apng`
     /// and the demuxer all share one gate rather than re-deriving the
     /// checks inline (or, worse, only catching some of them late in
     /// [`Ihdr::output_pixel_format`]).
@@ -328,6 +329,15 @@ impl Ihdr {
                 )))
             }
         })
+    }
+
+    /// Size in bytes of the decoded plane [`crate::decode`] would
+    /// allocate for this header: `width × height × bytes_per_pixel` of
+    /// [`Self::output_pixel_format`] (the widest buffer the decode
+    /// holds — the ct 4 / 16-bit `Rgba64Le` widening included).
+    pub fn decoded_plane_bytes(&self) -> Result<u64> {
+        let bpp = self.output_pixel_format()?.bytes_per_pixel() as u64;
+        Ok(u64::from(self.width) * u64::from(self.height) * bpp)
     }
 
     /// Number of bytes in one logical pixel of the *decoded* byte-plane that
@@ -864,20 +874,19 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
 }
 
 /// Decode a single non-animated PNG file (or the "default image" of an
-/// APNG) into a [`PngImage`]. Standalone (no `oxideav-core`) entry
-/// point: works whether or not the `registry` feature is enabled.
-pub fn decode_png(buf: &[u8]) -> Result<PngImage> {
+/// APNG) into a [`PngImage`] under `opts` — the engine behind
+/// [`crate::decode`] / [`crate::decode_with`].
+pub(crate) fn decode_image(buf: &[u8], opts: &DecodeOptions) -> Result<PngImage> {
     let chunks = parse_all_chunks(buf)?;
-    decode_png_chunks(&chunks)
+    decode_png_chunks(&chunks, opts)
 }
 
-/// [`decode_png`] over an already-walked chunk list. Factored out so
-/// the RGBA-promotion entry points ([`decode_png_to_rgba`] /
-/// [`decode_png_over_background`]), which need their own look at the
-/// `PLTE` / `tRNS` / `bKGD` chunk bytes, can share one chunk walk —
-/// the walk re-validates every chunk CRC, so doing it once instead of
-/// twice halves the whole-file CRC pass.
-fn decode_png_chunks(chunks: &[ChunkRef<'_>]) -> Result<PngImage> {
+/// [`decode_image`] over an already-walked chunk list. Factored out so
+/// [`decode_over_background`], which needs its own look at the `bKGD`
+/// chunk bytes, can share one chunk walk — the walk re-validates every
+/// chunk CRC, so doing it once instead of twice halves the whole-file
+/// CRC pass.
+pub(crate) fn decode_png_chunks(chunks: &[ChunkRef<'_>], opts: &DecodeOptions) -> Result<PngImage> {
     let ihdr_chunk = chunks
         .iter()
         .find(|c| c.is_type(b"IHDR"))
@@ -887,6 +896,11 @@ fn decode_png_chunks(chunks: &[ChunkRef<'_>]) -> Result<PngImage> {
     // method) is enforced inside `Ihdr::parse` → `Ihdr::validate`, so the
     // checks formerly duplicated here are no longer needed.
     let ihdr = Ihdr::parse(ihdr_chunk.data)?;
+    // Resource limits are checked against the header alone, before any
+    // pixel buffer exists (IMAGE_CRATE_API: "limits are enforced before
+    // allocation").
+    opts.check(ihdr.width, ihdr.height, ihdr.decoded_plane_bytes()?)?;
+    let side = crate::sideinfo::extract(chunks, opts.strict)?;
 
     // W3C PNG3 §5.4 / §13.1: a decoder "encountering an unknown chunk in
     // which the ancillary bit is 0" — a critical chunk it cannot
@@ -948,7 +962,8 @@ fn decode_png_chunks(chunks: &[ChunkRef<'_>]) -> Result<PngImage> {
     };
 
     let frame_pixels = inflate_image_pixels(idat_stream, &ihdr, "PNG: IDAT", "IHDR")?;
-    build_png_image(&ihdr, frame_pixels, plte, trns)
+    let img = build_png_image(&ihdr, frame_pixels, plte, trns)?;
+    Ok(img.with_color(side.color).with_metadata(side.metadata))
 }
 
 /// Inflate a zlib pixel stream and reconstruct it into the decoded byte
@@ -1150,54 +1165,36 @@ fn validate_trns(ihdr: &Ihdr, trns: Option<&[u8]>, plte: Option<&[u8]>) -> Resul
     Ok(())
 }
 
-/// Decode a PNG (any supported colour type / bit depth) and promote the
-/// result to an 8-bit-per-channel [`RgbaBitmap`].
-///
-/// One-shot convenience entry point for callers that just want pixels
-/// to blit — palette resolution (`Pal8` + `PLTE` + `tRNS`), grayscale
-/// widening, 16→8 truncation and α-fill for opaque formats are all
-/// handled internally. For colour type 0 / 2 a `tRNS` chunk (RFC 2083
-/// §4.2.9) is applied at this layer too: the named source sample
-/// emerges with α=0, every other pixel with α=255 (when no `tRNS` is
-/// present the table column below collapses to "α=255 always").
-///
-/// | Source format | RGBA promotion                                       |
-/// |---------------|------------------------------------------------------|
-/// | `Gray8`       | `(g,g,g, α)` — α=0 iff `tRNS.gray == g`              |
-/// | `Gray16Le`    | `(hi,hi,hi, α)` — α=0 iff `tRNS.gray == sample16` (both bytes per §4.2.9 note) |
-/// | `Rgb24`       | `(r,g,b, α)` — α=0 iff every channel matches `tRNS`  |
-/// | `Rgb48Le`     | `(r_hi,g_hi,b_hi, α)` — α=0 iff every 16-bit channel matches `tRNS` |
-/// | `Pal8`        | `PLTE` lookup + `tRNS` alpha (`255` for entries past `tRNS`'s end) |
-/// | `Ya8`         | `(g,g,g,a)`                                          |
-/// | `Rgba`        | identity — bytes copied through unchanged            |
-/// | `Rgba64Le`    | `(r_hi,g_hi,b_hi,a_hi)` — high byte per channel      |
-///
-/// For palette PNGs the `PLTE` + `tRNS` chunks are walked directly off
-/// the source bitstream so the original chunk lengths are preserved
-/// (the [`PngImage::palette`] side-channel concatenates the two without
-/// recording where the split is).
-///
-/// Standalone (no `oxideav-core`) entry point: works whether or not
-/// the `registry` feature is enabled.
-pub fn decode_png_to_rgba(buf: &[u8]) -> Result<RgbaBitmap> {
-    // Walk the chunks once, both to read the original PLTE / tRNS
-    // lengths separately (`decode_png` collapses them into a single
-    // `palette = PLTE || tRNS` blob with no explicit split point) and
-    // to feed the shared chunk-level decode — re-walking would repeat
-    // the whole-file CRC validation pass.
-    let chunks = parse_all_chunks(buf)?;
-    let mut plte: Option<&[u8]> = None;
-    let mut trns: Option<&[u8]> = None;
-    for c in &chunks {
-        if c.is_type(b"PLTE") {
-            plte = Some(c.data);
-        } else if c.is_type(b"tRNS") {
-            trns = Some(c.data);
+/// Promote a decoded [`PngImage`] to RGBA, first checking that every
+/// `Pal8` index addresses a palette entry — the fallible path behind
+/// [`crate::decode_rgba8`] / [`crate::decode_rgb8`] (an index past the
+/// `PLTE` is malformed data, not a black pixel).
+pub(crate) fn check_palette_indices(img: &PngImage) -> Result<()> {
+    if img.format != PngPixelFormat::Pal8 {
+        return Ok(());
+    }
+    let entries = img.palette.as_ref().map(Palette::len).unwrap_or(0);
+    if entries == 0 {
+        return Err(Error::invalid(
+            "PNG: Pal8 image missing PLTE chunk for RGBA promotion",
+        ));
+    }
+    let w = img.width as usize;
+    let stride = img.stride();
+    for row in img.data().chunks(stride.max(1)).take(img.height as usize) {
+        if let Some(&idx) = row.iter().take(w).find(|&&i| usize::from(i) >= entries) {
+            return Err(Error::invalid(format!(
+                "PNG: palette index {idx} out of bounds (PLTE has {entries} entries)"
+            )));
         }
     }
+    Ok(())
+}
 
-    let img = decode_png_chunks(&chunks)?;
-    png_image_to_rgba(&img, plte, trns)
+/// [`check_palette_indices`] then [`PngImage::to_rgba8`].
+pub(crate) fn image_to_rgba_checked(img: &PngImage) -> Result<RgbaImage> {
+    check_palette_indices(img)?;
+    Ok(RgbaImage::new(img.width, img.height, img.to_rgba8()))
 }
 
 /// The §13.15 "reasonable choice" of background when a datastream carries
@@ -1208,12 +1205,12 @@ pub fn decode_png_to_rgba(buf: &[u8]) -> Result<RgbaBitmap> {
 pub const DEFAULT_BACKGROUND_GREY: [u8; 3] = [153, 153, 153];
 
 /// Decode a PNG and composite it over a solid background colour, returning
-/// an opaque 8-bit [`RgbaBitmap`] (every pixel `α = 255`).
+/// an opaque 8-bit [`RgbaImage`] (every pixel `α = 255`).
 ///
 /// This is the §13.15 / §13.16 "display the image against a background"
 /// operation, the path a viewer that cannot show real transparency
 /// (alpha-over-page) takes. Decoding proceeds exactly as
-/// [`decode_png_to_rgba`] — palette / `tRNS` / grayscale-widening / 16→8
+/// [`crate::decode_rgba8`] — palette / `tRNS` / grayscale-widening / 16→8
 /// promotion all happen first — then every pixel's straight alpha is
 /// composited over the background in **linear light** (§13.16 "This
 /// computation should be performed with intensity samples, not
@@ -1235,8 +1232,8 @@ pub const DEFAULT_BACKGROUND_GREY: [u8; 3] = [153, 153, 153];
 /// pixel becomes the background colour exactly.
 ///
 /// Standalone (no `oxideav-core`) entry point: works whether or not the
-/// `registry` feature is enabled.
-pub fn decode_png_over_background(buf: &[u8], override_bg: Option<[u8; 3]>) -> Result<RgbaBitmap> {
+/// `registry` feature is enabled. Uses [`DecodeOptions::default`].
+pub fn decode_over_background(buf: &[u8], override_bg: Option<[u8; 3]>) -> Result<RgbaImage> {
     let chunks = parse_all_chunks(buf)?;
     let ihdr_chunk = chunks
         .iter()
@@ -1245,23 +1242,20 @@ pub fn decode_png_over_background(buf: &[u8], override_bg: Option<[u8; 3]>) -> R
     let ihdr = Ihdr::parse(ihdr_chunk.data)?;
 
     let mut plte: Option<&[u8]> = None;
-    let mut trns: Option<&[u8]> = None;
     let mut bkgd_raw: Option<&[u8]> = None;
     for c in &chunks {
         if c.is_type(b"PLTE") {
             plte = Some(c.data);
-        } else if c.is_type(b"tRNS") {
-            trns = Some(c.data);
         } else if c.is_type(b"bKGD") {
             bkgd_raw = Some(c.data);
         }
     }
 
     let mut bitmap = {
-        // Shared chunk walk — same reasoning as `decode_png_to_rgba`:
-        // one CRC-validating pass over the file, not two.
-        let img = decode_png_chunks(&chunks)?;
-        png_image_to_rgba(&img, plte, trns)?
+        // Shared chunk walk — one CRC-validating pass over the file,
+        // not two.
+        let img = decode_png_chunks(&chunks, &DecodeOptions::default())?;
+        image_to_rgba_checked(&img)?
     };
 
     // §13.15: caller override > bKGD chunk > medium-grey default.
@@ -1278,184 +1272,6 @@ pub fn decode_png_over_background(buf: &[u8], override_bg: Option<[u8; 3]>) -> R
 
     crate::srgb::composite_over_background(&mut bitmap, bg);
     Ok(bitmap)
-}
-
-/// Promote an arbitrary [`PngImage`] (any supported pixel format) into
-/// an 8-bit-per-channel [`RgbaBitmap`]. `plte` / `trns` are used only
-/// for `Pal8` source images.
-///
-/// For colour types 0 (`Gray8` / `Gray16Le`) and 2 (`Rgb24` /
-/// `Rgb48Le`) a `tRNS` chunk names a single transparent sample value
-/// (RFC 2083 §4.2.9). Pixels matching it exactly are emitted with
-/// α=0; every other pixel stays opaque (α=255). The match is performed
-/// at the source bit depth — for 16-bit sources both bytes of the
-/// sample are compared *before* the 8-bit promotion drops the low
-/// byte, per §4.2.9 ("Although decoders may drop the low-order byte
-/// of the samples for display, this must not occur until after the
-/// data has been tested for transparency").
-fn png_image_to_rgba(
-    img: &PngImage,
-    plte: Option<&[u8]>,
-    trns: Option<&[u8]>,
-) -> Result<RgbaBitmap> {
-    let w = img.width as usize;
-    let h = img.height as usize;
-    let n = w * h;
-    let mut out = vec![0u8; n * 4];
-
-    // For Gray*/Rgb* the tRNS payload (when present) is a single
-    // sample value at the source bit depth. RFC 2083 §4.2.9 stores
-    // every channel as a 2-byte big-endian value regardless of bit
-    // depth, so we decode it to u16 once and compare against the
-    // 16-bit-promoted source sample. For 8-bit sources the source
-    // sample is widened to u16 (the high byte is zero per spec) so
-    // the comparison stays uniform.
-    let trns_gray16: Option<u16> = match (img.pixel_format, trns) {
-        (PngPixelFormat::Gray8, Some(t)) | (PngPixelFormat::Gray16Le, Some(t)) if t.len() == 2 => {
-            Some(u16::from_be_bytes([t[0], t[1]]))
-        }
-        _ => None,
-    };
-    let trns_rgb16: Option<(u16, u16, u16)> = match (img.pixel_format, trns) {
-        (PngPixelFormat::Rgb24, Some(t)) | (PngPixelFormat::Rgb48Le, Some(t)) if t.len() == 6 => {
-            Some((
-                u16::from_be_bytes([t[0], t[1]]),
-                u16::from_be_bytes([t[2], t[3]]),
-                u16::from_be_bytes([t[4], t[5]]),
-            ))
-        }
-        _ => None,
-    };
-
-    // Every arm walks source pixels and destination RGBA cells in
-    // lockstep (`chunks_exact` pairs) so the loops carry no index
-    // arithmetic or per-pixel bounds checks, and the tRNS key is
-    // resolved to a concrete comparison value ahead of the loop
-    // instead of re-matching the `Option` per pixel.
-    match img.pixel_format {
-        PngPixelFormat::Gray8 => {
-            // tRNS keyed sample for ct=0 / bit_depth=8: the 2-byte tRNS
-            // stores the gray sample in the low byte (high byte is zero
-            // per spec), so the match condition is `tRNS_gray16 as u8 ==
-            // g` *and* the high byte zero (already guaranteed by
-            // validation).
-            let key = trns_gray16.map(|k| k as u8);
-            for (&g, px) in img.data.iter().zip(out.chunks_exact_mut(4)) {
-                px[0] = g;
-                px[1] = g;
-                px[2] = g;
-                px[3] = if key == Some(g) { 0 } else { 255 };
-            }
-        }
-        PngPixelFormat::Gray16Le => {
-            // Stored little-endian per sample: (lo, hi). Take the high
-            // byte for an 8-bit promotion, but reconstruct the full
-            // 16-bit value first so tRNS matching compares both bytes
-            // (RFC 2083 §4.2.9 note: "it is important to compare both
-            // bytes of the sample values to determine whether a pixel
-            // is transparent").
-            for (s, px) in img.data.chunks_exact(2).zip(out.chunks_exact_mut(4)) {
-                let (lo, hi) = (s[0], s[1]);
-                px[0] = hi;
-                px[1] = hi;
-                px[2] = hi;
-                let sample16 = u16::from_le_bytes([lo, hi]);
-                px[3] = if trns_gray16 == Some(sample16) {
-                    0
-                } else {
-                    255
-                };
-            }
-        }
-        PngPixelFormat::Rgb24 => {
-            let key = trns_rgb16.map(|(rk, gk, bk)| [rk as u8, gk as u8, bk as u8]);
-            for (s, px) in img.data.chunks_exact(3).zip(out.chunks_exact_mut(4)) {
-                px[0] = s[0];
-                px[1] = s[1];
-                px[2] = s[2];
-                px[3] = if key == Some([s[0], s[1], s[2]]) {
-                    0
-                } else {
-                    255
-                };
-            }
-        }
-        PngPixelFormat::Rgb48Le => {
-            for (s, px) in img.data.chunks_exact(6).zip(out.chunks_exact_mut(4)) {
-                px[0] = s[1];
-                px[1] = s[3];
-                px[2] = s[5];
-                let r16 = u16::from_le_bytes([s[0], s[1]]);
-                let g16 = u16::from_le_bytes([s[2], s[3]]);
-                let b16 = u16::from_le_bytes([s[4], s[5]]);
-                px[3] = if trns_rgb16 == Some((r16, g16, b16)) {
-                    0
-                } else {
-                    255
-                };
-            }
-        }
-        PngPixelFormat::Pal8 => {
-            let plte = plte.ok_or_else(|| {
-                Error::invalid("PNG: Pal8 image missing PLTE chunk for RGBA promotion")
-            })?;
-            if plte.len() % 3 != 0 {
-                return Err(Error::invalid(format!(
-                    "PNG: PLTE chunk length {} is not a multiple of 3",
-                    plte.len()
-                )));
-            }
-            let entries = plte.len() / 3;
-            let trns = trns.unwrap_or(&[]);
-            // Resolve PLTE + tRNS into a 256-entry RGBA lookup once so
-            // the per-pixel work is a single 4-byte table move. Indexes
-            // are u8, so a (nonconformant) PLTE longer than 256 entries
-            // simply leaves its unreachable tail out of the table —
-            // exactly the entries no index byte can address.
-            let mut lut = [[0u8; 4]; 256];
-            for (j, e) in plte.chunks_exact(3).take(256).enumerate() {
-                let a = if j < trns.len() { trns[j] } else { 255 };
-                lut[j] = [e[0], e[1], e[2], a];
-            }
-            for (&idx, px) in img.data.iter().zip(out.chunks_exact_mut(4)) {
-                let idx = idx as usize;
-                // tRNS (per spec): leading entries carry alpha; all
-                // entries past tRNS.len() are fully opaque.
-                if idx >= entries {
-                    return Err(Error::invalid(format!(
-                        "PNG: palette index {idx} out of bounds (PLTE has {entries} entries)"
-                    )));
-                }
-                px.copy_from_slice(&lut[idx]);
-            }
-        }
-        PngPixelFormat::Ya8 => {
-            for (s, px) in img.data.chunks_exact(2).zip(out.chunks_exact_mut(4)) {
-                let (g, a) = (s[0], s[1]);
-                px[0] = g;
-                px[1] = g;
-                px[2] = g;
-                px[3] = a;
-            }
-        }
-        PngPixelFormat::Rgba => {
-            out.copy_from_slice(&img.data);
-        }
-        PngPixelFormat::Rgba64Le => {
-            for (s, px) in img.data.chunks_exact(8).zip(out.chunks_exact_mut(4)) {
-                px[0] = s[1];
-                px[1] = s[3];
-                px[2] = s[5];
-                px[3] = s[7];
-            }
-        }
-    }
-
-    Ok(RgbaBitmap {
-        width: img.width,
-        height: img.height,
-        data: out,
-    })
 }
 
 /// Pack the raw decoded byte plane into a [`PngImage`] with the IHDR's
@@ -1515,27 +1331,19 @@ fn build_png_image(
         PngPixelFormat::Ya8 => (w * 2, raw),
     };
 
-    let palette = if pf == PngPixelFormat::Pal8 {
-        let mut pal = Vec::new();
-        if let Some(p) = plte {
-            pal.extend_from_slice(p);
+    let mut img = PngImage::packed(ihdr.width, ihdr.height, pf, stride, data);
+    if pf == PngPixelFormat::Pal8 {
+        img.palette = Some(Palette::from_rgb(plte.unwrap_or(&[]), trns));
+    } else if let Some(t) = trns {
+        // Keyed transparency for the alpha-less layouts (ct 0 / 2);
+        // `validate_trns` has already checked the payload shape, so a
+        // parse failure here can only be a ct 4 / 6 chunk the caller
+        // let through — which `validate_trns` rejects first.
+        if matches!(ihdr.colour_type, 0 | 2) {
+            img.transparency = Some(Trns::parse(t, ihdr.colour_type, ihdr.bit_depth, None)?);
         }
-        if let Some(t) = trns {
-            pal.extend_from_slice(t);
-        }
-        pal
-    } else {
-        Vec::new()
-    };
-
-    Ok(PngImage {
-        width: ihdr.width,
-        height: ihdr.height,
-        pixel_format: pf,
-        stride,
-        data,
-        palette,
-    })
+    }
+    Ok(img)
 }
 
 /// Swap every 2-byte sample of a network-byte-order plane to
@@ -1873,6 +1681,10 @@ pub struct ApngInfo {
     /// True if the default image (IDAT) is also the first animation frame —
     /// i.e. there's an `fcTL` that came before `IDAT`.
     pub first_frame_is_default: bool,
+    /// Colour signalling of the stream (shared by every frame).
+    pub color: crate::image::ColorInfo,
+    /// ICC / Exif / XMP / gamma of the stream (shared by every frame).
+    pub metadata: crate::image::Metadata,
 }
 
 impl ApngInfo {
@@ -1892,7 +1704,21 @@ impl ApngInfo {
             actl,
             frames,
             first_frame_is_default,
+            color: crate::image::ColorInfo::png_default(),
+            metadata: crate::image::Metadata::default(),
         }
+    }
+
+    /// Set the colour signalling.
+    pub fn with_color(mut self, color: crate::image::ColorInfo) -> Self {
+        self.color = color;
+        self
+    }
+
+    /// Set the metadata.
+    pub fn with_metadata(mut self, metadata: crate::image::Metadata) -> Self {
+        self.metadata = metadata;
+        self
     }
 }
 
@@ -1915,7 +1741,20 @@ impl ApngFrame {
 /// Parse an APNG file and return metadata + per-frame compressed segments.
 /// Returns `Err` if the file is a plain PNG without `acTL`.
 pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
+    parse_apng_with(buf, &DecodeOptions::default())
+}
+
+/// [`parse_apng`] under `opts`: the canvas is checked against the
+/// limits before any frame is inflated, and `strict` governs the
+/// colour / metadata chunk parse (the APNG control-chunk rules are
+/// always enforced).
+pub(crate) fn parse_apng_with(buf: &[u8], opts: &DecodeOptions) -> Result<ApngInfo> {
     let chunks = parse_all_chunks(buf)?;
+    parse_apng_chunks(&chunks, opts)
+}
+
+/// [`parse_apng_with`] over an already-walked chunk list.
+pub(crate) fn parse_apng_chunks(chunks: &[ChunkRef<'_>], opts: &DecodeOptions) -> Result<ApngInfo> {
     let ihdr = Ihdr::parse(
         chunks
             .iter()
@@ -1924,10 +1763,10 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
             .data,
     )?;
     // W3C PNG3 §5.4 / §14.2: refuse an unrecognised critical chunk on the
-    // APNG path too, matching `decode_png`. The APNG control chunks
+    // APNG path too, matching `decode`. The APNG control chunks
     // (acTL / fcTL / fdAT) carry the ancillary bit, so the critical
     // allow-set is the same four core chunks.
-    for c in &chunks {
+    for c in chunks {
         let ty = c.type_code();
         if ty.is_critical() && !matches!(&c.chunk_type, b"IHDR" | b"PLTE" | b"IDAT" | b"IEND") {
             return Err(Error::invalid(format!(
@@ -1941,9 +1780,11 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
     // stream too — an APNG carrying a mis-placed colour-space /
     // background / physical-dimension chunk is as malformed as a static
     // PNG. Shared validator with `parse_metadata`.
-    validate_ancillary_ordering(&chunks)?;
+    validate_ancillary_ordering(chunks)?;
     // §5.6 / §11.2.3: the default image's IDAT run shall be consecutive.
-    validate_idat_consecutive(&chunks)?;
+    validate_idat_consecutive(chunks)?;
+    opts.check(ihdr.width, ihdr.height, ihdr.decoded_plane_bytes()?)?;
+    let side = crate::sideinfo::extract(chunks, opts.strict)?;
 
     let actl_index = chunks
         .iter()
@@ -1991,7 +1832,7 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
     // Shared fcTL/fdAT sequence stream (W3C PNG3 §4.9.2), validated below.
     let mut seq_stream: Vec<crate::apng::SeqChunk> = Vec::new();
 
-    for c in &chunks {
+    for c in chunks {
         match &c.chunk_type {
             b"PLTE" => plte = Some(c.data.to_vec()),
             b"tRNS" => trns = Some(c.data.to_vec()),
@@ -2080,14 +1921,11 @@ pub fn parse_apng(buf: &[u8]) -> Result<ApngInfo> {
     // fcTL/fdAT sequence we just walked. Generators in the wild emit
     // mismatched counts; we accept them rather than failing the parse.
 
-    Ok(ApngInfo {
-        ihdr,
-        plte,
-        trns,
-        actl,
-        frames,
-        first_frame_is_default,
-    })
+    Ok(
+        ApngInfo::new(ihdr, plte, trns, actl, frames, first_frame_is_default)
+            .with_color(side.color)
+            .with_metadata(side.metadata),
+    )
 }
 
 /// Decode an entire APNG file into its composited per-frame canvases.
@@ -2273,19 +2111,19 @@ pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
             &trns_key,
         );
 
-        let img = PngImage {
-            width: canvas_w,
-            height: canvas_h,
-            pixel_format: canvas_fmt,
-            stride: stride_canvas,
-            data: canvas.clone(),
-            palette: Vec::new(),
-        };
+        let img = PngImage::packed(
+            canvas_w,
+            canvas_h,
+            canvas_fmt,
+            stride_canvas,
+            canvas.clone(),
+        )
+        .with_palette(sub_frame.palette.clone())
+        .with_transparency(sub_frame.transparency.clone())
+        .with_color(info.color)
+        .with_metadata(info.metadata.clone());
         let delay = frame.fctl.delay_centiseconds().max(1);
-        out_frames.push(ApngFrameImage {
-            image: img,
-            delay_cs: delay,
-        });
+        out_frames.push(ApngFrameImage::new(img, delay).with_delay(frame.fctl.delay_duration()));
 
         // Apply disposal *after* emitting.
         match effective_dispose {
@@ -2337,7 +2175,7 @@ fn blit_sub_into_canvas(
     blend: Blend,
     trns_key: &TransparencyKey,
 ) {
-    let sub_stride = sub.stride;
+    let sub_stride = sub.stride();
     if blend == Blend::Source {
         // SOURCE replaces the destination region outright (W3C PNG3
         // §11.3.6.2 "all color components of the frame, including alpha,
@@ -2355,7 +2193,7 @@ fn blit_sub_into_canvas(
             if dy >= canvas_h {
                 break;
             }
-            let src = &sub.data[sy * sub_stride..sy * sub_stride + row_cap * bpp];
+            let src = &sub.data()[sy * sub_stride..sy * sub_stride + row_cap * bpp];
             let dst_start = dy * stride_canvas + x_off * bpp;
             canvas[dst_start..dst_start + row_cap * bpp].copy_from_slice(src);
         }
@@ -2369,7 +2207,7 @@ fn blit_sub_into_canvas(
         let row_cap = (canvas_w - x_off.min(canvas_w)).min(sub_w);
         for sx in 0..row_cap {
             let dx = x_off + sx;
-            let src = &sub.data[sy * sub_stride + sx * bpp..sy * sub_stride + (sx + 1) * bpp];
+            let src = &sub.data()[sy * sub_stride + sx * bpp..sy * sub_stride + (sx + 1) * bpp];
             let dst_start = dy * stride_canvas + dx * bpp;
             let dst = &mut canvas[dst_start..dst_start + bpp];
             match blend {

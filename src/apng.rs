@@ -231,6 +231,19 @@ impl Fctl {
         let num = self.delay_num as u64 * 100;
         (num / self.delay_den.max(1) as u64) as u32
     }
+
+    /// The exact delay, `delay_num / delay_den` seconds (a zero
+    /// denominator — never produced by [`Self::parse`], which already
+    /// substitutes 100 per §11.3.6.2 — is treated as 100 here too).
+    pub fn delay_duration(&self) -> std::time::Duration {
+        let den = if self.delay_den == 0 {
+            100
+        } else {
+            u64::from(self.delay_den)
+        };
+        let micros = u64::from(self.delay_num) * 1_000_000 / den;
+        std::time::Duration::from_micros(micros)
+    }
 }
 
 /// Which APNG-sequenced chunk a [`SeqChunk`] entry came from. Both `fcTL` and

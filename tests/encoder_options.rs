@@ -5,10 +5,13 @@
 //! typed struct and the factory path that parses
 //! `CodecParameters::options` at init.
 
+// The framework path: needs `oxideav-core` (default-on `registry`).
+#![cfg(feature = "registry")]
+
 use oxideav_core::{
     parse_options, CodecId, CodecOptions, CodecOptionsStruct, CodecParameters, Error, PixelFormat,
 };
-use oxideav_png::PngEncoderOptions;
+use oxideav_png::EncodeOptions;
 
 /// The schema the PNG encoder advertises: `interlace` (bool),
 /// `bit_depth` (u32; 0 = native, 1/2/4 = sub-byte for Gray8 / Pal8,
@@ -18,7 +21,7 @@ use oxideav_png::PngEncoderOptions;
 /// 0 = encoder default `DEFAULT_COMPRESSION_LEVEL`, 1..=9 = explicit DEFLATE level).
 #[test]
 fn schema_advertises_interlace_bit_depth_and_filter() {
-    let schema = <PngEncoderOptions as CodecOptionsStruct>::SCHEMA;
+    let schema = <EncodeOptions as CodecOptionsStruct>::SCHEMA;
     assert_eq!(schema.len(), 6);
     assert_eq!(schema[0].name, "interlace");
     assert_eq!(schema[1].name, "bit_depth");
@@ -43,7 +46,7 @@ fn level_and_compression_aliases_set_compression_level() {
             ("9", Some(9)),
         ] {
             let opts = CodecOptions::new().set(key, raw);
-            let parsed = parse_options::<PngEncoderOptions>(&opts).expect("parse");
+            let parsed = parse_options::<EncodeOptions>(&opts).expect("parse");
             assert_eq!(parsed.compression_level, expected, "{key} = {raw}");
         }
     }
@@ -52,12 +55,12 @@ fn level_and_compression_aliases_set_compression_level() {
     let opts = CodecOptions::new()
         .set("compression_level", "2")
         .set("level", "7");
-    let parsed = parse_options::<PngEncoderOptions>(&opts).expect("parse");
+    let parsed = parse_options::<EncodeOptions>(&opts).expect("parse");
     assert_eq!(parsed.compression_level, Some(7));
 }
 
 /// `compression_level` threads through into
-/// `PngEncoderOptions::compression_level: Option<u8>`. The `0` sentinel
+/// `EncodeOptions::compression_level: Option<u8>`. The `0` sentinel
 /// maps to `None` (= `DEFAULT_COMPRESSION_LEVEL`); every other in-range value
 /// becomes `Some(value)`. Range validation (1..=9) is deferred to
 /// encode time, so a parse here accepts the raw integer.
@@ -70,7 +73,7 @@ fn parse_from_bag_sets_compression_level() {
         ("9", Some(9)),
     ] {
         let opts = CodecOptions::new().set("compression_level", raw);
-        let parsed = parse_options::<PngEncoderOptions>(&opts).expect("parse");
+        let parsed = parse_options::<EncodeOptions>(&opts).expect("parse");
         assert_eq!(
             parsed.compression_level, expected,
             "compression_level = {raw}"
@@ -85,7 +88,7 @@ fn parse_from_bag_sets_compression_level() {
 #[test]
 fn compression_level_roundtrips_and_validates_range() {
     use oxideav_png::image::{PngImage, PngPixelFormat};
-    use oxideav_png::{decode_png_to_rgba, encode_png_image_with_options};
+    use oxideav_png::{decode_rgba8, encode};
 
     // A 64x64 RGBA gradient — compressible enough that level matters.
     let (w, h) = (64u32, 64u32);
@@ -95,21 +98,23 @@ fn compression_level_roundtrips_and_validates_range() {
             data.extend_from_slice(&[(x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8, 255]);
         }
     }
-    let img =
-        PngImage::new(w, h, PngPixelFormat::Rgba, (w * 4) as usize, data).with_palette(Vec::new());
+    let img = PngImage::packed(w, h, PngPixelFormat::Rgba, (w * 4) as usize, data);
 
     let mut sizes = Vec::new();
     for level in 0u8..=9 {
-        let opts = PngEncoderOptions::default().with_compression_level(if level == 0 {
+        let opts = EncodeOptions::default().with_compression_level(if level == 0 {
             None
         } else {
             Some(level)
         });
-        let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
-        let decoded = decode_png_to_rgba(&bytes).expect("decode");
+        let bytes = encode(&img, &opts).expect("encode");
+        let decoded = decode_rgba8(&bytes).expect("decode");
         assert_eq!(decoded.width, w);
         assert_eq!(decoded.height, h);
-        assert_eq!(decoded.data, img.data, "pixels differ at level {level}");
+        assert_eq!(
+            decoded.data, img.planes[0].data,
+            "pixels differ at level {level}"
+        );
         sizes.push(bytes.len());
     }
     // Level 9 must not be larger than level 1 on compressible input.
@@ -121,19 +126,16 @@ fn compression_level_roundtrips_and_validates_range() {
     );
     // `None` is exactly `Some(DEFAULT_COMPRESSION_LEVEL)` — the default
     // is a named level, not a separate code path.
-    let explicit = PngEncoderOptions::default()
+    let explicit = EncodeOptions::default()
         .with_compression_level(Some(oxideav_png::DEFAULT_COMPRESSION_LEVEL));
-    let default_bytes = encode_png_image_with_options(&img, &PngEncoderOptions::default()).unwrap();
-    assert_eq!(
-        default_bytes,
-        encode_png_image_with_options(&img, &explicit).unwrap()
-    );
+    let default_bytes = encode(&img, &EncodeOptions::default()).unwrap();
+    assert_eq!(default_bytes, encode(&img, &explicit).unwrap());
     assert_eq!(oxideav_png::DEFAULT_COMPRESSION_LEVEL, 2);
 
     // Out-of-range level is rejected before any bytes are emitted.
     for bad in [10u8, 11, 255] {
-        let opts = PngEncoderOptions::default().with_compression_level(Some(bad));
-        let err = encode_png_image_with_options(&img, &opts).unwrap_err();
+        let opts = EncodeOptions::default().with_compression_level(Some(bad));
+        let err = encode(&img, &opts).unwrap_err();
         let msg = format!("{err:?}");
         assert!(
             msg.contains("compression_level") && msg.contains(&bad.to_string()),
@@ -162,7 +164,7 @@ fn parse_from_bag_sets_filter_strategy() {
         ("Paeth", FilterStrategy::Fixed(FilterType::Paeth)),
     ] {
         let opts = CodecOptions::new().set("filter", raw);
-        let parsed = parse_options::<PngEncoderOptions>(&opts).expect("parse");
+        let parsed = parse_options::<EncodeOptions>(&opts).expect("parse");
         assert_eq!(parsed.filter_strategy, expected, "filter = {raw:?}");
     }
 }
@@ -171,14 +173,14 @@ fn parse_from_bag_sets_filter_strategy() {
 fn filter_strategy_default_when_unset() {
     use oxideav_png::FilterStrategy;
     let opts = CodecOptions::new();
-    let parsed = parse_options::<PngEncoderOptions>(&opts).expect("parse");
+    let parsed = parse_options::<EncodeOptions>(&opts).expect("parse");
     assert_eq!(parsed.filter_strategy, FilterStrategy::Adaptive);
 }
 
 #[test]
 fn unknown_filter_value_rejected() {
     let opts = CodecOptions::new().set("filter", "median");
-    let err = parse_options::<PngEncoderOptions>(&opts).unwrap_err();
+    let err = parse_options::<EncodeOptions>(&opts).unwrap_err();
     assert!(
         matches!(err, Error::InvalidData(ref s) if s.contains("median")),
         "got {err:?}"
@@ -186,7 +188,7 @@ fn unknown_filter_value_rejected() {
 }
 
 /// `bit_depth` accepts a u32 and threads through into
-/// `PngEncoderOptions::bit_depth: Option<u8>`. The `0` sentinel maps
+/// `EncodeOptions::bit_depth: Option<u8>`. The `0` sentinel maps
 /// to `None` (= leave native), every other in-range value becomes
 /// `Some(value)`.
 #[test]
@@ -199,7 +201,7 @@ fn parse_from_bag_sets_bit_depth() {
         ("8", Some(8)),
     ] {
         let opts = CodecOptions::new().set("bit_depth", raw);
-        let parsed = parse_options::<PngEncoderOptions>(&opts).expect("parse");
+        let parsed = parse_options::<EncodeOptions>(&opts).expect("parse");
         assert_eq!(parsed.bit_depth, expected, "bit_depth = {raw}");
     }
 }
@@ -207,21 +209,21 @@ fn parse_from_bag_sets_bit_depth() {
 #[test]
 fn parse_from_bag_sets_interlace() {
     let opts = CodecOptions::new().set("interlace", "true");
-    let parsed = parse_options::<PngEncoderOptions>(&opts).expect("parse");
+    let parsed = parse_options::<EncodeOptions>(&opts).expect("parse");
     assert!(parsed.interlace);
 }
 
 #[test]
 fn parse_default_when_empty() {
     let opts = CodecOptions::new();
-    let parsed = parse_options::<PngEncoderOptions>(&opts).expect("parse");
+    let parsed = parse_options::<EncodeOptions>(&opts).expect("parse");
     assert!(!parsed.interlace);
 }
 
 #[test]
 fn unknown_key_rejected() {
     let opts = CodecOptions::new().set("not_a_real_option", "1");
-    let err = parse_options::<PngEncoderOptions>(&opts).unwrap_err();
+    let err = parse_options::<EncodeOptions>(&opts).unwrap_err();
     assert!(
         matches!(err, Error::InvalidData(ref s) if s.contains("not_a_real_option")),
         "got {err:?}"
@@ -231,7 +233,7 @@ fn unknown_key_rejected() {
 #[test]
 fn bad_value_type_rejected() {
     let opts = CodecOptions::new().set("interlace", "sometimes");
-    let err = parse_options::<PngEncoderOptions>(&opts).unwrap_err();
+    let err = parse_options::<EncodeOptions>(&opts).unwrap_err();
     assert!(
         matches!(err, Error::InvalidData(ref s) if s.contains("expects bool")),
         "got {err:?}"

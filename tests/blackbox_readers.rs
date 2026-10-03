@@ -19,8 +19,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use oxideav_png::{
-    decode_png, encode_png_image_threaded, FilterStrategy, FilterType, PngEncoderOptions, PngImage,
-    PngPixelFormat,
+    decode, encode, EncodeOptions, FilterStrategy, FilterType, PngImage, PngPixelFormat,
 };
 
 fn have(bin: &str, probe: &str) -> bool {
@@ -66,7 +65,7 @@ fn synth(width: u32, height: u32, pf: PngPixelFormat) -> PngImage {
             px[7] = 0xC0;
         }
     }
-    PngImage::new(width, height, pf, row_bytes, data).with_palette(Vec::new())
+    PngImage::packed(width, height, pf, row_bytes, data)
 }
 
 /// ImageMagick raw-dump spec for a layout: (`magick` output format,
@@ -92,9 +91,12 @@ struct Readers {
 
 fn gate(readers: &Readers, label: &str, img: &PngImage, png: &[u8]) {
     // 1. Our own decoder, byte-exact.
-    let back = decode_png(png).unwrap_or_else(|e| panic!("{label}: own decode failed: {e}"));
-    assert_eq!(back.pixel_format, img.pixel_format, "{label}");
-    assert_eq!(back.data, img.data, "{label}: own decode pixel mismatch");
+    let back = decode(png).unwrap_or_else(|e| panic!("{label}: own decode failed: {e}"));
+    assert_eq!(back.format, img.format, "{label}");
+    assert_eq!(
+        back.planes[0].data, img.planes[0].data,
+        "{label}: own decode pixel mismatch"
+    );
 
     if !readers.magick && !readers.sips {
         return;
@@ -117,7 +119,7 @@ fn gate(readers: &Readers, label: &str, img: &PngImage, png: &[u8]) {
             String::from_utf8_lossy(&id.stderr)
         );
         // 2b. Raw sample dump must equal the source plane.
-        if let Some((fmt, extra)) = magick_spec(img.pixel_format) {
+        if let Some((fmt, extra)) = magick_spec(img.format) {
             let mut cmd = Command::new("magick");
             cmd.arg(&path).args(&extra).arg(fmt);
             let out = cmd.output().expect("run magick dump");
@@ -128,11 +130,11 @@ fn gate(readers: &Readers, label: &str, img: &PngImage, png: &[u8]) {
             );
             assert_eq!(
                 out.stdout.len(),
-                img.data.len(),
+                img.planes[0].data.len(),
                 "{label}: magick dump length"
             );
             assert!(
-                out.stdout == img.data,
+                out.stdout == img.planes[0].data,
                 "{label}: magick dump pixel mismatch"
             );
         }
@@ -197,11 +199,11 @@ fn every_option_combination_reads_back_in_black_box_readers() {
                     if interlace && level == 6 {
                         continue; // keep the matrix quick; level 1/2 cover Adam7
                     }
-                    let opts = PngEncoderOptions::default()
+                    let opts = EncodeOptions::default()
                         .with_interlace(interlace)
                         .with_filter_strategy(strategy)
                         .with_compression_level(Some(level));
-                    let png = encode_png_image_threaded(&img, &opts, 8).expect("encode");
+                    let png = encode(&img, &opts.clone().with_threads(8)).expect("encode");
                     let label = format!(
                         "{pf:?}/l{level}/{fname}/{}",
                         if interlace { "adam7" } else { "rows" }
@@ -215,10 +217,10 @@ fn every_option_combination_reads_back_in_black_box_readers() {
     // Brute once per layout family (expensive: six deflates each).
     for pf in [PngPixelFormat::Rgb24, PngPixelFormat::Gray16Le] {
         let img = synth(640, 400, pf);
-        let opts = PngEncoderOptions::default()
+        let opts = EncodeOptions::default()
             .with_filter_strategy(FilterStrategy::Brute)
             .with_compression_level(Some(1));
-        let png = encode_png_image_threaded(&img, &opts, 4).expect("encode");
+        let png = encode(&img, &opts.clone().with_threads(4)).expect("encode");
         gate(&readers, &format!("{pf:?}/brute"), &img, &png);
         combos += 1;
     }

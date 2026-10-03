@@ -1,118 +1,144 @@
-//! Pure-Rust PNG + APNG codec and container.
+//! Pure-Rust PNG + APNG decoder, encoder and container.
 //!
-//! Supports (decode):
-//! * colour type 0 (grayscale) — 1/2/4/8/16-bit
-//! * colour type 2 (RGB) — 8-bit, 16-bit
-//! * colour type 3 (palette) — 1/2/4/8-bit
-//! * colour type 4 (grayscale + alpha) — 8-bit, 16-bit
-//! * colour type 6 (RGBA) — 8-bit, 16-bit
-//! * all five PNG row filters (None / Sub / Up / Average / Paeth)
-//! * Adam7 interlacing (seven-pass progressive)
-//! * multiple IDAT chunks
-//! * PLTE + tRNS palettes; tRNS keyed transparency on grayscale +
-//!   truecolor sources (8 / 16-bit) applied via [`decode_png_to_rgba`]
-//! * APNG animation: `acTL`, `fcTL`, `fdAT` with `None`/`Background`/`Previous`
-//!   disposal and `Source`/`Over` blending.
+//! # Standalone use
 //!
-//! Sub-8-bit grayscale is expanded to `Gray8` (scaled per §13.12: ×255, ×85,
-//! ×17 for 1/2/4-bit) on output. Sub-8-bit indexed is expanded to `Pal8`
-//! (one palette index byte per pixel).
+//! The crate follows the OxideAV image-crate contract
+//! (`IMAGE_CRATE_API`): a small root vocabulary that works with
+//! `default-features = false` and returns pixels as plain `Vec<u8>`.
 //!
-//! Supports (encode):
-//! * `Rgba` / `Rgb24` / `Gray8` / `Pal8` at 8-bit
-//! * `Rgb48Le` / `Rgba64Le` / `Gray16Le` at 16-bit
-//! * `Ya8` grayscale + alpha
-//! * Single IDAT, DEFLATE via `compcol`, per-row heuristic filter
-//!   selection (PNG §12.8 min-sum-abs-delta).
-//! * APNG: `acTL` + per-frame `fcTL`/`fdAT` when `frame_rate` is set or
-//!   more than one frame is submitted. [`encode_apng`] paints every
-//!   frame full-canvas with `Disposal::None` / `Blend::Source` and one
-//!   shared delay; the region-aware [`encode_apng_frames`] /
-//!   [`encode_apng_frames_with_options`] take per-frame
-//!   [`ApngFrameSpec`]s carrying a sub-canvas region (`x_offset` /
-//!   `y_offset` + a smaller frame extent), a per-frame `delay_num` /
-//!   `delay_den` rational duration, and the
-//!   `Disposal::{None,Background,Previous}` /
-//!   `Blend::{Source,Over}` operators, plus an optional separate
-//!   full-canvas default (still) image excluded from the animation
-//!   (W3C PNG3 §11.3.6.1 frame-control surface; round-trips through the
-//!   decoder's compositor).
-//! * Adam7 seven-pass interlaced encode, opt-in via
-//!   [`encoder::PngEncoderOptions`]`::interlace` (or
-//!   `CodecParameters::options` key `"interlace"`).
-//! * Sub-byte encode (1, 2, 4-bit) for colour type 0 (grayscale) and
-//!   colour type 3 (indexed), opt-in via
-//!   [`encoder::PngEncoderOptions`]`::bit_depth`. Source is a `Gray8`
-//!   or `Pal8` buffer with each byte already pre-quantized to
-//!   `0..=(1 << bit_depth) - 1`; pixels pack MSB-first per PNG §2.3.
-//!   Combinable with `interlace = true` — each Adam7 pass is packed
-//!   independently into `ceil(pw * bit_depth / 8)` wire bytes per
-//!   row, treating each pass "as though it were a complete image of
-//!   the appropriate dimensions" (RFC 2083 §2.6).
+//! ```no_run
+//! # fn main() -> Result<(), oxideav_png::Error> {
+//! let bytes = std::fs::read("in.png").map_err(oxideav_png::PngError::Io)?;
+//! if oxideav_png::probe(&bytes) {
+//!     let info = oxideav_png::info(&bytes)?;   // header only: width, height, format, frames
+//!     let img = oxideav_png::decode(&bytes)?;  // PngImage, native layout
+//!     let rgba: Vec<u8> = img.to_rgba8();      // tightly packed RGBA, 4 * width bytes per row
+//!     let (w, h) = (img.width(), img.height());
+//!     assert_eq!(info.width, w);
 //!
-//! Not implemented:
-//! * Round-tripped metadata: `sBIT`, `pHYs`, `tIME`, `bKGD`, `hIST`,
-//!   `tRNS`, `eXIf`, `sRGB`, `cICP`, `iCCP`, `mDCV`, `cLLI`, `sPLT`,
-//!   `tEXt`, `zTXt`, `iTXt` —
-//!   surfaced via [`parse_metadata`] on decode and re-emitted by the
-//!   encoder when [`PngEncoderOptions::metadata`] is populated. `eXIf`
-//!   is carried as an opaque (TIFF-header-validated) blob; `sRGB`
-//!   carries the ICC rendering intent; `cICP` carries the H.273
-//!   colour-primaries / transfer-function / video-range code points
-//!   with `matrix_coefficients` pinned at 0 (PNG is RGB-only per
-//!   §11.3.2.6); `iCCP` carries an opaque ICC.1 profile blob alongside
-//!   its 1-79-byte Latin-1 name (deflate-framed on the wire, decoded
-//!   to a byte vector in memory); `sPLT` carries one or more named
-//!   suggested palettes (8- or 16-bit RGBA + frequency entries), the
-//!   one metadata chunk PNG allows to repeat with distinct names.
-//!   `tEXt` carries free-form Latin-1 keyword + text pairs (RFC 2083
-//!   §4.2.7); `zTXt` carries the same with the body zlib-compressed
-//!   (RFC 2083 §4.2.10); `iTXt` is the UTF-8 successor with a BCP47
-//!   language tag and an optional zlib-compressed UTF-8 text body
-//!   (W3C PNG3 §11.3.3.4). All three text-chunk types may repeat with
-//!   identical keywords.
-//!   `tRNS` is round-tripped through [`PngMetadata::trns`] for colour
-//!   types 0 (grayscale) / 2 (truecolor) / 3 (indexed); the variant
-//!   matches the IHDR colour type ([`Trns::Grayscale`] / [`Trns::Rgb`]
-//!   / [`Trns::Palette`]), colour types 4 and 6 are rejected (a full
-//!   alpha channel is already present per RFC 2083 §4.2.9 final
-//!   paragraph), and the encoder errors if both [`PngMetadata::trns`]
-//!   and the legacy `image.palette` `PLTE || tRNS` tail are present
-//!   (W3C PNG3 §5.6 Table 1 "Multiple OK? No"). Decode-side keyed-
-//!   transparency promotion still happens in [`decode_png_to_rgba`]
-//!   per §4.2.9 (both bytes of a 16-bit sample compared before the
-//!   8-bit truncation).
+//!     let opts = oxideav_png::EncodeOptions::default().with_level(2);
+//!     let out: Vec<u8> = oxideav_png::encode_rgba8(w, h, &rgba, &opts)?;
+//!     std::fs::write("out.png", out).map_err(oxideav_png::PngError::Io)?;
+//! }
+//! # Ok(()) }
+//! ```
 //!
-//! ## Colour management
+//! * [`probe`] / [`info`] — signature sniff; header + chunk walk
+//!   without decoding pixels ([`ImageInfo`]).
+//! * [`decode`] / [`decode_with`] — the native layout ([`PngImage`]:
+//!   `width`, `height`, [`PixelFormat`], one [`Plane`], [`ColorInfo`],
+//!   [`Metadata`], [`Palette`], keyed [`Trns`] transparency), with
+//!   [`DecodeOptions`] for limits and strictness.
+//! * [`decode_rgb8`] / [`decode_rgba8`] — the one-call raw paths
+//!   ([`RgbImage`] / [`RgbaImage`]); [`PngImage::to_rgb8`] /
+//!   [`PngImage::to_rgba8`] do the same from a decoded image.
+//! * [`decode_all`] — every frame of an APNG, composited
+//!   ([`Frame`]); [`decode_from`] reads a `Read` to its end.
+//! * [`encode`] / [`encode_rgb8`] / [`encode_rgba8`] / [`encode_to`]
+//!   with [`EncodeOptions`] (level, filter, interlace, sub-byte depth,
+//!   threads, extra chunks).
+//! * [`PngError`] (alias [`Error`]): `InvalidData`, `Unsupported`,
+//!   `LimitExceeded`, `Io`, …
 //!
-//! Two opt-in colour transforms sit beside the codec proper (which always
-//! leaves wire samples verbatim): the [`gamma`] module performs §13.13
-//! decoder gamma handling from a `gAMA` exponent, and the [`srgb`] module
-//! implements the IEC 61966-2-1 sRGB transfer function ([`srgb_to_linear8`]
-//! / [`srgb_from_linear`]) plus linear-light alpha compositing
-//! ([`composite_over_background`]) — the §13-correct path for blending an
-//! sRGB image over a background. The [`depth`] module performs §12.4 /
-//! §13.12 sample-depth scaling — the linear rescale, left-bit-replication
-//! and zero-fill primitives plus [`rescale_16bit_to_8bit`] /
-//! [`rescale_16bit_to_8bit_via_sbit`] for reducing a decoded 16-bit
-//! [`PngImage`] to 8 bits (optionally recovering the significant bits an
-//! `sBIT` chunk recorded before scaling).
+//! # Framework use
 //!
-//! ## Standalone (no `oxideav-core`) mode
+//! With the default-on `registry` feature, [`register`] installs the
+//! `png` codec and the PNG / APNG container into an
+//! `oxideav_core::RuntimeContext`; [`make_decoder`] / [`make_encoder`]
+//! are the factories, and `From<PngImage> for VideoFrame` /
+//! [`PngImage::from_video_frame`] convert between the two worlds. The
+//! trait-side `Decoder` / `Encoder` call the standalone functions.
 //!
-//! `oxideav-core` is gated behind the default-on `registry` feature. With
-//! the feature off, the crate exposes a free-standing
-//! [`decode_png`] / [`encode_png_image`] / [`decode_apng`] /
-//! [`encode_apng`] API plus crate-local [`PngImage`] / [`PngError`]
-//! types and never references `oxideav-core`. Image-library consumers
-//! depend on this crate with `default-features = false` to skip the
-//! framework dependency tree entirely.
+//! # Supported layouts
+//!
+//! Decode (IHDR colour type / bit depth → [`PixelFormat`]):
+//!
+//! | Colour type | Bit depth | Layout |
+//! |---|---|---|
+//! | 0 greyscale | 1 / 2 / 4 / 8 | `Gray8` (sub-byte scaled per §13.12: ×255 / ×85 / ×17) |
+//! | 0 greyscale | 16 | `Gray16Le` |
+//! | 2 truecolour | 8 / 16 | `Rgb24` / `Rgb48Le` |
+//! | 3 indexed | 1 / 2 / 4 / 8 | `Pal8` (one index byte per pixel) + [`Palette`] |
+//! | 4 grey + alpha | 8 / 16 | `Ya8` / `Rgba64Le` (grey replicated — no 16-bit grey+alpha layout) |
+//! | 6 truecolour + alpha | 8 / 16 | `Rgba` / `Rgba64Le` |
+//!
+//! All five row filters, Adam7 interlacing, split `IDAT` runs, `tRNS`
+//! keyed transparency on types 0 / 2 (carried as
+//! [`PngImage::transparency`]), APNG (`acTL` / `fcTL` / `fdAT`, every
+//! dispose / blend operator).
+//!
+//! Encode: every layout above at its natural depth (`Gray8` / `Pal8`
+//! also at 1 / 2 / 4 bits via [`EncodeOptions::bit_depth`]), Adam7
+//! opt-in, single `IDAT`, DEFLATE via `compcol` with per-row §12.8
+//! heuristic or fixed filters; APNG via [`encode_apng`] (full-canvas
+//! frames, one delay) or the region-aware [`encode_apng_frames`]
+//! ([`ApngFrameSpec`]: sub-region, rational delay, dispose / blend,
+//! optional separate default image). [`encode`] refuses what PNG
+//! cannot carry with [`PngError::Unsupported`] (a non-identity colour
+//! matrix) and never converts silently.
+//!
+//! # Options
+//!
+//! [`DecodeOptions`]: `max_width` / `max_height` / `max_pixels` /
+//! `max_bytes` (checked against the header before any allocation;
+//! default 1 GiB of decoded plane) and `strict` (ancillary-chunk
+//! rules, see the type docs). [`EncodeOptions`]: `compression_level`
+//! (`with_level`, 1..=9, default [`DEFAULT_COMPRESSION_LEVEL`]),
+//! `filter_strategy`, `interlace`, `bit_depth`, `threads`, and
+//! `metadata` ([`PngMetadata`], every ancillary chunk).
+//!
+//! # Metadata and colour
+//!
+//! [`PngImage::metadata`] carries the ICC profile (`iCCP`), Exif
+//! (`eXIf`), XMP (the `XML:com.adobe.xmp` `iTXt`, [`XMP_KEYWORD`]) and
+//! `gAMA` as `gamma`. [`PngImage::color`] is resolved by the W3C PNG3
+//! §4.3 Table 1 precedence: `cICP` → its H.273 code points and range;
+//! else `iCCP` → unspecified (the profile governs); else `sRGB` →
+//! [`ColorInfo::srgb`]; else `cHRM` → `primaries` 1 (BT.709) or 9
+//! (BT.2020) when the chromaticities match, `gAMA` never mapped to a
+//! transfer code point; nothing → [`ColorInfo::png_default`]
+//! (full-range RGB, unspecified primaries / transfer). Decoding
+//! **never applies** gamma or colour management: `to_rgba8` is an
+//! exact integer kernel per layout (16-bit samples drop the low byte,
+//! as §13.12 permits — [`rescale_16bit_to_8bit`] is the linear
+//! rescale). [`encode`] writes the chunks back: `gAMA` / `iCCP` /
+//! `eXIf` / XMP from `metadata`, `sRGB` for exactly
+//! [`ColorInfo::srgb`] (unless an ICC profile is present) or `cICP`
+//! for any other specified colour, `tRNS` from `transparency` /
+//! palette alpha; [`EncodeOptions::metadata`] wins where both name a
+//! chunk. `decode(encode(img)) == img` for planes, colour, metadata,
+//! palette and transparency.
+//!
+//! The full chunk set — `sBIT`, `pHYs`, `tIME`, `bKGD`, `hIST`,
+//! `mDCV`, `cLLI`, `sPLT`, `tEXt`, `zTXt`, `iTXt`, unknown ancillary
+//! chunks — is [`parse_metadata`] / [`PngMetadata`], round-tripped
+//! through [`EncodeOptions::metadata`].
+//!
+//! # Limits
+//!
+//! Every function returns [`PngError`] on hostile input, never
+//! panics. Beyond [`DecodeOptions`], the decoder bounds the inflate at
+//! the exact filtered-stream size the header implies (decompression
+//! bombs, §13.3), caps inflated metadata bodies at
+//! [`MAX_INFLATED_METADATA_LEN`], and validates every CRC.
+//!
+//! # PNG specifics
+//!
+//! Opt-in colour transforms sit beside the codec: the [`gamma`] module
+//! performs §13.13 decoder gamma handling, [`srgb`] the IEC 61966-2-1
+//! transfer function and linear-light compositing
+//! ([`decode_over_background`] is the §13.15 "display against a
+//! background" path), [`depth`] the §12.4 / §13.12 sample-depth
+//! scaling. [`decode_apng`] / [`parse_apng`] expose the APNG model
+//! ([`ApngImage`] with `num_plays`, [`ApngInfo`] with the raw frame
+//! chain) beyond what [`decode_all`] returns.
 
 // When built without the `registry` feature, the `Decoder`/`Encoder`
 // trait wrappers don't exist so a few standalone helpers go unused on
 // that build. Suppress crate-wide rather than gating each individually.
 #![cfg_attr(not(feature = "registry"), allow(dead_code))]
 
+mod api;
 pub mod apng;
 pub mod chunk;
 #[cfg(feature = "registry")]
@@ -125,20 +151,47 @@ pub mod filter;
 pub mod gamma;
 pub mod image;
 pub mod metadata;
+mod options;
 #[cfg(feature = "registry")]
 pub mod registry;
+mod sideinfo;
 pub mod srgb;
 mod srgb_tables;
 mod zlibvec;
 mod zstream;
 
-// Public unconditional API — works whether or not `registry` is enabled.
+// ---- The image-crate contract (IMAGE_CRATE_API) ---------------------------
+// Root vocabulary, identical across every oxideav image crate; works
+// with `default-features = false`.
+pub use api::{
+    decode, decode_all, decode_all_with, decode_from, decode_rgb8, decode_rgba8, decode_with,
+    encode, encode_rgb8, encode_rgba8, encode_to, info, probe,
+};
+#[allow(deprecated)]
+pub use api::{decode_png, decode_png_over_background, decode_png_to_rgba};
+pub use decoder::decode_over_background;
+pub use encoder::EncodeOptions;
+#[allow(deprecated)]
+pub use encoder::PngEncoderOptions;
+#[allow(deprecated)]
+pub use encoder::{encode_png_image, encode_png_image_threaded, encode_png_image_with_options};
+pub use error::{Error, PngError, Result};
+#[allow(deprecated)]
+pub use image::RgbaBitmap;
+pub use image::{
+    ColorInfo, ColorRange, Frame, ImageInfo, Metadata, Palette, PixelFormat, Plane, PngImage,
+    PngPixelFormat, RgbImage, RgbaImage,
+};
+pub use options::DecodeOptions;
+pub use sideinfo::XMP_KEYWORD;
+
+// ---- PNG-specific depth (the contract is a floor, not a ceiling) ----------
 pub use apng::{Blend as ApngBlend, Disposal as ApngDisposal};
 pub use chunk::{ChunkType, ColourType};
 pub use decoder::CODEC_ID_STR;
 pub use decoder::{
-    decode_apng, decode_apng_info, decode_png, decode_png_over_background, decode_png_to_rgba,
-    parse_apng, parse_metadata, ApngInfo, Ihdr, DEFAULT_BACKGROUND_GREY,
+    decode_apng, decode_apng_info, parse_apng, parse_metadata, ApngInfo, Ihdr,
+    DEFAULT_BACKGROUND_GREY,
 };
 pub use depth::{
     max_sample, recover_sbit, rescale_16bit_to_8bit, rescale_16bit_to_8bit_via_sbit,
@@ -146,17 +199,15 @@ pub use depth::{
 };
 pub use encoder::{
     encode_apng, encode_apng_frames, encode_apng_frames_threaded, encode_apng_frames_with_options,
-    encode_apng_threaded, encode_apng_with_options, encode_png_image, encode_png_image_threaded,
-    encode_png_image_with_options, ApngFrameSpec, PngEncoderOptions, DEFAULT_COMPRESSION_LEVEL,
+    encode_apng_threaded, encode_apng_with_options, ApngFrameSpec, DEFAULT_COMPRESSION_LEVEL,
 };
-pub use error::{PngError, Result};
 pub use filter::{FilterStrategy, FilterType};
 pub use gamma::{
     apply_gama_to_palette, apply_gama_to_png16, apply_gama_to_rgba,
     apply_to_palette as apply_gamma_to_palette, apply_to_png16 as apply_gamma_to_png16,
     apply_to_rgba as apply_gamma_to_rgba, GammaParams,
 };
-pub use image::{ApngFrameImage, ApngImage, PngImage, PngPixelFormat, RgbaBitmap};
+pub use image::{ApngFrameImage, ApngImage};
 pub use metadata::{
     Bkgd, Chrm, Cicp, Clli, ColourSource, Exif, Gama, Hist, Iccp, Itxt, Mdcv, Phys, PhysUnit,
     PngMetadata, RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time, Trns, UnknownChunk,
@@ -169,11 +220,13 @@ pub use srgb::{
 
 // Public registry-gated API — keeps the framework integration surface
 // (Decoder/Encoder/Demuxer/Muxer trait impls, `register*` helpers,
-// `decode_png_to_frame` / `encode_single*` `VideoFrame` wrappers)
-// behind the default-on `registry` feature so image-library callers can
-// build the crate without dragging in `oxideav-core`.
+// `decode_png_to_frame` / `encode_single*` `VideoFrame` wrappers and
+// the `PngImage` ⇄ `VideoFrame` conversions) behind the default-on
+// `registry` feature so image-library callers can build the crate
+// without dragging in `oxideav-core`.
 #[cfg(feature = "registry")]
 pub use registry::{
-    __oxideav_entry, decode_png_to_frame, encode_single, encode_single_with_options, register,
-    register_codecs, register_containers, PngDecoder, PngEncoder,
+    __oxideav_entry, decode_png_to_frame, encode_single, encode_single_with_options,
+    from_color_signal, make_decoder, make_encoder, register, register_codecs, register_containers,
+    to_color_signal, to_core_pixel_format, PngDecoder, PngEncoder,
 };

@@ -5,6 +5,9 @@
 //! This proves the encoder + decoder are inverses and that per-row filters
 //! + CRC + deflate round-trip cleanly.
 
+// The framework path: needs `oxideav-core` (default-on `registry`).
+#![cfg(feature = "registry")]
+
 use oxideav_core::{CodecId, CodecParameters, Frame, PixelFormat, VideoFrame, VideoPlane};
 
 fn gradient(w: usize, h: usize, bpp: usize) -> Vec<u8> {
@@ -182,7 +185,7 @@ fn encode_single_with_options_sets_interlace_flag() {
         8,
         PixelFormat::Rgba,
         &[],
-        &oxideav_png::PngEncoderOptions::default().with_interlace(true),
+        &oxideav_png::EncodeOptions::default().with_interlace(true),
     )
     .expect("encode");
     // IHDR body starts at offset 8 (magic) + 8 (chunk length+type) = 16.

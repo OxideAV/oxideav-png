@@ -7,12 +7,12 @@
 //! shall be used").
 
 use oxideav_png::{
-    decode_png, encode_png_image_with_options, parse_metadata, Chrm, Cicp, ColourSource, Gama,
-    Iccp, PngEncoderOptions, PngImage, PngMetadata, PngPixelFormat, RenderingIntent, Srgb,
+    decode, encode, parse_metadata, Chrm, Cicp, ColourSource, EncodeOptions, Gama, Iccp, PngImage,
+    PngMetadata, PngPixelFormat, RenderingIntent, Srgb,
 };
 
 fn rgba_2x2() -> PngImage {
-    PngImage::new(2, 2, PngPixelFormat::Rgba, 8, vec![0x55; 16]).with_palette(Vec::new())
+    PngImage::packed(2, 2, PngPixelFormat::Rgba, 8, vec![0x55; 16])
 }
 
 fn cicp() -> Cicp {
@@ -96,32 +96,32 @@ fn resolution_survives_a_real_roundtrip() {
     // at-most-one-embedded-profile is a `should`, and the §4.3 rule
     // exists precisely because several signals may coexist), re-parse
     // it, and confirm the resolver picks iCCP.
-    let opts = PngEncoderOptions::default().with_metadata(Some(
+    let opts = EncodeOptions::default().with_metadata(Some(
         PngMetadata::default()
             .with_iccp(Some(iccp()))
             .with_srgb(Some(srgb()))
             .with_gama(Some(Gama::SRGB)),
     ));
-    let bytes = encode_png_image_with_options(&rgba_2x2(), &opts).expect("encode");
+    let bytes = encode(&rgba_2x2(), &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.colour_source(), Some(ColourSource::Iccp));
     // All three chunks still round-trip — precedence is a read-side
     // resolution, not a discard.
     assert!(meta.iccp.is_some() && meta.srgb.is_some() && meta.gama.is_some());
-    decode_png(&bytes).expect("pixels still decode");
+    decode(&bytes).expect("pixels still decode");
 }
 
 // ---- §11.3.2.5 Table 17: sRGB companion-value gate -------------------
 
 #[test]
 fn srgb_with_matching_companions_encodes() {
-    let opts = PngEncoderOptions::default().with_metadata(Some(
+    let opts = EncodeOptions::default().with_metadata(Some(
         PngMetadata::default()
             .with_srgb(Some(srgb()))
             .with_gama(Some(Gama::SRGB))
             .with_chrm(Some(Chrm::SRGB)),
     ));
-    let bytes = encode_png_image_with_options(&rgba_2x2(), &opts).expect("encode");
+    let bytes = encode(&rgba_2x2(), &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.gama, Some(Gama::SRGB));
     assert_eq!(meta.chrm, Some(Chrm::SRGB));
@@ -129,13 +129,13 @@ fn srgb_with_matching_companions_encodes() {
 
 #[test]
 fn srgb_with_contradicting_gama_rejected_on_encode() {
-    let opts = PngEncoderOptions::default().with_metadata(Some(
+    let opts = EncodeOptions::default().with_metadata(Some(
         PngMetadata::default()
             .with_srgb(Some(srgb()))
             .with_gama(Some(Gama::new(100_000))),
     ));
-    let err = encode_png_image_with_options(&rgba_2x2(), &opts)
-        .expect_err("contradicting gAMA next to sRGB must be rejected");
+    let err =
+        encode(&rgba_2x2(), &opts).expect_err("contradicting gAMA next to sRGB must be rejected");
     assert!(format!("{err}").contains("Table 17"));
 }
 
@@ -143,13 +143,13 @@ fn srgb_with_contradicting_gama_rejected_on_encode() {
 fn srgb_with_contradicting_chrm_rejected_on_encode() {
     let mut chrm = Chrm::SRGB;
     chrm.red_x = 70_800; // BT.2020 red — contradicts sRGB primaries
-    let opts = PngEncoderOptions::default().with_metadata(Some(
+    let opts = EncodeOptions::default().with_metadata(Some(
         PngMetadata::default()
             .with_srgb(Some(srgb()))
             .with_chrm(Some(chrm)),
     ));
-    let err = encode_png_image_with_options(&rgba_2x2(), &opts)
-        .expect_err("contradicting cHRM next to sRGB must be rejected");
+    let err =
+        encode(&rgba_2x2(), &opts).expect_err("contradicting cHRM next to sRGB must be rejected");
     assert!(format!("{err}").contains("Table 17"));
 }
 
@@ -157,10 +157,10 @@ fn srgb_with_contradicting_chrm_rejected_on_encode() {
 fn non_srgb_gama_without_srgb_chunk_still_encodes() {
     // The Table 17 gate is scoped to sRGB-bearing streams only — a
     // plain gAMA-described colour space may use any value.
-    let opts = PngEncoderOptions::default().with_metadata(Some(
+    let opts = EncodeOptions::default().with_metadata(Some(
         PngMetadata::default().with_gama(Some(Gama::new(100_000))),
     ));
-    let bytes = encode_png_image_with_options(&rgba_2x2(), &opts).expect("encode");
+    let bytes = encode(&rgba_2x2(), &opts).expect("encode");
     let meta = parse_metadata(&bytes).expect("parse");
     assert_eq!(meta.gama.unwrap().gamma_times_100000, 100_000);
 }

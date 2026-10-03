@@ -10,13 +10,13 @@
 //! linear one, and that is what `composite_over_background` does.
 
 use oxideav_png::{
-    composite_over_background, decode_png_to_rgba, encode_png_image_with_options, linearize_rgba,
-    parse_metadata, srgb_from_linear, srgb_to_linear8, srgb_to_scaled_linear8, PngEncoderOptions,
-    PngImage, PngMetadata, PngPixelFormat, RenderingIntent, RgbaBitmap, Srgb,
+    composite_over_background, decode_rgba8, encode, linearize_rgba, parse_metadata,
+    srgb_from_linear, srgb_to_linear8, srgb_to_scaled_linear8, EncodeOptions, PngImage,
+    PngMetadata, PngPixelFormat, RenderingIntent, RgbaImage, Srgb,
 };
 
 fn rgba_image(w: u32, h: u32, data: Vec<u8>) -> PngImage {
-    PngImage::new(w, h, PngPixelFormat::Rgba, w as usize * 4, data).with_palette(Vec::new())
+    PngImage::packed(w, h, PngPixelFormat::Rgba, w as usize * 4, data)
 }
 
 /// Encode an RGBA image with an `sRGB` chunk (Perceptual intent), then
@@ -26,10 +26,10 @@ fn rgba_image(w: u32, h: u32, data: Vec<u8>) -> PngImage {
 #[test]
 fn srgb_chunk_survives_roundtrip() {
     let img = rgba_image(2, 1, vec![10, 20, 30, 255, 200, 150, 100, 255]);
-    let opts = PngEncoderOptions::default().with_metadata(Some(
+    let opts = EncodeOptions::default().with_metadata(Some(
         PngMetadata::default().with_srgb(Some(Srgb::new(RenderingIntent::Perceptual))),
     ));
-    let bytes = encode_png_image_with_options(&img, &opts).expect("encode");
+    let bytes = encode(&img, &opts).expect("encode");
 
     let meta = parse_metadata(&bytes).expect("parse_metadata");
     let srgb = meta.srgb.expect("sRGB chunk present after roundtrip");
@@ -37,7 +37,7 @@ fn srgb_chunk_survives_roundtrip() {
 
     // Pixels themselves come back unchanged (the codec leaves wire samples
     // verbatim; the sRGB transfer is a viewer-side opt-in transform).
-    let rgba = decode_png_to_rgba(&bytes).expect("decode");
+    let rgba = decode_rgba8(&bytes).expect("decode");
     assert_eq!(rgba.data[0..4], [10, 20, 30, 255]);
     assert_eq!(rgba.data[4..8], [200, 150, 100, 255]);
 }
@@ -47,16 +47,16 @@ fn srgb_chunk_survives_roundtrip() {
 #[test]
 fn decoded_srgb_linearizes_per_channel() {
     let img = rgba_image(2, 1, vec![0, 128, 255, 64, 255, 0, 64, 200]);
-    let bytes = encode_png_image_with_options(
+    let bytes = encode(
         &img,
-        &PngEncoderOptions::default().with_metadata(Some(
+        &EncodeOptions::default().with_metadata(Some(
             PngMetadata::default()
                 .with_srgb(Some(Srgb::new(RenderingIntent::RelativeColorimetric))),
         )),
     )
     .expect("encode");
 
-    let rgba = decode_png_to_rgba(&bytes).expect("decode");
+    let rgba = decode_rgba8(&bytes).expect("decode");
     let lin = linearize_rgba(&rgba);
     // Pixel 0: linear R/G/B from the EOTF, alpha straight through.
     assert_eq!(lin[0], srgb_to_linear8(0));
@@ -84,16 +84,16 @@ fn composite_decoded_image_over_background_linear() {
             7, 7, 7, 0, // transparent
         ],
     );
-    let bytes = encode_png_image_with_options(
+    let bytes = encode(
         &img,
-        &PngEncoderOptions::default().with_metadata(Some(
+        &EncodeOptions::default().with_metadata(Some(
             PngMetadata::default().with_srgb(Some(Srgb::new(RenderingIntent::Perceptual))),
         )),
     )
     .expect("encode");
 
-    let decoded = decode_png_to_rgba(&bytes).expect("decode");
-    let mut canvas = RgbaBitmap::new(decoded.width, decoded.height, decoded.data.clone());
+    let decoded = decode_rgba8(&bytes).expect("decode");
+    let mut canvas = RgbaImage::new(decoded.width, decoded.height, decoded.data.clone());
     composite_over_background(&mut canvas, [0, 0, 0]);
 
     // Opaque red reproduces exactly; transparent pixel becomes the

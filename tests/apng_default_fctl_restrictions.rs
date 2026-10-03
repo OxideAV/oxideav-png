@@ -189,10 +189,10 @@ fn first_frame_dispose_previous_treated_as_background() {
 
     let anim = decode_apng(&png).expect("decode");
     assert_eq!(anim.frames.len(), 2);
-    let stride = anim.frames[1].image.stride;
+    let stride = anim.frames[1].image.stride();
     let pix = |x: usize, y: usize| -> [u8; 4] {
         let off = y * stride + x * 4;
-        let d = &anim.frames[1].image.data;
+        let d = &anim.frames[1].image.planes[0].data;
         [d[off], d[off + 1], d[off + 2], d[off + 3]]
     };
     // Region frame 1 covered: its colour.

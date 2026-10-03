@@ -15,15 +15,16 @@
 //!
 //! These tests build deliberately mis-ordered streams (re-CRC'd via the
 //! production chunk writer so they pass the framing / CRC gate) and
-//! assert `parse_metadata` / `decode_png` reject them, plus matching
+//! assert `parse_metadata` / `decode` reject them, plus matching
 //! positive cases that conformant ordering still parses.
 
 use oxideav_png::{
-    decode_png, encode_apng, encode_png_image, parse_apng, parse_metadata, PngImage, PngPixelFormat,
+    decode, encode, encode_apng, parse_apng, parse_metadata, EncodeOptions, PngImage,
+    PngPixelFormat,
 };
 
 fn rgba_2x2() -> PngImage {
-    PngImage::new(
+    PngImage::packed(
         2,
         2,
         PngPixelFormat::Rgba,
@@ -32,14 +33,14 @@ fn rgba_2x2() -> PngImage {
             255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ],
     )
-    .with_palette(Vec::new())
 }
 
 /// A 2x2 indexed image so a stream carries a real `PLTE` chunk for the
 /// "after PLTE" bucket tests.
 fn pal_2x2() -> PngImage {
-    PngImage::new(2, 2, PngPixelFormat::Pal8, 2, vec![0, 1, 2, 3])
-        .with_palette(vec![0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255])
+    PngImage::packed(2, 2, PngPixelFormat::Pal8, 2, vec![0, 1, 2, 3]).with_palette(
+        oxideav_png::Palette::from_rgb(&[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255], None),
+    )
 }
 
 /// Splice `chunks` into an encoded PNG immediately *before* the first
@@ -125,10 +126,10 @@ const EXIF_LE_HEADER: &[u8] = &[0x49, 0x49, 0x2A, 0x00];
 const BKGD_RGBA: &[u8] = &[0, 255, 0, 0, 0, 0]; // 3 BE u16 samples
 
 fn base_rgba_png() -> Vec<u8> {
-    encode_png_image(&rgba_2x2()).expect("encode rgba")
+    encode(&rgba_2x2(), &EncodeOptions::default()).expect("encode rgba")
 }
 fn base_pal_png() -> Vec<u8> {
-    encode_png_image(&pal_2x2()).expect("encode pal")
+    encode(&pal_2x2(), &EncodeOptions::default()).expect("encode pal")
 }
 
 // =====================================================================
@@ -241,15 +242,14 @@ fn bkgd_before_idat_accepted() {
 #[test]
 fn trns_after_idat_rejected() {
     // tRNS for a truecolor (ct=2) image is 6 bytes (one BE RGB key).
-    let rgb = PngImage::new(
+    let rgb = PngImage::packed(
         2,
         2,
         PngPixelFormat::Rgb24,
         6,
         vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255],
-    )
-    .with_palette(Vec::new());
-    let png = encode_png_image(&rgb).expect("encode rgb");
+    );
+    let png = encode(&rgb, &EncodeOptions::default()).expect("encode rgb");
     let bytes = splice_before_iend(&png, &[(b"tRNS", &[0, 255, 0, 0, 0, 0])]);
     assert!(parse_metadata(&bytes).is_err());
 }
@@ -319,7 +319,7 @@ fn non_consecutive_idat_rejected() {
     let time: &[u8] = &[0x07, 0xE8, 1, 1, 0, 0, 0];
     let bytes = splice_before_iend(&png, &[(b"tIME", time), (b"IDAT", &[])]);
     assert!(
-        decode_png(&bytes).is_err(),
+        decode(&bytes).is_err(),
         "non-consecutive IDAT must be rejected (§5.6)"
     );
 }
@@ -339,7 +339,7 @@ fn consecutive_extra_idat_accepted() {
     // An empty trailing IDAT contributes no bytes to the zlib stream and
     // does not break the run, so the image still decodes.
     assert!(
-        decode_png(&bytes).is_ok(),
+        decode(&bytes).is_ok(),
         "consecutive extra (empty) IDAT must still decode (§5.6)"
     );
 }
@@ -428,7 +428,7 @@ fn chunk_before_ihdr_rejected() {
         parse_metadata(&bytes).is_err(),
         "a chunk before IHDR must be rejected (§5.1)"
     );
-    assert!(decode_png(&bytes).is_err());
+    assert!(decode(&bytes).is_err());
 }
 
 #[test]
@@ -455,7 +455,7 @@ fn plte_after_idat_rejected() {
     let plte: &[u8] = &[0, 0, 0, 255, 255, 255];
     let bytes = splice_before_iend(&png, &[(b"PLTE", plte)]);
     assert!(
-        decode_png(&bytes).is_err(),
+        decode(&bytes).is_err(),
         "PLTE after IDAT must be rejected (§5.6 Table 7)"
     );
 }
@@ -464,8 +464,8 @@ fn plte_after_idat_rejected() {
 fn well_ordered_stream_still_parses() {
     // The encoder's own output is fully conformant on every gate.
     let png = base_rgba_png();
-    assert!(decode_png(&png).is_ok());
+    assert!(decode(&png).is_ok());
     assert!(parse_metadata(&png).is_ok());
     let pal = base_pal_png();
-    assert!(decode_png(&pal).is_ok());
+    assert!(decode(&pal).is_ok());
 }

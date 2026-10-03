@@ -263,7 +263,7 @@ fn sbit_channel_bits(format: PngPixelFormat, sbit: Option<Sbit>) -> [u8; 4] {
 
 fn rescale_16bit_to_8bit_inner(image: &PngImage, sbit: Option<Sbit>) -> PngImage {
     // (out_format, colour_sample_count, has_alpha)
-    let (out_format, colour_samples, has_alpha) = match image.pixel_format {
+    let (out_format, colour_samples, has_alpha) = match image.format {
         PngPixelFormat::Gray16Le => (PngPixelFormat::Gray8, 1usize, false),
         PngPixelFormat::Rgb48Le => (PngPixelFormat::Rgb24, 3, false),
         PngPixelFormat::Rgba64Le => (PngPixelFormat::Rgba, 3, true),
@@ -275,7 +275,7 @@ fn rescale_16bit_to_8bit_inner(image: &PngImage, sbit: Option<Sbit>) -> PngImage
         | PngPixelFormat::Rgba => return image.clone(),
     };
     let samples_per_pixel = colour_samples + usize::from(has_alpha);
-    let bits = sbit_channel_bits(image.pixel_format, sbit);
+    let bits = sbit_channel_bits(image.format, sbit);
     let width = image.width as usize;
     let height = image.height as usize;
     let in_bpp = image.bytes_per_pixel(); // samples_per_pixel * 2
@@ -294,7 +294,7 @@ fn rescale_16bit_to_8bit_inner(image: &PngImage, sbit: Option<Sbit>) -> PngImage
     };
 
     for y in 0..height {
-        let in_row = &image.data[y * image.stride..];
+        let in_row = &image.data()[y * image.stride()..];
         let out_row = &mut out[y * out_stride..y * out_stride + out_stride];
         for x in 0..width {
             let in_px = &in_row[x * in_bpp..x * in_bpp + in_bpp];
@@ -306,14 +306,12 @@ fn rescale_16bit_to_8bit_inner(image: &PngImage, sbit: Option<Sbit>) -> PngImage
         }
     }
 
-    PngImage {
-        width: image.width,
-        height: image.height,
-        pixel_format: out_format,
-        stride: out_stride,
-        data: out,
-        palette: Vec::new(),
-    }
+    // The colour description and metadata still describe the samples;
+    // the 16-bit keyed transparency does not survive the depth change
+    // (its key is a 16-bit value) and a 16-bit image has no palette.
+    PngImage::packed(image.width, image.height, out_format, out_stride, out)
+        .with_color(image.color)
+        .with_metadata(image.metadata.clone())
 }
 
 #[cfg(test)]
@@ -497,31 +495,24 @@ mod tests {
             data.extend_from_slice(&s.to_le_bytes());
         }
         let bpp = format.bytes_per_pixel();
-        PngImage {
-            width: w,
-            height: h,
-            pixel_format: format,
-            stride: w as usize * bpp,
-            data,
-            palette: Vec::new(),
-        }
+        PngImage::packed(w, h, format, w as usize * bpp, data)
     }
 
     #[test]
     fn rescale_gray16_to_gray8() {
         let img = png16(PngPixelFormat::Gray16Le, 3, 1, &[0, 0x8000, 0xFFFF]);
         let out = rescale_16bit_to_8bit(&img);
-        assert_eq!(out.pixel_format, PngPixelFormat::Gray8);
-        assert_eq!(out.stride, 3);
-        assert_eq!(out.data, vec![0, 128, 255]);
+        assert_eq!(out.format, PngPixelFormat::Gray8);
+        assert_eq!(out.stride(), 3);
+        assert_eq!(out.planes[0].data, vec![0, 128, 255]);
     }
 
     #[test]
     fn rescale_rgb48_to_rgb24() {
         let img = png16(PngPixelFormat::Rgb48Le, 1, 1, &[0, 0x8000, 0xFFFF]);
         let out = rescale_16bit_to_8bit(&img);
-        assert_eq!(out.pixel_format, PngPixelFormat::Rgb24);
-        assert_eq!(out.data, vec![0, 128, 255]);
+        assert_eq!(out.format, PngPixelFormat::Rgb24);
+        assert_eq!(out.planes[0].data, vec![0, 128, 255]);
     }
 
     #[test]
@@ -529,8 +520,8 @@ mod tests {
         // Alpha IS depth-reduced (this is not gamma correction).
         let img = png16(PngPixelFormat::Rgba64Le, 1, 1, &[0xFFFF, 0, 0x8000, 0x8000]);
         let out = rescale_16bit_to_8bit(&img);
-        assert_eq!(out.pixel_format, PngPixelFormat::Rgba);
-        assert_eq!(out.data, vec![255, 0, 128, 128]);
+        assert_eq!(out.format, PngPixelFormat::Rgba);
+        assert_eq!(out.planes[0].data, vec![255, 0, 128, 128]);
     }
 
     #[test]
@@ -541,17 +532,10 @@ mod tests {
         data.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]); // padding
         data.extend_from_slice(&0u16.to_le_bytes());
         data.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]); // padding
-        let img = PngImage {
-            width: 1,
-            height: 2,
-            pixel_format: PngPixelFormat::Gray16Le,
-            stride: 6,
-            data,
-            palette: Vec::new(),
-        };
+        let img = PngImage::packed(1, 2, PngPixelFormat::Gray16Le, 6, data);
         let out = rescale_16bit_to_8bit(&img);
-        assert_eq!(out.stride, 1);
-        assert_eq!(out.data, vec![255, 0]);
+        assert_eq!(out.stride(), 1);
+        assert_eq!(out.planes[0].data, vec![255, 0]);
     }
 
     #[test]
@@ -563,17 +547,10 @@ mod tests {
             PngPixelFormat::Ya8,
         ] {
             let bpp = fmt.bytes_per_pixel();
-            let img = PngImage {
-                width: 2,
-                height: 1,
-                pixel_format: fmt,
-                stride: 2 * bpp,
-                data: (0..(2 * bpp) as u8).collect(),
-                palette: Vec::new(),
-            };
+            let img = PngImage::packed(2, 1, fmt, 2 * bpp, (0..(2 * bpp) as u8).collect());
             let out = rescale_16bit_to_8bit(&img);
-            assert_eq!(out.pixel_format, fmt);
-            assert_eq!(out.data, img.data);
+            assert_eq!(out.format, fmt);
+            assert_eq!(out.data(), img.data());
         }
     }
 
@@ -586,10 +563,10 @@ mod tests {
         let plain = rescale_16bit_to_8bit(&img);
         // sBIT path: recover to 5 bits (=27) then scale 27@5 → 8 = 222.
         let via = rescale_16bit_to_8bit_via_sbit(&img, Sbit::Grayscale(5));
-        assert_eq!(via.data, vec![222]);
+        assert_eq!(via.planes[0].data, vec![222]);
         // The plain 16→8 of a bit-replicated 5-bit value is within one of
         // the sBIT-accurate answer (both derive from the same source).
-        assert!((plain.data[0] as i32 - 222).abs() <= 1);
+        assert!((plain.planes[0].data[0] as i32 - 222).abs() <= 1);
     }
 
     #[test]
@@ -598,7 +575,7 @@ mod tests {
         let img = png16(PngPixelFormat::Rgb48Le, 1, 1, &[0x1234, 0x8000, 0xFFFF]);
         let plain = rescale_16bit_to_8bit(&img);
         let via = rescale_16bit_to_8bit_via_sbit(&img, Sbit::Rgb(16, 16, 16));
-        assert_eq!(plain.data, via.data);
+        assert_eq!(plain.planes[0].data, via.planes[0].data);
     }
 
     #[test]
@@ -608,6 +585,6 @@ mod tests {
         let img = png16(PngPixelFormat::Rgb48Le, 1, 1, &[0, 0x8000, 0xFFFF]);
         let plain = rescale_16bit_to_8bit(&img);
         let via = rescale_16bit_to_8bit_via_sbit(&img, Sbit::Grayscale(5));
-        assert_eq!(plain.data, via.data);
+        assert_eq!(plain.planes[0].data, via.planes[0].data);
     }
 }

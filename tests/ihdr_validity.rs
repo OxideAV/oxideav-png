@@ -13,6 +13,9 @@
 //! Patching a valid stream isolates the IHDR gate: the only thing wrong
 //! with the stream under test is the field we deliberately corrupted.
 
+// The framework path: needs `oxideav-core` (default-on `registry`).
+#![cfg(feature = "registry")]
+
 use oxideav_core::{CodecId, CodecParameters, Frame, PixelFormat, VideoFrame, VideoPlane};
 
 /// Standard PNG CRC-32 (W3C PNG3 §13.2, polynomial 0xEDB88320, computed
@@ -69,7 +72,7 @@ fn corrupt_ihdr(mut bytes: Vec<u8>, mutate: impl FnOnce(&mut [u8])) -> Vec<u8> {
 }
 
 fn assert_rejected(bytes: &[u8], needle: &str) {
-    let err = oxideav_png::decode_png(bytes)
+    let err = oxideav_png::decode(bytes)
         .err()
         .unwrap_or_else(|| panic!("expected decode error for {needle}, got Ok"));
     let msg = format!("{err}");
@@ -90,7 +93,7 @@ fn unmodified_stream_still_decodes() {
     // Sanity: the offsets and CRC helper produce a stream that decodes,
     // so a rejection in the other cases is the mutation, not the harness.
     let bytes = corrupt_ihdr(valid_png(), |_| {});
-    assert!(oxideav_png::decode_png(&bytes).is_ok());
+    assert!(oxideav_png::decode(&bytes).is_ok());
 }
 
 #[test]
