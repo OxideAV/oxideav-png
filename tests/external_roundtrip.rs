@@ -308,14 +308,17 @@ fn external_roundtrip_640x480_rgba() {
     let decoded_2 = oxideav_png::decode_png_to_frame(&png_bytes_2, None)
         .expect("oxideav-png failed to decode libpng-encoded PNG");
 
-    // Sanity: stride must match a tightly-packed RGBA plane.
-    assert_eq!(decoded_2.planes.len(), 1);
-    assert_eq!(decoded_2.planes[0].stride, (w as usize) * 4);
-    assert_eq!(decoded_2.planes[0].data.len(), rgba.len());
+    // Sanity: one image plane (libpng may add colour chunks, which ride
+    // on the frame as a side-channel record, not an image plane) whose
+    // stride matches a tightly-packed RGBA plane.
+    assert_eq!(decoded_2.image_plane_count(), 1);
+    let plane = &decoded_2.image_planes()[0];
+    assert_eq!(plane.stride, (w as usize) * 4);
+    assert_eq!(plane.data.len(), rgba.len());
 
     // Final assertion: full e2e roundtrip preserves RGBA pixel-for-pixel.
     assert_eq!(
-        &decoded_2.planes[0].data, &rgba,
+        &plane.data, &rgba,
         "full oxideav-encode → libpng-decode → libpng-encode → oxideav-decode preserves RGBA"
     );
 }
