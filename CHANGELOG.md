@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/OxideAV/oxideav-png/compare/v0.1.10...v0.1.11) - 2026-10-03
+
+### Other
+
+- keep the deprecated decode entry points at their decoder:: module path
+- external round-trip counts image planes, not side-channel records
+- README in the contract order + CHANGELOG for the image-crate API
+- ci-standalone runs the no-registry tests; decode fuzz target covers the contract surface
+- image-crate API contract — root vocabulary, PngImage reshape, registry adapter
+
 ### Changed
 
 - **Image-crate API contract (`IMAGE_CRATE_API`, breaking).** The root
