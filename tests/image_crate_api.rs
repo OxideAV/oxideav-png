@@ -283,6 +283,29 @@ fn encode_refuses_what_png_cannot_carry() {
     assert!(encode(&img, &EncodeOptions::default()).is_err());
 }
 
+/// A luma-only image is matrix-invariant (neutral chroma reconstructs
+/// R = G = B = Y under every H.273 matrix), so a gray layout tagged
+/// with a YUV matrix — a monochrome HEVC still decoded as BT.601 —
+/// still encodes, with cICP carrying matrix 0.
+#[test]
+fn gray_layouts_accept_a_yuv_matrix_and_write_identity() {
+    for fmt in [PixelFormat::Gray8, PixelFormat::Ya8, PixelFormat::Gray16Le] {
+        let bpp = fmt.bytes_per_pixel();
+        let img = PngImage::packed(2, 1, fmt, 2 * bpp, vec![7; 2 * bpp])
+            .with_color(ColorInfo::new(ColorRange::Full, 1, 13, 6));
+        let bytes =
+            encode(&img, &EncodeOptions::default()).unwrap_or_else(|e| panic!("{fmt:?}: {e}"));
+        let meta = oxideav_png::parse_metadata(&bytes).unwrap();
+        let cicp = meta.cicp.expect("cICP written");
+        assert_eq!(cicp.matrix_coefficients, 0, "{fmt:?}");
+        assert_eq!(
+            decode(&bytes).unwrap().as_bytes(),
+            img.as_bytes(),
+            "{fmt:?}"
+        );
+    }
+}
+
 #[test]
 fn decode_options_limits_fire_before_allocation() {
     let bytes = encode(&rgba_2x2(), &EncodeOptions::default()).unwrap();

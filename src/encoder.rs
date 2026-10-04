@@ -376,9 +376,10 @@ pub(crate) fn encode_threaded(
 ///   `sRGB` (perceptual intent) unless an ICC profile is present
 ///   (W3C PNG3 §11.3.2.3: at most one profile); otherwise, whenever a
 ///   code point is specified or the range is limited → `cICP` with
-///   `matrix` 0, which requires `color.matrix ∈ {0, 2}`
-///   (`PngError::Unsupported` otherwise — PNG is RGB-only,
-///   §11.3.2.6);
+///   `matrix` 0, which requires `color.matrix ∈ {0, 2}` for colour
+///   layouts (`PngError::Unsupported` otherwise — PNG is RGB-only,
+///   §11.3.2.6); gray / gray+alpha layouts accept any matrix, since
+///   luma alone reconstructs identically under every matrix;
 /// * `transparency` → `tRNS` (resolved against the palette tail by
 ///   [`resolve_trns_bytes`]).
 ///
@@ -436,7 +437,19 @@ fn effective_metadata(image: &PngImage, opts: &EncodeOptions) -> Result<Option<P
             || c.transfer != ColorInfo::UNSPECIFIED
             || c.range == ColorRange::Limited
         {
-            if c.matrix != ColorInfo::MATRIX_IDENTITY && c.matrix != ColorInfo::UNSPECIFIED {
+            // A luma-only image (gray / gray+alpha) is matrix-invariant:
+            // with neutral chroma every H.273 matrix reconstructs
+            // R = G = B = Y, so a source matrix (e.g. a monochrome HEVC
+            // still tagged BT.601) carries no information PNG could
+            // lose and is written as the RGB identity matrix 0.
+            let luma_only = matches!(
+                image.format,
+                PngPixelFormat::Gray8 | PngPixelFormat::Gray16Le | PngPixelFormat::Ya8
+            );
+            if !luma_only
+                && c.matrix != ColorInfo::MATRIX_IDENTITY
+                && c.matrix != ColorInfo::UNSPECIFIED
+            {
                 return Err(Error::unsupported(format!(
                     "PNG encoder: color.matrix {} cannot be carried — PNG is RGB-only, \
                      cICP matrix_coefficients shall be 0 (W3C PNG3 §11.3.2.6)",
