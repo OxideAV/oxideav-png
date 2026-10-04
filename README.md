@@ -31,6 +31,7 @@ if oxideav_png::probe(&bytes) {
     let out: Vec<u8> = oxideav_png::encode_rgba8(w, h, &rgba, &opts)?;
     std::fs::write("out.png", out)?;
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 | Item | Signature |
@@ -69,9 +70,15 @@ With the default-on `registry` feature the crate plugs into the
 ```rust
 let mut ctx = oxideav_core::RuntimeContext::new();
 oxideav_png::register(&mut ctx);                       // codec "png" + the PNG / APNG container
+# let img = oxideav_png::decode(&std::fs::read("in.png")?)?;
+# let mut params = oxideav_core::CodecParameters::video(oxideav_core::CodecId::new("png"));
+# params.width = Some(img.width());
+# params.height = Some(img.height());
+# params.pixel_format = Some(oxideav_png::to_core_pixel_format(img.format()));
 let dec = oxideav_png::make_decoder(&params)?;         // / make_encoder
 let frame: oxideav_core::VideoFrame = img.into();      // From<PngImage>: plane + palette / colour-signal side-channels
 let back = oxideav_png::PngImage::from_video_frame(&frame, &params)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 The trait-side `Decoder` / `Encoder` are thin adapters over the
