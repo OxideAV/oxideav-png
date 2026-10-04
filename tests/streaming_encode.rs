@@ -47,7 +47,7 @@ fn synth(width: u32, height: u32, pf: PngPixelFormat, stride_pad: usize) -> PngI
             cur[..row_bytes].copy_from_slice(&prev[(y - 1) * stride..(y - 1) * stride + row_bytes]);
         }
     }
-    PngImage::packed(width, height, pf, stride, data)
+    PngImage::packed(width, height, pf, stride, data).unwrap()
 }
 
 /// Strip stride padding so a decoded (tightly packed) plane compares.

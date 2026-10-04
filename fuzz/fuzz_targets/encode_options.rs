@@ -293,7 +293,7 @@ fn solid_image(
         None
     };
 
-    PngImage::packed(width, height, format, stride, buf).with_palette(palette)
+    PngImage::packed(width, height, format, stride, buf).expect("synthetic image geometry is valid").with_palette(palette)
 }
 
 /// A small, always-valid ancillary-metadata bundle. Exercises the

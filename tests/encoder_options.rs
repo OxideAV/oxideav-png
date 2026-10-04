@@ -98,7 +98,7 @@ fn compression_level_roundtrips_and_validates_range() {
             data.extend_from_slice(&[(x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8, 255]);
         }
     }
-    let img = PngImage::packed(w, h, PngPixelFormat::Rgba, (w * 4) as usize, data);
+    let img = PngImage::packed(w, h, PngPixelFormat::Rgba, (w * 4) as usize, data).unwrap();
 
     let mut sizes = Vec::new();
     for level in 0u8..=9 {

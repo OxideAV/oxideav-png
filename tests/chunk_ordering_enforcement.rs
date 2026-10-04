@@ -33,14 +33,18 @@ fn rgba_2x2() -> PngImage {
             255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ],
     )
+    .unwrap()
 }
 
 /// A 2x2 indexed image so a stream carries a real `PLTE` chunk for the
 /// "after PLTE" bucket tests.
 fn pal_2x2() -> PngImage {
-    PngImage::packed(2, 2, PngPixelFormat::Pal8, 2, vec![0, 1, 2, 3]).with_palette(
-        oxideav_png::Palette::from_rgb(&[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255], None),
-    )
+    PngImage::packed(2, 2, PngPixelFormat::Pal8, 2, vec![0, 1, 2, 3])
+        .unwrap()
+        .with_palette(oxideav_png::Palette::from_rgb(
+            &[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255],
+            None,
+        ))
 }
 
 /// Splice `chunks` into an encoded PNG immediately *before* the first
@@ -248,7 +252,8 @@ fn trns_after_idat_rejected() {
         PngPixelFormat::Rgb24,
         6,
         vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255],
-    );
+    )
+    .unwrap();
     let png = encode(&rgb, &EncodeOptions::default()).expect("encode rgb");
     let bytes = splice_before_iend(&png, &[(b"tRNS", &[0, 255, 0, 0, 0, 0])]);
     assert!(parse_metadata(&bytes).is_err());

@@ -41,11 +41,12 @@ if oxideav_png::probe(&bytes) {
 | `decode` / `decode_with` | `fn(&[u8][, &DecodeOptions]) -> Result<PngImage, Error>` — native layout, colour + metadata filled |
 | `decode_rgb8` / `decode_rgba8` | `-> Result<RgbImage / RgbaImage, Error>` — `{ width, height, data }`, tightly packed, 3 / 4 bytes per pixel |
 | `decode_all` / `decode_all_with` | `-> Result<Vec<Frame>, Error>` — `Frame { image, delay: Option<Duration> }`; one frame for a still, the composited chain for an APNG |
+| `encode_all` | `(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>, Error>` — the mirror of `decode_all`: a plain PNG for one delay-less frame, a full-canvas APNG otherwise (`EncodeOptions::num_plays` for the loop count) |
 | `decode_from` | `fn<R: Read>(R) -> Result<PngImage, Error>` |
 | `encode` | `fn(&PngImage, &EncodeOptions) -> Result<Vec<u8>, Error>` — as given, never a silent conversion |
 | `encode_rgb8` / `encode_rgba8` | `fn(w, h, &[u8], &EncodeOptions)` — colour type 2 / 6 |
 | `encode_to` | `fn<W: Write>(&PngImage, &EncodeOptions, W) -> Result<(), Error>` |
-| `PngImage` | `{ width, height, format: PixelFormat, planes: Vec<Plane>, color: ColorInfo, metadata: Metadata, palette: Option<Palette>, transparency: Option<Trns> }` with `new` / `packed` / `from_rgb8` / `from_rgba8`, `width()` / `height()` / `format()` / `stride()`, `as_bytes()` / `into_raw()`, `to_rgb8()` / `to_rgba8()` |
+| `PngImage` | `{ width, height, format: PixelFormat, planes: Vec<Plane>, color: ColorInfo, metadata: Metadata, palette: Option<Palette>, transparency: Option<Trns> }` with `new` / `packed` / `from_rgb8` / `from_rgba8` (each `Result`, rejecting geometry / length mismatches with `InvalidData`), `width()` / `height()` / `format()` / `stride()`, `as_bytes()` / `into_raw()`, `to_rgb8()` / `to_rgba8()` |
 | `PixelFormat` | `= PngPixelFormat`: `Gray8`, `Gray16Le`, `Rgb24`, `Rgb48Le`, `Pal8`, `Ya8`, `Rgba`, `Rgba64Le` (names mirror `oxideav_core::PixelFormat`) |
 | `Error` | `= PngError`: `InvalidData`, `Unsupported`, `LimitExceeded`, `Io`, `Eof`, `NeedMore`, `Other` |
 
@@ -112,11 +113,18 @@ Encode — `PngImage::format` → IHDR:
 | `Ya8` | 4 / 8 | |
 | `Rgba` / `Rgba64Le` | 6 / 8 / 16 | |
 
-Any layout may be Adam7 interlaced; APNG via `encode_apng` (full
-canvas, one delay) or `encode_apng_frames` (per-frame regions, rational
-delays, dispose / blend, optional separate default image). `encode`
-returns `Error::Unsupported` for what PNG cannot carry (a non-identity
-`color.matrix`) and never converts.
+Any layout may be Adam7 interlaced. APNG: `encode_all(&[Frame],
+&EncodeOptions)` is the mirror of `decode_all` — one delay-less frame
+is a plain PNG, otherwise a full-canvas APNG (every frame shares frame
+0's geometry and layout; a frame's `delay` becomes the finest `fcTL`
+rational that fits 16 bits, so whole-millisecond delays round-trip
+exactly; the loop count is `EncodeOptions::num_plays`, `0` = forever).
+The depth entry points stay: `encode_apng` (full canvas, one delay)
+and `encode_apng_frames` (per-frame regions, rational delays, dispose /
+blend, optional separate default image). Every APNG path writes the
+canvas source's `color` / `metadata` / `transparency` chunks exactly as
+`encode` does. `encode` returns `Error::Unsupported` for what PNG
+cannot carry (a non-identity `color.matrix`) and never converts.
 
 ## Options
 
@@ -1059,7 +1067,7 @@ use oxideav_png::{
     PngImage, PngMetadata, PngPixelFormat, Text,
 };
 
-let image = PngImage::from_rgb8(2, 1, vec![255, 0, 0, 0, 255, 0]);
+let image = PngImage::from_rgb8(2, 1, vec![255, 0, 0, 0, 255, 0])?; // Err on a length mismatch
 let meta = PngMetadata::default()
     .with_gama(Gama::new(45_455))
     .with_texts(vec![Text::new("Software".into(), "oxideav".into())]);

@@ -27,7 +27,7 @@ fn deflate(data: &[u8]) -> Vec<u8> {
 }
 
 fn gray_1x1() -> PngImage {
-    PngImage::packed(1, 1, PngPixelFormat::Gray8, 1, vec![0x7F])
+    PngImage::packed(1, 1, PngPixelFormat::Gray8, 1, vec![0x7F]).unwrap()
 }
 
 /// Walk a PNG datastream's chunks, returning `(type, whole-chunk byte
@@ -222,7 +222,7 @@ fn fdat_bomb_behind_small_fctl_rejected() {
     // Build a valid 2-frame 2x2 APNG, then swell the second frame's
     // fdAT into a stream that inflates far past the fcTL-implied
     // filtered size. The per-frame capped inflate must reject it.
-    let f = PngImage::packed(2, 2, PngPixelFormat::Rgba, 8, vec![0x40; 16]);
+    let f = PngImage::packed(2, 2, PngPixelFormat::Rgba, 8, vec![0x40; 16]).unwrap();
     let good = encode_apng(&[f.clone(), f], 10, 0).expect("encode apng");
     let bomb = deflate(&vec![0u8; 64 * 1024]);
     let mut tampered = good[..8].to_vec();
@@ -374,7 +374,7 @@ fn with_idat(good: &[u8], idat: &[u8]) -> Vec<u8> {
 fn rgb_16x9() -> PngImage {
     let (w, h) = (16u32, 9u32);
     let data: Vec<u8> = (0..w * h * 3).map(|i| (i * 37 % 251) as u8).collect();
-    PngImage::packed(w, h, PngPixelFormat::Rgb24, (w * 3) as usize, data)
+    PngImage::packed(w, h, PngPixelFormat::Rgb24, (w * 3) as usize, data).unwrap()
 }
 
 /// The non-interlaced decoder inflates one wire row at a time straight

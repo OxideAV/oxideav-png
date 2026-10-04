@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use oxideav_png::{
     decode, decode_all, decode_all_with, decode_from, decode_rgb8, decode_rgba8, decode_with,
-    encode, encode_apng, encode_rgb8, encode_rgba8, encode_to, info, probe, ColorInfo, ColorRange,
-    DecodeOptions, EncodeOptions, Error, Metadata, Palette, PixelFormat, Plane, PngError, PngImage,
-    PngMetadata, PngPixelFormat, Trns, XMP_KEYWORD,
+    encode, encode_all, encode_apng, encode_rgb8, encode_rgba8, encode_to, info, probe, ColorInfo,
+    ColorRange, DecodeOptions, EncodeOptions, Error, Frame, Metadata, Palette, PixelFormat, Plane,
+    PngError, PngImage, PngMetadata, PngPixelFormat, Trns, XMP_KEYWORD,
 };
 
 fn rgba_2x2() -> PngImage {
@@ -22,6 +22,7 @@ fn rgba_2x2() -> PngImage {
         2,
         vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
     )
+    .unwrap()
 }
 
 #[test]
@@ -38,6 +39,7 @@ fn probe_is_a_signature_sniff() {
 #[test]
 fn info_reads_the_header_and_chunk_walk_only() {
     let img = PngImage::packed(3, 2, PixelFormat::Gray8, 3, vec![0, 1, 2, 3, 4, 5])
+        .unwrap()
         .with_transparency(Trns::Grayscale(1))
         .with_color(ColorInfo::srgb())
         .with_metadata(
@@ -82,6 +84,7 @@ fn decode_returns_the_native_layout_with_colour_and_metadata() {
         12,
         vec![0x34, 0x12, 0x78, 0x56, 0xbc, 0x9a, 0, 0, 0, 0, 0xff, 0xff],
     )
+    .unwrap()
     .with_metadata(Metadata::new().with_icc(icc.clone()).with_gamma(0.45455));
     let bytes = encode(&img, &EncodeOptions::default()).unwrap();
     let back = decode(&bytes).unwrap();
@@ -143,33 +146,37 @@ fn raw_paths_are_tightly_packed_rgb8_and_rgba8() {
     let cases: Vec<(PngImage, Vec<u8>)> = vec![
         (
             PngImage::packed(2, 1, PixelFormat::Gray8, 2, vec![7, 9])
+                .unwrap()
                 .with_transparency(Trns::Grayscale(9)),
             vec![7, 7, 7, 255, 9, 9, 9, 0],
         ),
         (
-            PngImage::packed(1, 1, PixelFormat::Gray16Le, 2, vec![0x34, 0x12]),
+            PngImage::packed(1, 1, PixelFormat::Gray16Le, 2, vec![0x34, 0x12]).unwrap(),
             vec![0x12, 0x12, 0x12, 255],
         ),
         (
-            PngImage::from_rgb8(1, 1, vec![1, 2, 3]).with_transparency(Trns::Rgb(1, 2, 3)),
+            PngImage::from_rgb8(1, 1, vec![1, 2, 3])
+                .unwrap()
+                .with_transparency(Trns::Rgb(1, 2, 3)),
             vec![1, 2, 3, 0],
         ),
         (
-            PngImage::packed(1, 1, PixelFormat::Rgb48Le, 6, vec![1, 2, 3, 4, 5, 6]),
+            PngImage::packed(1, 1, PixelFormat::Rgb48Le, 6, vec![1, 2, 3, 4, 5, 6]).unwrap(),
             vec![2, 4, 6, 255],
         ),
         (
             PngImage::packed(2, 1, PixelFormat::Pal8, 2, vec![1, 0])
+                .unwrap()
                 .with_palette(Palette::from_rgb(&[9, 8, 7, 6, 5, 4], Some(&[33]))),
             vec![6, 5, 4, 255, 9, 8, 7, 33],
         ),
         (
-            PngImage::packed(1, 1, PixelFormat::Ya8, 2, vec![50, 60]),
+            PngImage::packed(1, 1, PixelFormat::Ya8, 2, vec![50, 60]).unwrap(),
             vec![50, 50, 50, 60],
         ),
         (rgba_2x2(), rgba_2x2().into_raw()),
         (
-            PngImage::packed(1, 1, PixelFormat::Rgba64Le, 8, vec![1, 2, 3, 4, 5, 6, 7, 8]),
+            PngImage::packed(1, 1, PixelFormat::Rgba64Le, 8, vec![1, 2, 3, 4, 5, 6, 7, 8]).unwrap(),
             vec![2, 4, 6, 8],
         ),
     ];
@@ -236,11 +243,14 @@ fn lossless_round_trip_of_planes_colour_metadata_palette_and_transparency() {
                 .with_gamma(0.45455),
         ),
         PngImage::packed(2, 1, PixelFormat::Pal8, 2, vec![0, 1])
+            .unwrap()
             .with_palette(Palette::from_rgb(&[1, 2, 3, 4, 5, 6], Some(&[0, 128])))
             .with_color(ColorInfo::new(ColorRange::Full, 9, 16, 0)),
         PngImage::packed(2, 1, PixelFormat::Gray8, 2, vec![0, 1])
+            .unwrap()
             .with_transparency(Trns::Grayscale(1)),
         PngImage::packed(1, 1, PixelFormat::Rgb48Le, 6, vec![1, 2, 3, 4, 5, 6])
+            .unwrap()
             .with_transparency(Trns::Rgb(0x0201, 0x0403, 0x0605))
             .with_metadata(Metadata::new().with_icc(vec![1, 2, 3, 4])),
     ];
@@ -274,10 +284,12 @@ fn encode_refuses_what_png_cannot_carry() {
     ));
     // A palette longer than PLTE allows.
     let img = PngImage::packed(1, 1, PixelFormat::Pal8, 1, vec![0])
+        .unwrap()
         .with_palette(Palette::new(vec![[0, 0, 0, 255]; 257]));
     assert!(encode(&img, &EncodeOptions::default()).is_err());
     // Two tRNS sources.
     let img = PngImage::packed(1, 1, PixelFormat::Pal8, 1, vec![0])
+        .unwrap()
         .with_palette(Palette::new(vec![[0, 0, 0, 7]]))
         .with_transparency(Trns::Palette(vec![1]));
     assert!(encode(&img, &EncodeOptions::default()).is_err());
@@ -292,6 +304,7 @@ fn gray_layouts_accept_a_yuv_matrix_and_write_identity() {
     for fmt in [PixelFormat::Gray8, PixelFormat::Ya8, PixelFormat::Gray16Le] {
         let bpp = fmt.bytes_per_pixel();
         let img = PngImage::packed(2, 1, fmt, 2 * bpp, vec![7; 2 * bpp])
+            .unwrap()
             .with_color(ColorInfo::new(ColorRange::Full, 1, 13, 6));
         let bytes =
             encode(&img, &EncodeOptions::default()).unwrap_or_else(|e| panic!("{fmt:?}: {e}"));
@@ -370,7 +383,7 @@ fn decode_all_yields_one_frame_for_stills_and_composited_apng_frames() {
     assert_eq!(frames[0].image, rgba_2x2());
 
     let f0 = rgba_2x2();
-    let f1 = PngImage::from_rgba8(2, 2, vec![9; 16]);
+    let f1 = PngImage::from_rgba8(2, 2, vec![9; 16]).unwrap();
     let apng = encode_apng(&[f0.clone(), f1.clone()], 25, 0).unwrap();
     let i = info(&apng).unwrap();
     assert_eq!(i.frames, 2);
@@ -382,6 +395,69 @@ fn decode_all_yields_one_frame_for_stills_and_composited_apng_frames() {
     assert_eq!(frames[1].image.as_bytes(), f1.as_bytes());
     // `decode` on an APNG is its default image.
     assert_eq!(decode(&apng).unwrap().as_bytes(), f0.as_bytes());
+}
+
+#[test]
+fn encode_all_mirrors_decode_all() {
+    // One still frame without a delay is a plain PNG.
+    let still = encode_all(&[Frame::new(rgba_2x2(), None)], &EncodeOptions::default()).unwrap();
+    assert_eq!(
+        still,
+        encode(&rgba_2x2(), &EncodeOptions::default()).unwrap()
+    );
+    assert_eq!(info(&still).unwrap().frames, 1);
+
+    // Several frames: an APNG whose frames (planes, palette, colour,
+    // metadata) and whole-millisecond delays read back equal.
+    let pal = Palette::from_rgb(&[1, 2, 3, 4, 5, 6, 7, 8, 9], Some(&[200]));
+    let color = ColorInfo::new(ColorRange::Full, 1, 13, 0);
+    let frames = vec![
+        Frame::new(
+            PngImage::packed(2, 2, PixelFormat::Pal8, 2, vec![0, 1, 2, 0])
+                .unwrap()
+                .with_palette(pal.clone())
+                .with_color(color),
+            Some(Duration::from_millis(40)),
+        ),
+        Frame::new(
+            PngImage::packed(2, 2, PixelFormat::Pal8, 2, vec![2, 2, 1, 1])
+                .unwrap()
+                .with_palette(pal.clone())
+                .with_color(color),
+            Some(Duration::from_millis(1500)),
+        ),
+        Frame::new(
+            PngImage::packed(2, 2, PixelFormat::Pal8, 2, vec![1, 0, 1, 0])
+                .unwrap()
+                .with_palette(pal)
+                .with_color(color),
+            Some(Duration::from_secs(70)),
+        ),
+    ];
+    let opts = EncodeOptions::default().with_num_plays(3);
+    let bytes = encode_all(&frames, &opts).unwrap();
+    let i = info(&bytes).unwrap();
+    assert_eq!((i.frames, i.num_plays), (3, 3));
+    assert_eq!(decode_all(&bytes).unwrap(), frames);
+
+    // A lone frame WITH a delay is a one-frame animation.
+    let one = encode_all(&frames[..1], &EncodeOptions::default()).unwrap();
+    assert_eq!(info(&one).unwrap().frames, 1);
+    assert_eq!(decode_all(&one).unwrap(), frames[..1]);
+
+    // No frames, or a frame that does not match the canvas, is InvalidData.
+    assert!(matches!(
+        encode_all(&[], &EncodeOptions::default()),
+        Err(PngError::InvalidData(_))
+    ));
+    let odd = [
+        Frame::new(rgba_2x2(), Some(Duration::from_millis(10))),
+        Frame::new(
+            PngImage::from_rgba8(1, 1, vec![0; 4]).unwrap(),
+            Some(Duration::from_millis(10)),
+        ),
+    ];
+    assert!(encode_all(&odd, &EncodeOptions::default()).is_err());
 }
 
 #[test]
@@ -410,7 +486,8 @@ fn image_constructors_and_accessors() {
         1,
         PixelFormat::Rgb24,
         vec![Plane::new(8, vec![1, 2, 3, 4, 5, 6, 0, 0])],
-    );
+    )
+    .unwrap();
     assert_eq!(img.stride(), 8);
     assert_eq!(img.to_rgb8(), vec![1, 2, 3, 4, 5, 6]);
     assert_eq!(img.to_rgba8(), vec![1, 2, 3, 255, 4, 5, 6, 255]);
@@ -422,7 +499,8 @@ fn image_constructors_and_accessors() {
             1,
             PixelFormat::Rgb24,
             vec![Plane::new(8, vec![1, 2, 3, 4, 5, 6, 0, 0])],
-        ),
+        )
+        .unwrap(),
         &EncodeOptions::default(),
     )
     .unwrap();
@@ -445,6 +523,7 @@ fn pre_contract_wrappers_still_work_and_agree() {
         encode_png_image_with_options, PngEncoderOptions, RgbaBitmap,
     };
     let img = PngImage::packed(2, 1, PixelFormat::Pal8, 2, vec![0, 1])
+        .unwrap()
         .with_palette(Palette::from_rgb(&[1, 2, 3, 4, 5, 6], Some(&[0])));
     let bytes = encode_png_image(&img).unwrap();
     assert_eq!(bytes, encode(&img, &EncodeOptions::default()).unwrap());

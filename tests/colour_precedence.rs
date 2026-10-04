@@ -12,7 +12,7 @@ use oxideav_png::{
 };
 
 fn rgba_2x2() -> PngImage {
-    PngImage::packed(2, 2, PngPixelFormat::Rgba, 8, vec![0x55; 16])
+    PngImage::packed(2, 2, PngPixelFormat::Rgba, 8, vec![0x55; 16]).unwrap()
 }
 
 fn cicp() -> Cicp {

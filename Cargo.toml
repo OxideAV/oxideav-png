@@ -12,6 +12,8 @@ readme = "README.md"
 homepage = "https://github.com/OxideAV/oxideav-png"
 keywords = ["multimedia", "image", "png", "codec", "pure-rust"]
 categories = ["multimedia::encoding", "multimedia::images"]
+# crates.io caps packages at 10 MiB; the fixture corpus and fuzz tree stay in git only.
+exclude = ["/tests", "/fuzz"]
 
 [dependencies]
 # `oxideav-core` is gated behind the default-on `registry` feature so

@@ -1334,7 +1334,7 @@ fn build_png_image(
         PngPixelFormat::Ya8 => (w * 2, raw),
     };
 
-    let mut img = PngImage::packed(ihdr.width, ihdr.height, pf, stride, data);
+    let mut img = PngImage::packed(ihdr.width, ihdr.height, pf, stride, data)?;
     if pf == PngPixelFormat::Pal8 {
         img.palette = Some(Palette::from_rgb(plte.unwrap_or(&[]), trns));
     } else if let Some(t) = trns {
@@ -2120,7 +2120,7 @@ pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
             canvas_fmt,
             stride_canvas,
             canvas.clone(),
-        )
+        )?
         .with_palette(sub_frame.palette.clone())
         .with_transparency(sub_frame.transparency.clone())
         .with_color(info.color)

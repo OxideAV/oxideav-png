@@ -165,7 +165,7 @@ mod zstream;
 // with `default-features = false`.
 pub use api::{
     decode, decode_all, decode_all_with, decode_from, decode_rgb8, decode_rgba8, decode_with,
-    encode, encode_rgb8, encode_rgba8, encode_to, info, probe,
+    encode, encode_all, encode_rgb8, encode_rgba8, encode_to, info, probe,
 };
 #[allow(deprecated)]
 pub use api::{decode_png, decode_png_over_background, decode_png_to_rgba};

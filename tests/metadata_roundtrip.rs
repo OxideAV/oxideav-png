@@ -18,10 +18,11 @@ fn rgba_2x2() -> PngImage {
             255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ],
     )
+    .unwrap()
 }
 
 fn gray8_2x2() -> PngImage {
-    PngImage::packed(2, 2, PngPixelFormat::Gray8, 2, vec![0, 64, 128, 255])
+    PngImage::packed(2, 2, PngPixelFormat::Gray8, 2, vec![0, 64, 128, 255]).unwrap()
 }
 
 /// 4×1 Pal8 image with a 4-entry palette (red, green, blue, white). Used
@@ -37,7 +38,9 @@ fn pal8_4x1() -> PngImage {
         ],
         None,
     );
-    PngImage::packed(4, 1, PngPixelFormat::Pal8, 4, vec![0, 1, 2, 3]).with_palette(palette)
+    PngImage::packed(4, 1, PngPixelFormat::Pal8, 4, vec![0, 1, 2, 3])
+        .unwrap()
+        .with_palette(palette)
 }
 
 #[test]
@@ -2032,6 +2035,7 @@ fn rgb24_4x1() -> PngImage {
         12,
         vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255],
     )
+    .unwrap()
 }
 
 /// Helper: build a 2×1 `Gray16Le` image. `Gray16Le` per [`PngPixelFormat`]
@@ -2045,6 +2049,7 @@ fn gray16le_2x1() -> PngImage {
         4,
         vec![0x00, 0x10, 0xFF, 0x80],
     )
+    .unwrap()
 }
 
 #[test]

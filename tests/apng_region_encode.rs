@@ -21,7 +21,7 @@ fn solid_rgba(w: u32, h: u32, rgba: [u8; 4]) -> PngImage {
     for px in data.chunks_exact_mut(4) {
         px.copy_from_slice(&rgba);
     }
-    PngImage::packed(w, h, PngPixelFormat::Rgba, w as usize * 4, data)
+    PngImage::packed(w, h, PngPixelFormat::Rgba, w as usize * 4, data).unwrap()
 }
 
 /// Read the canvas pixel at (x, y) from a composited RGBA frame.

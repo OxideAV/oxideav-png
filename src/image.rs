@@ -18,6 +18,7 @@
 
 use std::time::Duration;
 
+use crate::error::PngError;
 use crate::metadata::Trns;
 
 /// Pixel layouts the standalone `oxideav-png` API can produce / consume.
@@ -383,10 +384,67 @@ pub struct PngImage {
 }
 
 impl PngImage {
-    /// Assemble an image from its geometry, layout and planes (one for
-    /// PNG). Colour is [`ColorInfo::png_default`], metadata empty, no
-    /// palette, no transparency; the `with_*` builders fill those in.
-    pub fn new(width: u32, height: u32, format: PixelFormat, planes: Vec<Plane>) -> Self {
+    /// Assemble an image from its geometry, layout and planes (exactly
+    /// one for PNG). Colour is [`ColorInfo::png_default`], metadata
+    /// empty, no palette, no transparency; the `with_*` builders fill
+    /// those in.
+    ///
+    /// Rejects with [`PngError::InvalidData`] a zero dimension, a plane
+    /// count other than one, a stride shorter than `width ×
+    /// bytes_per_pixel`, or a buffer shorter than the rows it must hold
+    /// (`(height − 1) × stride + width × bytes_per_pixel`; the last
+    /// row may be unpadded), so an image that exists is always
+    /// consistent and [`Self::to_rgb8`] / [`Self::to_rgba8`] never need
+    /// to fail.
+    pub fn new(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        planes: Vec<Plane>,
+    ) -> Result<Self, PngError> {
+        if width == 0 || height == 0 {
+            return Err(PngError::invalid(format!(
+                "PNG image: zero dimension ({width}×{height})"
+            )));
+        }
+        if planes.len() != 1 {
+            return Err(PngError::invalid(format!(
+                "PNG image: {} planes supplied, PNG layouts are packed (exactly one)",
+                planes.len()
+            )));
+        }
+        let plane = &planes[0];
+        let row_bytes = (width as usize)
+            .checked_mul(format.bytes_per_pixel())
+            .ok_or_else(|| PngError::invalid("PNG image: row size overflows usize"))?;
+        if plane.stride < row_bytes {
+            return Err(PngError::invalid(format!(
+                "PNG image: stride {} is shorter than the {row_bytes}-byte row",
+                plane.stride
+            )));
+        }
+        let needed = (height as usize - 1)
+            .checked_mul(plane.stride)
+            .and_then(|v| v.checked_add(row_bytes))
+            .ok_or_else(|| PngError::invalid("PNG image: plane size overflows usize"))?;
+        if plane.data.len() < needed {
+            return Err(PngError::invalid(format!(
+                "PNG image: pixel buffer holds {} bytes but {height} rows at stride {} need {needed}",
+                plane.data.len(),
+                plane.stride
+            )));
+        }
+        Ok(Self::new_unchecked(width, height, format, planes))
+    }
+
+    /// [`Self::new`] without the geometry checks, for images the crate
+    /// assembles itself from already-validated buffers.
+    pub(crate) fn new_unchecked(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        planes: Vec<Plane>,
+    ) -> Self {
         Self {
             width,
             height,
@@ -400,25 +458,45 @@ impl PngImage {
     }
 
     /// One packed plane with an explicit row stride (`stride ≥ width ×
-    /// bytes_per_pixel`, `data.len() ≥ stride × height`).
+    /// bytes_per_pixel`, `data.len() ≥ (height − 1) × stride + width ×
+    /// bytes_per_pixel`); see [`Self::new`] for what is rejected.
     pub fn packed(
         width: u32,
         height: u32,
         format: PixelFormat,
         stride: usize,
         data: Vec<u8>,
-    ) -> Self {
+    ) -> Result<Self, PngError> {
         Self::new(width, height, format, vec![Plane::new(stride, data)])
     }
 
-    /// Tightly packed `Rgb24` from `3 × width × height` bytes.
-    pub fn from_rgb8(width: u32, height: u32, data: Vec<u8>) -> Self {
-        Self::packed(width, height, PixelFormat::Rgb24, width as usize * 3, data)
+    /// [`Self::packed`] without the geometry checks (crate-internal).
+    pub(crate) fn packed_unchecked(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        stride: usize,
+        data: Vec<u8>,
+    ) -> Self {
+        Self::new_unchecked(width, height, format, vec![Plane::new(stride, data)])
     }
 
-    /// Tightly packed `Rgba` from `4 × width × height` bytes.
-    pub fn from_rgba8(width: u32, height: u32, data: Vec<u8>) -> Self {
-        Self::packed(width, height, PixelFormat::Rgba, width as usize * 4, data)
+    /// Tightly packed `Rgb24` from `3 × width × height` bytes;
+    /// [`PngError::InvalidData`] when `data` is shorter than that.
+    pub fn from_rgb8(width: u32, height: u32, data: Vec<u8>) -> Result<Self, PngError> {
+        let stride = (width as usize)
+            .checked_mul(3)
+            .ok_or_else(|| PngError::invalid("PNG image: row size overflows usize"))?;
+        Self::packed(width, height, PixelFormat::Rgb24, stride, data)
+    }
+
+    /// Tightly packed `Rgba` from `4 × width × height` bytes;
+    /// [`PngError::InvalidData`] when `data` is shorter than that.
+    pub fn from_rgba8(width: u32, height: u32, data: Vec<u8>) -> Result<Self, PngError> {
+        let stride = (width as usize)
+            .checked_mul(4)
+            .ok_or_else(|| PngError::invalid("PNG image: row size overflows usize"))?;
+        Self::packed(width, height, PixelFormat::Rgba, stride, data)
     }
 
     /// Set the colour signalling.
@@ -945,6 +1023,7 @@ mod tests {
     #[test]
     fn to_rgba8_pal8_with_tail_and_out_of_range_index() {
         let img = PngImage::packed(3, 1, PixelFormat::Pal8, 3, vec![0, 1, 9])
+            .unwrap()
             .with_palette(Palette::from_rgb(&[10, 20, 30, 40, 50, 60], Some(&[128])));
         assert_eq!(
             img.to_rgba8(),
@@ -956,6 +1035,7 @@ mod tests {
     #[test]
     fn to_rgba8_keyed_gray16_compares_both_bytes() {
         let img = PngImage::packed(2, 1, PixelFormat::Gray16Le, 4, vec![0x34, 0x12, 0x35, 0x12])
+            .unwrap()
             .with_transparency(Trns::Grayscale(0x1234));
         assert_eq!(
             img.to_rgba8(),
@@ -965,14 +1045,39 @@ mod tests {
 
     #[test]
     fn to_rgba8_honours_stride_padding() {
-        let img = PngImage::packed(1, 2, PixelFormat::Rgb24, 4, vec![1, 2, 3, 99, 4, 5, 6, 99]);
+        let img =
+            PngImage::packed(1, 2, PixelFormat::Rgb24, 4, vec![1, 2, 3, 99, 4, 5, 6, 99]).unwrap();
         assert_eq!(img.to_rgba8(), vec![1, 2, 3, 255, 4, 5, 6, 255]);
         assert_eq!(img.to_rgb8(), vec![1, 2, 3, 4, 5, 6]);
     }
 
     #[test]
+    fn constructors_reject_bad_geometry() {
+        let err = |r: Result<PngImage, PngError>| match r {
+            Err(PngError::InvalidData(_)) => (),
+            other => panic!("expected InvalidData, got {other:?}"),
+        };
+        err(PngImage::from_rgb8(2, 1, vec![0; 5]));
+        err(PngImage::from_rgba8(1, 2, vec![0; 7]));
+        err(PngImage::packed(2, 1, PixelFormat::Rgb24, 5, vec![0; 6]));
+        err(PngImage::packed(0, 1, PixelFormat::Gray8, 0, vec![]));
+        err(PngImage::packed(1, 0, PixelFormat::Gray8, 1, vec![]));
+        err(PngImage::new(1, 1, PixelFormat::Gray8, vec![]));
+        err(PngImage::new(
+            1,
+            1,
+            PixelFormat::Gray8,
+            vec![Plane::new(1, vec![0]), Plane::new(1, vec![0])],
+        ));
+        // The last row may be unpadded; earlier rows carry the stride.
+        assert!(PngImage::packed(1, 2, PixelFormat::Gray8, 4, vec![0; 5]).is_ok());
+        assert!(PngImage::packed(1, 2, PixelFormat::Gray8, 4, vec![0; 4]).is_err());
+        assert!(PngImage::from_rgb8(2, 2, vec![0; 12]).is_ok());
+    }
+
+    #[test]
     fn into_raw_and_as_bytes() {
-        let img = PngImage::from_rgba8(1, 1, vec![1, 2, 3, 4]);
+        let img = PngImage::from_rgba8(1, 1, vec![1, 2, 3, 4]).unwrap();
         assert_eq!(img.as_bytes(), Some(&[1u8, 2, 3, 4][..]));
         assert_eq!(img.stride(), 4);
         assert_eq!(img.into_raw(), vec![1, 2, 3, 4]);

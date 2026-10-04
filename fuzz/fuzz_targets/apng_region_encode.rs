@@ -119,7 +119,7 @@ fn solid_region(w: u32, h: u32, seed: u8) -> PngImage {
         data.push(b);
         data.push(a);
     }
-    PngImage::packed(w, h, PngPixelFormat::Rgba, stride, data)
+    PngImage::packed(w, h, PngPixelFormat::Rgba, stride, data).expect("synthetic image geometry is valid")
 }
 
 struct FramePlan {

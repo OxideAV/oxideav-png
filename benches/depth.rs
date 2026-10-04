@@ -34,7 +34,7 @@ fn fill16(count: usize, mut state: u32) -> Vec<u8> {
 fn image(format: PngPixelFormat, w: u32, h: u32) -> PngImage {
     let bpp = format.bytes_per_pixel();
     let samples = w as usize * h as usize * (bpp / 2);
-    PngImage::packed(w, h, format, w as usize * bpp, fill16(samples, 0x9e37_79b9))
+    PngImage::packed(w, h, format, w as usize * bpp, fill16(samples, 0x9e37_79b9)).unwrap()
 }
 
 fn bench_rescale(c: &mut Criterion) {

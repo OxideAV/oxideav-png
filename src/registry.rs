@@ -57,6 +57,11 @@ impl From<PngError> for oxideav_core::Error {
 /// Map a framework pixel format to [`PngPixelFormat`]. Returns `Err` for
 /// pixel formats the PNG codec can't represent.
 fn from_core_pixel_format(pf: PixelFormat) -> oxideav_core::Result<PngPixelFormat> {
+    Ok(png_pixel_format(pf)?)
+}
+
+/// [`from_core_pixel_format`] with the crate's own error type.
+fn png_pixel_format(pf: PixelFormat) -> Result<PngPixelFormat, PngError> {
     Ok(match pf {
         PixelFormat::Gray8 => PngPixelFormat::Gray8,
         PixelFormat::Gray16Le => PngPixelFormat::Gray16Le,
@@ -67,7 +72,7 @@ fn from_core_pixel_format(pf: PixelFormat) -> oxideav_core::Result<PngPixelForma
         PixelFormat::Rgba => PngPixelFormat::Rgba,
         PixelFormat::Rgba64Le => PngPixelFormat::Rgba64Le,
         other => {
-            return Err(oxideav_core::Error::unsupported(format!(
+            return Err(PngError::unsupported(format!(
                 "PNG: pixel format {other:?} not supported"
             )))
         }
@@ -156,12 +161,12 @@ fn video_frame_to_png_image(
     height: u32,
     pix: PngPixelFormat,
     palette: &[u8],
-) -> oxideav_core::Result<PngImage> {
+) -> Result<PngImage, PngError> {
     let plane = frame
         .image_planes()
         .first()
-        .ok_or_else(|| oxideav_core::Error::invalid("PNG encoder: frame has no planes"))?;
-    let mut img = PngImage::packed(width, height, pix, plane.stride, plane.data.clone());
+        .ok_or_else(|| PngError::invalid("PNG encoder: frame has no planes"))?;
+    let mut img = PngImage::packed(width, height, pix, plane.stride, plane.data.clone())?;
     stamp_side_channels(&mut img, frame, palette);
     Ok(img)
 }
@@ -182,7 +187,7 @@ fn video_frame_into_png_image(
         ));
     }
     let plane = frame.planes.swap_remove(0);
-    let mut img = PngImage::packed(width, height, pix, plane.stride, plane.data);
+    let mut img = PngImage::packed(width, height, pix, plane.stride, plane.data)?;
     stamp_side_channels(&mut img, &frame, palette);
     Ok(img)
 }
@@ -266,24 +271,29 @@ impl PngImage {
     /// parameters that describe it (`width`, `height`, `pixel_format`
     /// are required; `extradata` is read as the legacy `PLTE || tRNS`
     /// blob when the frame carries no palette side-channel).
+    ///
+    /// Errors are the crate's own [`PngError`] (`Unsupported` for a
+    /// layout PNG has no name for, `InvalidData` for missing
+    /// parameters or a plane that does not match the geometry); the
+    /// registry adapter maps them to `oxideav_core::Error`.
     pub fn from_video_frame(
         frame: &VideoFrame,
         params: &CodecParameters,
-    ) -> oxideav_core::Result<Self> {
+    ) -> Result<Self, PngError> {
         let width = params
             .width
-            .ok_or_else(|| oxideav_core::Error::invalid("PNG: missing width"))?;
+            .ok_or_else(|| PngError::invalid("PNG: missing width"))?;
         let height = params
             .height
-            .ok_or_else(|| oxideav_core::Error::invalid("PNG: missing height"))?;
-        let pix = from_core_pixel_format(params.pixel_format.unwrap_or(PixelFormat::Rgba))?;
+            .ok_or_else(|| PngError::invalid("PNG: missing height"))?;
+        let pix = png_pixel_format(params.pixel_format.unwrap_or(PixelFormat::Rgba))?;
         video_frame_to_png_image(frame, width, height, pix, &params.extradata)
     }
 }
 
 impl TryFrom<(&VideoFrame, &CodecParameters)> for PngImage {
-    type Error = oxideav_core::Error;
-    fn try_from((frame, params): (&VideoFrame, &CodecParameters)) -> oxideav_core::Result<Self> {
+    type Error = PngError;
+    fn try_from((frame, params): (&VideoFrame, &CodecParameters)) -> Result<Self, PngError> {
         PngImage::from_video_frame(frame, params)
     }
 }

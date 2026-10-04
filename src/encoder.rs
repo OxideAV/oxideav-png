@@ -175,6 +175,10 @@ pub struct EncodeOptions {
     /// Worker threads for the IDAT / fdAT DEFLATE pass (`0` or `1` =
     /// serial). The emitted bytes never depend on this value.
     pub threads: usize,
+    /// APNG loop count written to `acTL.num_plays` by
+    /// [`crate::encode_all`]: `0` (the default) plays forever. Ignored
+    /// by the single-image encoders.
+    pub num_plays: u32,
 }
 
 /// The pre-contract name of [`EncodeOptions`].
@@ -229,6 +233,12 @@ impl EncodeOptions {
     /// DEFLATE level `1..=9` for the pixel stream; `None` selects [`DEFAULT_COMPRESSION_LEVEL`].
     pub fn with_compression_level(mut self, compression_level: impl Into<Option<u8>>) -> Self {
         self.compression_level = compression_level.into();
+        self
+    }
+
+    /// APNG loop count for [`crate::encode_all`] (`0` = forever).
+    pub fn with_num_plays(mut self, num_plays: u32) -> Self {
+        self.num_plays = num_plays;
         self
     }
 }
@@ -1537,10 +1547,14 @@ pub fn encode_apng_threaded(
     if opts.interlace {
         ihdr.interlace = 1;
     }
-    // APNG shares the standalone path's tRNS resolution. The IHDR is
-    // fixed across the whole APNG so a single resolve on the first-
-    // frame palette + opts.metadata covers every frame.
-    let trns = resolve_trns_bytes(&ihdr, trns.as_deref(), opts.metadata.as_ref())?;
+    // APNG shares the standalone path's metadata + tRNS resolution: the
+    // first frame's `color` / `metadata` / `transparency` become chunks
+    // exactly as `encode` would write them. The IHDR is fixed across
+    // the whole APNG so a single resolve on the first-frame palette +
+    // metadata covers every frame.
+    let meta = effective_metadata(&frames[0], opts)?;
+    let meta = meta.as_ref();
+    let trns = resolve_trns_bytes(&ihdr, trns.as_deref(), meta)?;
     let level = resolve_compression_level(opts)?;
 
     let actl = Actl {
@@ -1553,7 +1567,7 @@ pub fn encode_apng_threaded(
     write_chunk(&mut out, b"IHDR", &ihdr.to_bytes());
     write_chunk(&mut out, b"acTL", &actl.to_bytes());
     // sBIT precedes PLTE + IDAT per RFC 2083 §4.3.
-    write_metadata_before_plte(&mut out, opts.metadata.as_ref())?;
+    write_metadata_before_plte(&mut out, meta)?;
     if let Some(p) = plte.as_deref() {
         write_chunk(&mut out, b"PLTE", p);
     }
@@ -1562,7 +1576,7 @@ pub fn encode_apng_threaded(
     }
     // pHYs / tIME / sPLT precede IDAT (and APNG's fcTL/fdAT stream that
     // bracket subsequent frames).
-    write_metadata_before_idat(&mut out, opts.metadata.as_ref())?;
+    write_metadata_before_idat(&mut out, meta)?;
 
     let mut seq: u32 = 0;
     for (idx, frame) in frames.iter().enumerate() {
@@ -1612,7 +1626,7 @@ pub fn encode_apng_threaded(
         }
     }
 
-    write_metadata_after_idat(&mut out, opts.metadata.as_ref());
+    write_metadata_after_idat(&mut out, meta);
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
 }
@@ -1824,6 +1838,95 @@ pub fn encode_apng_frames_threaded(
     opts: &EncodeOptions,
     threads: usize,
 ) -> Result<Vec<u8>> {
+    let regions: Vec<ApngRegion<'_>> = frames
+        .iter()
+        .map(|f| ApngRegion {
+            image: &f.image,
+            x_offset: f.x_offset,
+            y_offset: f.y_offset,
+            delay_num: f.delay_num,
+            delay_den: f.delay_den,
+            dispose_op: f.dispose_op,
+            blend_op: f.blend_op,
+        })
+        .collect();
+    encode_apng_regions(
+        canvas_width,
+        canvas_height,
+        default_image,
+        &regions,
+        num_plays,
+        opts,
+        threads,
+    )
+}
+
+/// One animation step by reference: [`ApngFrameSpec`] without owning
+/// the image, so [`crate::encode_all`] can encode borrowed frames.
+pub(crate) struct ApngRegion<'a> {
+    pub(crate) image: &'a PngImage,
+    pub(crate) x_offset: u32,
+    pub(crate) y_offset: u32,
+    pub(crate) delay_num: u16,
+    pub(crate) delay_den: u16,
+    pub(crate) dispose_op: Disposal,
+    pub(crate) blend_op: Blend,
+}
+
+/// Full-canvas frames with a shared geometry and per-frame
+/// `delay_num / delay_den`, written as `Disposal::None` /
+/// `Blend::Source` — the [`crate::encode_all`] shape. The canvas is
+/// the first frame's geometry.
+pub(crate) fn encode_apng_full_canvas(
+    frames: &[(&PngImage, u16, u16)],
+    num_plays: u32,
+    opts: &EncodeOptions,
+) -> Result<Vec<u8>> {
+    let Some((first, _, _)) = frames.first() else {
+        return Err(Error::invalid("PNG encoder: no frames for APNG"));
+    };
+    for (i, (f, _, _)) in frames.iter().enumerate().skip(1) {
+        if f.width != first.width || f.height != first.height || f.format != first.format {
+            return Err(Error::invalid(format!(
+                "PNG encoder: frame {i} is {}×{} {:?}, the canvas (frame 0) is {}×{} {:?} — \
+                 encode_all frames share one geometry and layout",
+                f.width, f.height, f.format, first.width, first.height, first.format
+            )));
+        }
+    }
+    let regions: Vec<ApngRegion<'_>> = frames
+        .iter()
+        .map(|&(image, delay_num, delay_den)| ApngRegion {
+            image,
+            x_offset: 0,
+            y_offset: 0,
+            delay_num,
+            delay_den,
+            dispose_op: Disposal::None,
+            blend_op: Blend::Source,
+        })
+        .collect();
+    encode_apng_regions(
+        first.width,
+        first.height,
+        None,
+        &regions,
+        num_plays,
+        opts,
+        opts.threads.max(1),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_apng_regions(
+    canvas_width: u32,
+    canvas_height: u32,
+    default_image: Option<&PngImage>,
+    frames: &[ApngRegion<'_>],
+    num_plays: u32,
+    opts: &EncodeOptions,
+    threads: usize,
+) -> Result<Vec<u8>> {
     use crate::apng::{Actl, Fctl};
 
     if frames.is_empty() {
@@ -1900,13 +2003,14 @@ pub fn encode_apng_frames_threaded(
             .map_err(|e| Error::invalid(format!("PNG encoder: APNG frame {i}: {e}")))?;
     }
 
-    // Synthesise a full-canvas probe image so colour-type / bit-depth /
-    // palette resolution reuse the standalone IHDR path.
+    // Synthesise a full-canvas probe image (no pixel buffer — it only
+    // carries geometry, layout and palette) so colour-type / bit-depth
+    // / palette resolution reuse the standalone IHDR path.
     let palette_src = match default_image {
         Some(d) => d,
-        None => &frames[0].image,
+        None => frames[0].image,
     };
-    let canvas_probe = PngImage::packed(
+    let canvas_probe = PngImage::packed_unchecked(
         canvas_width,
         canvas_height,
         canvas_fmt,
@@ -1918,7 +2022,11 @@ pub fn encode_apng_frames_threaded(
     if opts.interlace {
         ihdr.interlace = 1;
     }
-    let trns = resolve_trns_bytes(&ihdr, trns.as_deref(), opts.metadata.as_ref())?;
+    // The canvas source's `color` / `metadata` / `transparency` become
+    // chunks exactly as `encode` would write them for a still image.
+    let meta = effective_metadata(palette_src, opts)?;
+    let meta = meta.as_ref();
+    let trns = resolve_trns_bytes(&ihdr, trns.as_deref(), meta)?;
     let level = resolve_compression_level(opts)?;
 
     let actl = Actl {
@@ -1930,14 +2038,14 @@ pub fn encode_apng_frames_threaded(
     out.extend_from_slice(&PNG_MAGIC);
     write_chunk(&mut out, b"IHDR", &ihdr.to_bytes());
     write_chunk(&mut out, b"acTL", &actl.to_bytes());
-    write_metadata_before_plte(&mut out, opts.metadata.as_ref())?;
+    write_metadata_before_plte(&mut out, meta)?;
     if let Some(p) = plte.as_deref() {
         write_chunk(&mut out, b"PLTE", p);
     }
     if let Some(t) = trns.as_deref() {
         write_chunk(&mut out, b"tRNS", t);
     }
-    write_metadata_before_idat(&mut out, opts.metadata.as_ref())?;
+    write_metadata_before_idat(&mut out, meta)?;
 
     // Compress one frame's sub-region pixels straight into an IDAT /
     // fdAT chunk using the frame's own dimensions (the fcTL extent) as
@@ -1982,14 +2090,14 @@ pub fn encode_apng_frames_threaded(
             // No separate default image: the first frame *is* the default
             // image, so its full-canvas pixels ride in IDAT (after its
             // fcTL → first_frame_is_default).
-            write_region(&mut out, b"IDAT", &[], &f.image)?;
+            write_region(&mut out, b"IDAT", &[], f.image)?;
         } else {
-            write_region(&mut out, b"fdAT", &seq.to_be_bytes(), &f.image)?;
+            write_region(&mut out, b"fdAT", &seq.to_be_bytes(), f.image)?;
             seq += 1;
         }
     }
 
-    write_metadata_after_idat(&mut out, opts.metadata.as_ref());
+    write_metadata_after_idat(&mut out, meta);
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
 }

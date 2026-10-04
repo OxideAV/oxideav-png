@@ -21,7 +21,7 @@ use oxideav_png::{decode_rgba8, encode, EncodeOptions, Palette, PngImage, PngPix
 /// triples followed by the alpha tail.
 fn make(w: u32, h: u32, pf: PngPixelFormat, data: Vec<u8>, palette: Vec<u8>) -> PngImage {
     let bpp = pf.bytes_per_pixel();
-    let img = PngImage::packed(w, h, pf, w as usize * bpp, data);
+    let img = PngImage::packed(w, h, pf, w as usize * bpp, data).unwrap();
     if palette.is_empty() {
         return img;
     }

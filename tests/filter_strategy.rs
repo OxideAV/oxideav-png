@@ -58,7 +58,7 @@ fn make_rgb_image(w: u32, h: u32) -> PngImage {
             data.push(((x + y) * 5) as u8);
         }
     }
-    PngImage::packed(w, h, PngPixelFormat::Rgb24, (w * 3) as usize, data)
+    PngImage::packed(w, h, PngPixelFormat::Rgb24, (w * 3) as usize, data).unwrap()
 }
 
 /// `Fixed(f)` writes filter byte `f as u8` at the head of every row
@@ -169,6 +169,7 @@ fn fixed_filter_none_on_adam7_subbyte_indexed() {
         .flat_map(|i| [i * 16, 0, 255 - i * 16])
         .collect();
     let img = PngImage::packed(w, h, PngPixelFormat::Pal8, w as usize, data.clone())
+        .unwrap()
         .with_palette(Palette::from_rgb(&palette, None));
 
     let opts = EncodeOptions::default()
@@ -251,7 +252,7 @@ fn default_strategy_is_adaptive_and_matches_pre_r245_output() {
 /// uses a 1×1 image where only pass 7 produces a row.
 #[test]
 fn fixed_filter_skips_empty_adam7_passes() {
-    let img = PngImage::packed(1, 1, PngPixelFormat::Rgb24, 3, vec![10, 20, 30]);
+    let img = PngImage::packed(1, 1, PngPixelFormat::Rgb24, 3, vec![10, 20, 30]).unwrap();
     let opts = EncodeOptions::default()
         .with_interlace(true)
         .with_filter_strategy(FilterStrategy::Fixed(FilterType::Sub));
@@ -361,6 +362,7 @@ fn brute_subbyte_roundtrip_and_validation() {
     // 16-entry palette so a depth-4 IHDR fits with no `tRNS` tail.
     let palette: Vec<u8> = (0u8..16).flat_map(|i| [i * 16, 0, 255 - i * 16]).collect();
     let img = PngImage::packed(w, h, PngPixelFormat::Pal8, w as usize, data.clone())
+        .unwrap()
         .with_palette(Palette::from_rgb(&palette, None));
 
     // Non-interlaced sub-byte Brute: round-trip bit-exact.

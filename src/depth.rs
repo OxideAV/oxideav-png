@@ -309,7 +309,7 @@ fn rescale_16bit_to_8bit_inner(image: &PngImage, sbit: Option<Sbit>) -> PngImage
     // The colour description and metadata still describe the samples;
     // the 16-bit keyed transparency does not survive the depth change
     // (its key is a 16-bit value) and a 16-bit image has no palette.
-    PngImage::packed(image.width, image.height, out_format, out_stride, out)
+    PngImage::packed_unchecked(image.width, image.height, out_format, out_stride, out)
         .with_color(image.color)
         .with_metadata(image.metadata.clone())
 }
@@ -495,7 +495,7 @@ mod tests {
             data.extend_from_slice(&s.to_le_bytes());
         }
         let bpp = format.bytes_per_pixel();
-        PngImage::packed(w, h, format, w as usize * bpp, data)
+        PngImage::packed(w, h, format, w as usize * bpp, data).unwrap()
     }
 
     #[test]
@@ -532,7 +532,7 @@ mod tests {
         data.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]); // padding
         data.extend_from_slice(&0u16.to_le_bytes());
         data.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]); // padding
-        let img = PngImage::packed(1, 2, PngPixelFormat::Gray16Le, 6, data);
+        let img = PngImage::packed(1, 2, PngPixelFormat::Gray16Le, 6, data).unwrap();
         let out = rescale_16bit_to_8bit(&img);
         assert_eq!(out.stride(), 1);
         assert_eq!(out.planes[0].data, vec![255, 0]);
@@ -547,7 +547,7 @@ mod tests {
             PngPixelFormat::Ya8,
         ] {
             let bpp = fmt.bytes_per_pixel();
-            let img = PngImage::packed(2, 1, fmt, 2 * bpp, (0..(2 * bpp) as u8).collect());
+            let img = PngImage::packed(2, 1, fmt, 2 * bpp, (0..(2 * bpp) as u8).collect()).unwrap();
             let out = rescale_16bit_to_8bit(&img);
             assert_eq!(out.format, fmt);
             assert_eq!(out.data(), img.data());

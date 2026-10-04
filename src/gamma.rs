@@ -666,6 +666,7 @@ mod tests {
             width as usize * bpp,
             data,
         )
+        .unwrap()
     }
 
     fn samples_le(image: &PngImage) -> Vec<u16> {
@@ -805,7 +806,7 @@ mod tests {
             PngPixelFormat::Rgba,
         ] {
             let bpp = fmt.bytes_per_pixel();
-            let mut img = PngImage::packed(2, 1, fmt, 2 * bpp, vec![1u8; 2 * bpp]);
+            let mut img = PngImage::packed(2, 1, fmt, 2 * bpp, vec![1u8; 2 * bpp]).unwrap();
             let before = img.data().to_vec();
             assert!(
                 !apply_to_png16(&mut img, params),
@@ -832,7 +833,7 @@ mod tests {
         data.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
         data.extend_from_slice(&40000u16.to_le_bytes());
         data.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
-        let mut img = PngImage::packed(1, 2, PngPixelFormat::Gray16Le, 6, data);
+        let mut img = PngImage::packed(1, 2, PngPixelFormat::Gray16Le, 6, data).unwrap();
         assert!(apply_to_png16(&mut img, params));
         // Row 0 sample corrected; its padding intact.
         assert_eq!(&img.data()[0..2], &lut[20000].to_le_bytes());

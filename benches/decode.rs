@@ -105,7 +105,7 @@ fn build_rgba(width: u32, height: u32) -> PngImage {
             data[idx + 3] = 0xff;
         }
     }
-    PngImage::packed(width, height, PngPixelFormat::Rgba, w * 4, data)
+    PngImage::packed(width, height, PngPixelFormat::Rgba, w * 4, data).unwrap()
 }
 
 fn build_rgb24(width: u32, height: u32) -> PngImage {
@@ -123,7 +123,7 @@ fn build_rgb24(width: u32, height: u32) -> PngImage {
             data[idx + 2] = base_x.min(255) as u8;
         }
     }
-    PngImage::packed(width, height, PngPixelFormat::Rgb24, w * 3, data)
+    PngImage::packed(width, height, PngPixelFormat::Rgb24, w * 3, data).unwrap()
 }
 
 fn build_gray8(width: u32, height: u32) -> PngImage {
@@ -136,7 +136,7 @@ fn build_gray8(width: u32, height: u32) -> PngImage {
             data[r * w + c] = natural_pattern_byte(r, c, h, w, &mut state);
         }
     }
-    PngImage::packed(width, height, PngPixelFormat::Gray8, w, data)
+    PngImage::packed(width, height, PngPixelFormat::Gray8, w, data).unwrap()
 }
 
 fn build_gray16(width: u32, height: u32) -> PngImage {
@@ -152,7 +152,7 @@ fn build_gray16(width: u32, height: u32) -> PngImage {
             data[idx + 1] = (base >> 8) as u8;
         }
     }
-    PngImage::packed(width, height, PngPixelFormat::Gray16Le, w * 2, data)
+    PngImage::packed(width, height, PngPixelFormat::Gray16Le, w * 2, data).unwrap()
 }
 
 fn build_rgb48(width: u32, height: u32) -> PngImage {
@@ -173,7 +173,7 @@ fn build_rgb48(width: u32, height: u32) -> PngImage {
             data[idx + 5] = (bb >> 8) as u8;
         }
     }
-    PngImage::packed(width, height, PngPixelFormat::Rgb48Le, w * 6, data)
+    PngImage::packed(width, height, PngPixelFormat::Rgb48Le, w * 6, data).unwrap()
 }
 
 fn build_rgba64(width: u32, height: u32) -> PngImage {
@@ -196,7 +196,7 @@ fn build_rgba64(width: u32, height: u32) -> PngImage {
             data[idx + 7] = 0xff;
         }
     }
-    PngImage::packed(width, height, PngPixelFormat::Rgba64Le, w * 8, data)
+    PngImage::packed(width, height, PngPixelFormat::Rgba64Le, w * 8, data).unwrap()
 }
 
 fn build_pal8(width: u32, height: u32) -> PngImage {
@@ -215,6 +215,7 @@ fn build_pal8(width: u32, height: u32) -> PngImage {
         palette.push((i ^ 0xaa) as u8);
     }
     PngImage::packed(width, height, PngPixelFormat::Pal8, w, data)
+        .unwrap()
         .with_palette(oxideav_png::Palette::from_rgb(&palette, None))
 }
 

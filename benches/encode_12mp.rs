@@ -156,7 +156,7 @@ fn build(pf: PngPixelFormat, photo: bool, raw: Option<&[u8]>) -> PngImage {
             }
         }
     }
-    PngImage::packed(WIDTH, HEIGHT, pf, stride, data)
+    PngImage::packed(WIDTH, HEIGHT, pf, stride, data).unwrap()
 }
 
 /// Stage breakdown for one layout: §12.8 heuristic alone, a fixed

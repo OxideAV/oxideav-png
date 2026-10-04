@@ -16,7 +16,7 @@ use oxideav_png::{
 };
 
 fn rgba_image(w: u32, h: u32, data: Vec<u8>) -> PngImage {
-    PngImage::packed(w, h, PngPixelFormat::Rgba, w as usize * 4, data)
+    PngImage::packed(w, h, PngPixelFormat::Rgba, w as usize * 4, data).unwrap()
 }
 
 /// Encode an RGBA image with an `sRGB` chunk (Perceptual intent), then

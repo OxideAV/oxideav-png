@@ -23,7 +23,7 @@ fn gray_source(w: u32, h: u32, bit_depth: u8) -> PngImage {
             data[y * w_us + x] = ((x + y) as u8) & max;
         }
     }
-    PngImage::packed(w, h, PngPixelFormat::Gray8, w_us, data)
+    PngImage::packed(w, h, PngPixelFormat::Gray8, w_us, data).unwrap()
 }
 
 fn pal_source(w: u32, h: u32, bit_depth: u8, palette_entries: usize) -> PngImage {
@@ -54,6 +54,7 @@ fn pal_source(w: u32, h: u32, bit_depth: u8, palette_entries: usize) -> PngImage
         }
     }
     PngImage::packed(w, h, PngPixelFormat::Pal8, w_us, data)
+        .unwrap()
         .with_palette(Palette::from_rgb(&palette, None))
 }
 
@@ -210,6 +211,7 @@ fn pal_1bit_packs_msb_first() {
     // Build a 1-row, 8-pixel Pal8 with alternating 0,1,0,1,...; the
     // packed wire byte must be 0b01010101 = 0x55.
     let src = PngImage::packed(8, 1, PngPixelFormat::Pal8, 8, vec![0, 1, 0, 1, 0, 1, 0, 1])
+        .unwrap()
         .with_palette(Palette::from_rgb(&[0u8, 0, 0, 255, 255, 255], None));
     let opts = EncodeOptions::default().with_bit_depth(Some(1));
     let bytes = encode(&src, &opts).expect("encode");
@@ -222,9 +224,12 @@ fn pal_1bit_packs_msb_first() {
 fn pal_2bit_packs_two_pixels_per_byte() {
     // Four pixels per byte at 2-bit packing. Source 0,1,2,3 →
     // 0b00_01_10_11 = 0x1B.
-    let src = PngImage::packed(4, 1, PngPixelFormat::Pal8, 4, vec![0, 1, 2, 3]).with_palette(
-        Palette::from_rgb(&[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255], None),
-    );
+    let src = PngImage::packed(4, 1, PngPixelFormat::Pal8, 4, vec![0, 1, 2, 3])
+        .unwrap()
+        .with_palette(Palette::from_rgb(
+            &[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255],
+            None,
+        ));
     let opts = EncodeOptions::default().with_bit_depth(Some(2));
     let bytes = encode(&src, &opts).expect("encode");
     let decoded = decode(&bytes).expect("decode");
@@ -235,10 +240,12 @@ fn pal_2bit_packs_two_pixels_per_byte() {
 fn pal_4bit_packs_two_nibbles_per_byte() {
     // Eight pixels at 4-bit packing. Source 0..8 → 0x01 0x23 0x45 0x67
     // packed.
-    let src =
-        PngImage::packed(8, 1, PngPixelFormat::Pal8, 8, vec![0, 1, 2, 3, 4, 5, 6, 7]).with_palette(
-            Palette::from_rgb(&(0..8 * 3).map(|i| i as u8).collect::<Vec<u8>>(), None),
-        );
+    let src = PngImage::packed(8, 1, PngPixelFormat::Pal8, 8, vec![0, 1, 2, 3, 4, 5, 6, 7])
+        .unwrap()
+        .with_palette(Palette::from_rgb(
+            &(0..8 * 3).map(|i| i as u8).collect::<Vec<u8>>(),
+            None,
+        ));
     let opts = EncodeOptions::default().with_bit_depth(Some(4));
     let bytes = encode(&src, &opts).expect("encode");
     let decoded = decode(&bytes).expect("decode");
@@ -249,7 +256,7 @@ fn pal_4bit_packs_two_nibbles_per_byte() {
 
 #[test]
 fn rejects_subbyte_on_rgb_source() {
-    let src = PngImage::packed(2, 1, PngPixelFormat::Rgb24, 6, vec![0u8; 6]);
+    let src = PngImage::packed(2, 1, PngPixelFormat::Rgb24, 6, vec![0u8; 6]).unwrap();
     let opts = EncodeOptions::default().with_bit_depth(Some(4));
     let err = encode(&src, &opts).expect_err("sub-byte on RGB must be rejected");
     let msg = format!("{err}");
@@ -261,7 +268,7 @@ fn rejects_subbyte_on_rgb_source() {
 
 #[test]
 fn rejects_subbyte_on_rgba_source() {
-    let src = PngImage::packed(2, 1, PngPixelFormat::Rgba, 8, vec![0u8; 8]);
+    let src = PngImage::packed(2, 1, PngPixelFormat::Rgba, 8, vec![0u8; 8]).unwrap();
     let opts = EncodeOptions::default().with_bit_depth(Some(2));
     assert!(encode(&src, &opts).is_err());
 }
@@ -269,7 +276,7 @@ fn rejects_subbyte_on_rgba_source() {
 #[test]
 fn rejects_sample_overflowing_bit_depth_cap() {
     // 2-bit source must be in 0..=3; a value of 4 trips the cap check.
-    let src = PngImage::packed(4, 1, PngPixelFormat::Gray8, 4, vec![0, 1, 2, 4]);
+    let src = PngImage::packed(4, 1, PngPixelFormat::Gray8, 4, vec![0, 1, 2, 4]).unwrap();
     let opts = EncodeOptions::default().with_bit_depth(Some(2));
     let err = encode(&src, &opts).expect_err("overflow must be rejected");
     let msg = format!("{err}");
@@ -293,7 +300,7 @@ fn rejects_unsupported_bit_depth_value() {
 
 #[test]
 fn bit_depth_8_is_a_no_op_for_gray_and_pal() {
-    let src_gray = PngImage::packed(3, 1, PngPixelFormat::Gray8, 3, vec![10, 20, 30]);
+    let src_gray = PngImage::packed(3, 1, PngPixelFormat::Gray8, 3, vec![10, 20, 30]).unwrap();
     let opts = EncodeOptions::default().with_bit_depth(Some(8));
     let bytes = encode(&src_gray, &opts).expect("encode");
     let decoded = decode(&bytes).expect("decode");

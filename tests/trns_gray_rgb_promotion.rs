@@ -25,7 +25,7 @@ use oxideav_png::{
 
 fn make(w: u32, h: u32, pf: PngPixelFormat, data: Vec<u8>) -> PngImage {
     let bpp = pf.bytes_per_pixel();
-    PngImage::packed(w, h, pf, w as usize * bpp, data)
+    PngImage::packed(w, h, pf, w as usize * bpp, data).unwrap()
 }
 
 /// Splice a new chunk with the given type + payload immediately before
@@ -259,7 +259,9 @@ fn rgba_trns_is_prohibited() {
 fn pal8_trns_with_too_many_entries_rejected() {
     // 2-entry PLTE → tRNS may carry at most 2 alpha values.
     let palette = Palette::from_rgb(&[0, 0, 0, 255, 255, 255], None);
-    let img = PngImage::packed(2, 1, PngPixelFormat::Pal8, 2, vec![0, 1]).with_palette(palette);
+    let img = PngImage::packed(2, 1, PngPixelFormat::Pal8, 2, vec![0, 1])
+        .unwrap()
+        .with_palette(palette);
     let png = encode(&img, &EncodeOptions::default()).expect("encode");
     // Splice an over-long tRNS (3 bytes for a 2-entry PLTE).
     let spliced = splice_chunk_before_idat(&png, b"tRNS", &[0, 64, 128]);
@@ -272,7 +274,9 @@ fn pal8_trns_with_too_many_entries_rejected() {
 fn pal8_trns_shorter_than_plte_accepted_with_trailing_opaque() {
     // 3-entry PLTE + 2-byte tRNS → entry 2 stays opaque per spec.
     let palette = Palette::from_rgb(&[10, 20, 30, 40, 50, 60, 70, 80, 90], None);
-    let img = PngImage::packed(3, 1, PngPixelFormat::Pal8, 3, vec![0, 1, 2]).with_palette(palette);
+    let img = PngImage::packed(3, 1, PngPixelFormat::Pal8, 3, vec![0, 1, 2])
+        .unwrap()
+        .with_palette(palette);
     let png = encode(&img, &EncodeOptions::default()).expect("encode");
     let spliced = splice_chunk_before_idat(&png, b"tRNS", &[0x10, 0x80]);
     // The encoder will have already written its own tRNS (none — palette

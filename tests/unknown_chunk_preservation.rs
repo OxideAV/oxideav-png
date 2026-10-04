@@ -24,6 +24,7 @@ fn rgba_2x2() -> PngImage {
             255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ],
     )
+    .unwrap()
 }
 
 /// Append a length|type|data|CRC chunk to `out` using the production

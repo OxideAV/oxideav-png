@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Fallible constructors (`IMAGE_CRATE_API` fleet sweep, breaking).**
+  `PngImage::new` / `packed` / `from_rgb8` / `from_rgba8` return
+  `Result<PngImage, PngError>` and reject a zero dimension, a plane
+  count other than one, a stride shorter than the row, or a buffer
+  shorter than `(height − 1) × stride + row` with `InvalidData`, so an
+  image that exists is always consistent. Callers append `?` (or
+  `.unwrap()` for literal test data); the infallible signatures are not
+  kept.
+- `PngImage::from_video_frame` and `TryFrom<(&VideoFrame,
+  &CodecParameters)>` return `PngError` instead of
+  `oxideav_core::Error` (contract ruling); the registry adapter maps it.
+- `encode_apng*` and `encode_apng_frames*` now write the canvas source
+  image's `color` / `metadata` / `transparency` as chunks exactly as
+  `encode` does for a still (`sRGB` / `cICP` / `gAMA` / `iCCP` / `eXIf`
+  / XMP `iTXt` / `tRNS`); previously only `EncodeOptions::metadata`
+  reached an APNG.
+
+### Added
+
+- `encode_all(&[Frame], &EncodeOptions)`, the mirror of `decode_all`: a
+  single delay-less frame is a plain PNG, otherwise a full-canvas APNG
+  (canvas = frame 0's geometry / layout, `fcTL` delay = the finest
+  rational fitting 16 bits, loop count from the new
+  `EncodeOptions::num_plays` / `with_num_plays`).
+  `decode_all(encode_all(frames)) == frames` is pinned for
+  whole-millisecond delays. `encode_apng` / `encode_apng_frames` stay
+  as the depth entry points.
+- `Cargo.toml` `exclude = ["/tests", "/fuzz"]` (crates.io 10 MiB cap).
+
 ## [0.1.11](https://github.com/OxideAV/oxideav-png/compare/v0.1.10...v0.1.11) - 2026-10-03
 
 ### Other

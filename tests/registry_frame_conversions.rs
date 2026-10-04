@@ -15,6 +15,7 @@ use oxideav_png::{
 #[test]
 fn image_to_frame_carries_plane_palette_and_colour_signal() {
     let img = PngImage::packed(2, 1, PngPixelFormat::Pal8, 2, vec![0, 1])
+        .unwrap()
         .with_palette(Palette::from_rgb(&[1, 2, 3, 4, 5, 6], Some(&[7])))
         .with_color(ColorInfo::new(ColorRange::Full, 9, 16, 0));
     let frame = VideoFrame::from(&img);
@@ -29,7 +30,7 @@ fn image_to_frame_carries_plane_palette_and_colour_signal() {
     assert_eq!(sig.range, oxideav_core::ColorRange::Full);
 
     // The default colour description attaches nothing.
-    let plain = VideoFrame::from(PngImage::from_rgba8(1, 1, vec![1, 2, 3, 4]));
+    let plain = VideoFrame::from(PngImage::from_rgba8(1, 1, vec![1, 2, 3, 4]).unwrap());
     assert_eq!(plain.planes.len(), 1);
     assert!(plain.color_signal().is_none());
     assert!(plain.palette().is_none());
@@ -65,6 +66,7 @@ fn frame_to_image_reads_the_side_channels_back() {
 #[test]
 fn trait_decoder_and_encoder_are_thin_adapters_over_the_standalone_fns() {
     let img = PngImage::from_rgb8(2, 2, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+        .unwrap()
         .with_color(ColorInfo::srgb());
     let bytes = encode(&img, &EncodeOptions::default()).unwrap();
 

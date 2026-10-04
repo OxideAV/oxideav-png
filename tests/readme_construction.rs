@@ -11,7 +11,8 @@ use oxideav_png::{
 
 #[test]
 fn readme_construction_example_encodes_and_round_trips() {
-    let image = PngImage::packed(2, 1, PngPixelFormat::Rgb24, 6, vec![255, 0, 0, 0, 255, 0]);
+    let image =
+        PngImage::packed(2, 1, PngPixelFormat::Rgb24, 6, vec![255, 0, 0, 0, 255, 0]).unwrap();
     let meta = PngMetadata::default()
         .with_gama(Gama::new(45_455))
         .with_texts(vec![Text::new("Software".into(), "oxideav".into())]);

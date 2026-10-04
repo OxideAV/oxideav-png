@@ -65,7 +65,7 @@ fn synth(width: u32, height: u32, pf: PngPixelFormat) -> PngImage {
             px[7] = 0xC0;
         }
     }
-    PngImage::packed(width, height, pf, row_bytes, data)
+    PngImage::packed(width, height, pf, row_bytes, data).unwrap()
 }
 
 /// ImageMagick raw-dump spec for a layout: (`magick` output format,

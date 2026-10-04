@@ -240,7 +240,7 @@ fn solid_frame(width: u32, height: u32, format: PngPixelFormat, seed: u8) -> Png
     for _ in 0..(width as usize * height as usize) {
         data.extend_from_slice(&pixel);
     }
-    PngImage::packed(width, height, format, stride, data)
+    PngImage::packed(width, height, format, stride, data).expect("synthetic image geometry is valid")
 }
 
 enum Plan {

@@ -15,7 +15,7 @@ use oxideav_png::{
 };
 
 fn rgba_image(w: u32, h: u32, data: Vec<u8>) -> PngImage {
-    PngImage::packed(w, h, PngPixelFormat::Rgba, w as usize * 4, data)
+    PngImage::packed(w, h, PngPixelFormat::Rgba, w as usize * 4, data).unwrap()
 }
 
 /// The §13.16 linear-light composite of `fg` over `bg` at 8-bit straight
@@ -112,6 +112,7 @@ fn bkgd_palette_index_composites_transparent_entry() {
     // Two-pixel indexed image: pixel0 = idx0 (opaque red), pixel1 = idx2
     // (transparent blue).
     let img = PngImage::packed(2, 1, PngPixelFormat::Pal8, 2, vec![0, 2])
+        .unwrap()
         .with_palette(oxideav_png::Palette::from_rgb(&palette, None));
     let opts = EncodeOptions::default().with_metadata(Some(
         PngMetadata::default()

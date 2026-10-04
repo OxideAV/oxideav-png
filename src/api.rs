@@ -111,6 +111,59 @@ pub fn decode_all_with(bytes: &[u8], opts: &DecodeOptions) -> Result<Vec<Frame>>
         .collect())
 }
 
+/// Encode `frames` as one file — the mirror of [`decode_all`]. A single
+/// frame with no delay is written as a plain PNG; anything else as an
+/// APNG whose canvas is the first frame's geometry, every frame
+/// painted full-canvas (`Disposal::None` / `Blend::Source`), so every
+/// frame must share the first one's `width` / `height` / `format`
+/// (and palette, for `Pal8`). The loop count is
+/// [`EncodeOptions::num_plays`].
+///
+/// A frame's `delay` becomes the finest `fcTL` rational whose
+/// numerator fits 16 bits — milliseconds up to 65.535 s, then
+/// centiseconds, tenths and whole seconds (capped at 65535 s); `None`
+/// writes `0/100` (the shortest delay the viewer supports, which
+/// [`decode_all`] reads back as `Some(0)`). `decode_all(encode_all(f))
+/// == f` therefore holds for frames with whole-millisecond delays.
+///
+/// The depth entry points [`crate::encode_apng`] (one shared delay) and
+/// [`crate::encode_apng_frames`] (sub-regions, dispose / blend, a
+/// separate default image) stay for callers who need them.
+pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
+    match frames {
+        [] => Err(Error::invalid(
+            "PNG encoder: encode_all needs at least one frame",
+        )),
+        [single] if single.delay.is_none() => encode_image(&single.image, opts),
+        _ => {
+            let regions: Vec<(&PngImage, u16, u16)> = frames
+                .iter()
+                .map(|f| {
+                    let (num, den) = fctl_delay(f.delay);
+                    (&f.image, num, den)
+                })
+                .collect();
+            crate::encoder::encode_apng_full_canvas(&regions, opts.num_plays, opts)
+        }
+    }
+}
+
+/// `fcTL` `delay_num / delay_den` for a frame delay: the finest of
+/// 1/1000, 1/100, 1/10 and 1 s whose numerator fits `u16`.
+fn fctl_delay(delay: Option<std::time::Duration>) -> (u16, u16) {
+    let Some(delay) = delay else {
+        return (0, 100);
+    };
+    let micros = delay.as_micros();
+    for den in [1000u128, 100, 10, 1] {
+        let num = micros * den / 1_000_000;
+        if let Ok(num) = u16::try_from(num) {
+            return (num, den as u16);
+        }
+    }
+    (u16::MAX, 1)
+}
+
 /// Read `r` to its end and [`decode`] the bytes.
 pub fn decode_from<R: Read>(mut r: R) -> Result<PngImage> {
     let mut buf = Vec::new();
@@ -128,14 +181,14 @@ pub fn encode(image: &PngImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
 /// colour-type-2 PNG.
 pub fn encode_rgb8(width: u32, height: u32, rgb: &[u8], opts: &EncodeOptions) -> Result<Vec<u8>> {
     check_raw_len(width, height, 3, rgb.len())?;
-    encode_image(&PngImage::from_rgb8(width, height, rgb.to_vec()), opts)
+    encode_image(&PngImage::from_rgb8(width, height, rgb.to_vec())?, opts)
 }
 
 /// Encode tightly packed 8-bit RGBA (`4 × width × height` bytes) as a
 /// colour-type-6 PNG.
 pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8], opts: &EncodeOptions) -> Result<Vec<u8>> {
     check_raw_len(width, height, 4, rgba.len())?;
-    encode_image(&PngImage::from_rgba8(width, height, rgba.to_vec()), opts)
+    encode_image(&PngImage::from_rgba8(width, height, rgba.to_vec())?, opts)
 }
 
 /// [`encode`] straight into a writer.

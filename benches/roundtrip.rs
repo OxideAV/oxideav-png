@@ -54,7 +54,7 @@ fn build_rgba(width: u32, height: u32) -> PngImage {
             data[idx + 3] = 0xff;
         }
     }
-    PngImage::packed(width, height, PngPixelFormat::Rgba, w * 4, data)
+    PngImage::packed(width, height, PngPixelFormat::Rgba, w * 4, data).unwrap()
 }
 
 fn build_rgb24(width: u32, height: u32) -> PngImage {
@@ -73,7 +73,7 @@ fn build_rgb24(width: u32, height: u32) -> PngImage {
             data[idx + 2] = base_x.min(255) as u8;
         }
     }
-    PngImage::packed(width, height, PngPixelFormat::Rgb24, w * 3, data)
+    PngImage::packed(width, height, PngPixelFormat::Rgb24, w * 3, data).unwrap()
 }
 
 fn build_gray8(width: u32, height: u32) -> PngImage {
@@ -88,7 +88,7 @@ fn build_gray8(width: u32, height: u32) -> PngImage {
                 (base_x.min(255) as u8).wrapping_add(xorshift_byte(&mut state) & 0x07);
         }
     }
-    PngImage::packed(width, height, PngPixelFormat::Gray8, w, data)
+    PngImage::packed(width, height, PngPixelFormat::Gray8, w, data).unwrap()
 }
 
 fn build_rgb48(width: u32, height: u32) -> PngImage {
@@ -109,7 +109,7 @@ fn build_rgb48(width: u32, height: u32) -> PngImage {
             data[idx + 5] = (bb >> 8) as u8;
         }
     }
-    PngImage::packed(width, height, PngPixelFormat::Rgb48Le, w * 6, data)
+    PngImage::packed(width, height, PngPixelFormat::Rgb48Le, w * 6, data).unwrap()
 }
 
 fn bench_roundtrip_rgba_1920x1080(c: &mut Criterion) {
