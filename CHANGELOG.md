@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12](https://github.com/OxideAV/oxideav-png/compare/v0.1.11...v0.1.12) - 2026-10-05
+
+### Other
+
+- APNG container timing honours the stream time base (exact fcTL fractions both ways)
+- fallible constructors, encode_all for APNG, from_video_frame returns PngError, exclude tests/fuzz
+- README examples use the current registry API
+- gray layouts accept any YUV matrix (luma is matrix-invariant), write cICP matrix 0
+
 ### Fixed
 
 - **APNG container timing honours the stream time base.** The `png`
