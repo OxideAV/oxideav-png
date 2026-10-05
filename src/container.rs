@@ -8,6 +8,20 @@
 //! that animation frame's pixel data (so a downstream decoder can decode
 //! each packet independently).
 //!
+//! Timing: an `fcTL` delay is the rational `delay_num / delay_den`
+//! seconds (W3C PNG3 §11.3.6.1; `delay_den = 0` means 100). The demuxer
+//! picks the stream `time_base` as `1 / lcm(delay_den…)` over the file's
+//! frames — `1/100` for the common centisecond files — so every frame's
+//! `duration` is exact in ticks (a zero delay is one tick), and a file
+//! whose denominators do not fit (lcm above 10⁶) falls back to `1/1000`
+//! with rounding. The muxer honours the stream (or packet) `time_base`
+//! the other way: a packet's `duration` becomes the fraction
+//! `duration × num / den` in the stream's own denominator when the
+//! `u16` `fcTL` fields hold it (so the file demuxes back at the same
+//! tick: `demux(mux(frames))` returns the input `duration`s and
+//! `time_base`), reduced by the gcd only when they do not, and
+//! approximated at `delay_den = 65535` as a last resort.
+//!
 //! The `CodecParameters::extradata` carries the original IHDR bytes plus,
 //! for palettised PNGs, the PLTE and tRNS chunk data concatenated in that
 //! order (layout: `[IHDR (13 bytes)] [PLTE ...] [tRNS ...]`, with length
@@ -131,7 +145,11 @@ fn open_demuxer(
     params.pixel_format = Some(to_core_pixel_format(ihdr.output_pixel_format()?));
     params.extradata = extradata;
 
-    let time_base = TimeBase::new(1, 100);
+    let time_base = if has_actl {
+        apng_time_base(&chunks)?
+    } else {
+        TimeBase::new(1, 100)
+    };
     let packets = if has_actl {
         build_apng_packets(&buf, &chunks, time_base)?
     } else {
@@ -164,6 +182,80 @@ fn open_demuxer(
         pos: 0,
         metadata,
     }))
+}
+
+/// Largest `lcm` the demux tick accepts before falling back to `1/1000`.
+const MAX_TICK_DEN: i64 = 1_000_000;
+
+/// The stream time base of an APNG: `1 / lcm` of every frame's
+/// `delay_den` (`0` → 100 per the spec), so each `fcTL` delay is an
+/// exact tick count; `1/1000` when the denominators do not fit.
+fn apng_time_base(chunks: &[ChunkRef<'_>]) -> Result<TimeBase> {
+    let mut den: i64 = 1;
+    for c in chunks.iter().filter(|c| c.is_type(b"fcTL")) {
+        let fctl = crate::apng::Fctl::parse(c.data)?;
+        let d = i64::from(fctl.delay_den.max(1));
+        den = lcm(den, d);
+        if den > MAX_TICK_DEN {
+            return Ok(TimeBase::new(1, 1000));
+        }
+    }
+    Ok(TimeBase::new(1, if den == 1 { 100 } else { den }))
+}
+
+fn gcd(mut a: i64, mut b: i64) -> i64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a.max(1)
+}
+
+fn lcm(a: i64, b: i64) -> i64 {
+    a / gcd(a, b) * b
+}
+
+/// An `fcTL` delay in ticks of `tb` (round to nearest when the tick does
+/// not divide the delay; a zero delay is one tick — "as quickly as
+/// possible", the viewer's lower bound).
+fn fctl_ticks(fctl: &crate::apng::Fctl, tb: TimeBase) -> i64 {
+    let den = i64::from(fctl.delay_den.max(1));
+    let num = i64::from(fctl.delay_num);
+    // ticks = num / den seconds ÷ (tb.num / tb.den) seconds per tick.
+    let n = (num as i128) * (tb.0.den.max(1) as i128);
+    let d = (den as i128) * (tb.0.num.max(1) as i128);
+    let ticks = (n + d / 2) / d;
+    i64::try_from(ticks).unwrap_or(i64::MAX).max(1)
+}
+
+/// The `fcTL` `(delay_num, delay_den)` of a packet `duration` in ticks
+/// of `tb`: the fraction `duration × num / den` seconds in the stream's
+/// own denominator when both fit `u16` (the file then demuxes back at
+/// the same tick), else reduced by the gcd; a denominator still above
+/// 65535 is scaled down with the numerator rounded, a delay above
+/// 65535 s saturates.
+fn fctl_delay(duration: i64, tb: TimeBase) -> (u16, u16) {
+    let mut num = (duration.max(0) as i128) * (tb.0.num.max(0) as i128);
+    let mut den = (tb.0.den.max(1)) as i128;
+    if num > 65_535 || den > 65_535 {
+        let g = {
+            let (mut a, mut b) = (num, den);
+            while b != 0 {
+                (a, b) = (b, a % b);
+            }
+            a.max(1)
+        };
+        num /= g;
+        den /= g;
+    }
+    if den > 65_535 {
+        // Approximate with the largest denominator the field holds.
+        num = (num * 65_535 + den / 2) / den;
+        den = 65_535;
+    }
+    if num > 65_535 {
+        return (u16::MAX, 1);
+    }
+    (num as u16, den as u16)
 }
 
 /// Lift the raw IHDR data bytes (13 bytes) out of the chunk list.
@@ -254,7 +346,7 @@ fn build_apng_packets(
                         pts,
                         &fctl,
                     )?;
-                    let delay = fctl.delay_centiseconds().max(1) as i64;
+                    let delay = fctl_ticks(&fctl, time_base);
                     pts += delay;
                     let mut p = pkt;
                     p.duration = Some(delay);
@@ -291,7 +383,7 @@ fn build_apng_packets(
     crate::apng::validate_apng_sequence(&seq_stream)?;
     if let Some(fctl) = pending_fctl.take() {
         let pkt = build_still_png_packet(ihdr, plte, trns, &pending_data, time_base, pts, &fctl)?;
-        let delay = fctl.delay_centiseconds().max(1) as i64;
+        let delay = fctl_ticks(&fctl, time_base);
         let mut p = pkt;
         p.duration = Some(delay);
         packets.push(p);
@@ -369,7 +461,11 @@ impl Demuxer for PngDemuxer {
     }
 
     fn duration_micros(&self) -> Option<i64> {
-        self.stream.duration.map(|d| d * 10_000)
+        let tb = self.stream.time_base.0;
+        self.stream.duration.map(|d| {
+            let us = (d as i128) * 1_000_000 * (tb.num.max(0) as i128) / (tb.den.max(1) as i128);
+            i64::try_from(us).unwrap_or(i64::MAX)
+        })
     }
 }
 
@@ -452,7 +548,10 @@ impl Muxer for PngMuxer {
 /// Take N standalone-PNG packets produced by the demuxer's APNG split and
 /// re-assemble them into a single APNG file. Extracts IDATs, rewrites them
 /// as fdATs for frames 1..N, and inserts matching fcTL chunks between them.
-fn merge_still_packets_to_apng(packets: &[Packet], _stream: &StreamInfo) -> Result<Vec<u8>> {
+/// Each frame's delay is its packet `duration` in the packet's `time_base`
+/// (the stream's when the packet carries none), written as the
+/// `delay_num / delay_den` fraction of that tick (see [`fctl_delay`]).
+fn merge_still_packets_to_apng(packets: &[Packet], stream: &StreamInfo) -> Result<Vec<u8>> {
     use crate::apng::{Actl, Blend, Disposal, Fctl};
 
     if packets.is_empty() {
@@ -465,7 +564,7 @@ fn merge_still_packets_to_apng(packets: &[Packet], _stream: &StreamInfo) -> Resu
         plte: Option<Vec<u8>>,
         trns: Option<Vec<u8>>,
         idat: Vec<u8>,
-        duration: i64,
+        delay: (u16, u16),
     }
     let mut stills: Vec<ParsedStill> = Vec::new();
     for p in packets {
@@ -491,12 +590,17 @@ fn merge_still_packets_to_apng(packets: &[Packet], _stream: &StreamInfo) -> Resu
                 idat.extend_from_slice(c.data);
             }
         }
+        let tb = if p.time_base.0.num > 0 && p.time_base.0.den > 0 {
+            p.time_base
+        } else {
+            stream.time_base
+        };
         stills.push(ParsedStill {
             ihdr,
             plte,
             trns,
             idat,
-            duration: p.duration.unwrap_or(1),
+            delay: fctl_delay(p.duration.unwrap_or(1), tb),
         });
     }
 
@@ -530,8 +634,8 @@ fn merge_still_packets_to_apng(packets: &[Packet], _stream: &StreamInfo) -> Resu
             height: s.ihdr.height,
             x_offset: 0,
             y_offset: 0,
-            delay_num: s.duration as u16,
-            delay_den: 100,
+            delay_num: s.delay.0,
+            delay_den: s.delay.1,
             dispose_op: Disposal::None,
             blend_op: Blend::Source,
         };
@@ -643,6 +747,55 @@ mod tests {
         write_chunk(&mut out, b"IEND", &[]);
         let chunks = parse_all_chunks(&out).unwrap();
         validate_apng_chunk_placement(&chunks).is_ok()
+    }
+
+    #[test]
+    fn fctl_delay_keeps_the_stream_tick_when_the_fields_hold_it() {
+        // 100 / 200 / 50 ms in a 1/1000 stream: the stream's denominator.
+        assert_eq!(fctl_delay(100, TimeBase::new(1, 1000)), (100, 1000));
+        assert_eq!(fctl_delay(200, TimeBase::new(1, 1000)), (200, 1000));
+        assert_eq!(fctl_delay(50, TimeBase::new(1, 1000)), (50, 1000));
+        assert_eq!(fctl_delay(33, TimeBase::new(1, 1000)), (33, 1000));
+        // Centiseconds and frame-rate ticks.
+        assert_eq!(fctl_delay(10, TimeBase::new(1, 100)), (10, 100));
+        assert_eq!(fctl_delay(1, TimeBase::new(1, 30)), (1, 30));
+        assert_eq!(fctl_delay(2, TimeBase::new(1001, 30000)), (2002, 30000));
+        // Reduced only when a field overflows: 2 s at 1/90000.
+        assert_eq!(fctl_delay(180_000, TimeBase::new(1, 90_000)), (2, 1));
+        // Too fine a denominator is approximated at 65535; a huge delay saturates.
+        let (n, d) = fctl_delay(1, TimeBase::new(1, 90_000));
+        assert_eq!(d, 65_535);
+        assert_eq!(n, 1);
+        assert_eq!(fctl_delay(70_000, TimeBase::new(1, 1)), (65_535, 1));
+        assert_eq!(fctl_delay(0, TimeBase::new(1, 1000)), (0, 1000));
+    }
+
+    #[test]
+    fn fctl_ticks_are_exact_under_the_lcm_tick() {
+        let f = |n: u16, d: u16| Fctl {
+            sequence_number: 0,
+            width: 1,
+            height: 1,
+            x_offset: 0,
+            y_offset: 0,
+            delay_num: n,
+            delay_den: d,
+            dispose_op: Disposal::None,
+            blend_op: Blend::Source,
+        };
+        assert_eq!(fctl_ticks(&f(1, 10), TimeBase::new(1, 20)), 2);
+        assert_eq!(fctl_ticks(&f(1, 20), TimeBase::new(1, 20)), 1);
+        assert_eq!(fctl_ticks(&f(33, 1000), TimeBase::new(1, 1000)), 33);
+        assert_eq!(
+            fctl_ticks(&f(0, 100), TimeBase::new(1, 100)),
+            1,
+            "zero delay = one tick"
+        );
+        // Rounding under the fallback tick.
+        assert_eq!(fctl_ticks(&f(1, 3), TimeBase::new(1, 1000)), 333);
+        assert_eq!(lcm(10, 20), 20);
+        assert_eq!(lcm(100, 1000), 1000);
+        assert_eq!(lcm(7, 13), 91);
     }
 
     #[test]

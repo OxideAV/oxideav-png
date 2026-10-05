@@ -319,6 +319,13 @@ bombs, §13.3); inflated metadata bodies are capped at
   `adaptive` / `none` / `sub` / `up` / `average` / `paeth` / `brute`
   (case-insensitive); the empty string maps to `adaptive` so callers
   that set the key without picking a value get the default.
+- Container timing (`registry`): the `png` demuxer's stream tick is
+  `1 / lcm(delay_den…)` of the file's `fcTL`s — `1/100` for centisecond
+  files — so every frame `duration` is exact; the `png` muxer writes a
+  packet's `duration` as the `fcTL` fraction of the stream's `time_base`
+  (kept in the stream's own denominator when the `u16` fields hold it,
+  reduced otherwise), so `demux(mux(frames))` returns the input ticks
+  and time base for 1/1000, 1/100 or frame-rate streams alike.
 - APNG output when multiple frames submitted or `frame_rate` is set.
   `encode_apng` paints every frame full-canvas with `Disposal::None` /
   `Blend::Source` and a single shared delay. The region-aware

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **APNG container timing honours the stream time base.** The `png`
+  muxer wrote every frame's `fcTL` as `duration / 100` whatever the
+  stream's `time_base` (a 1/1000 stream's 100 ms frame became 1 s); it
+  now writes the exact reduced fraction `duration × num / den` of the
+  packet's (else the stream's) time base into `delay_num / delay_den`
+  (fitted into the `u16` fields: 100 / 200 / 50 ms → 1/10, 1/5, 1/20).
+  The demuxer's tick is `1 / lcm(delay_den…)` of the file — `1/100` for
+  centisecond files, as before — so each frame's `duration` is exact
+  (a zero delay is one tick; denominators whose lcm exceeds 10⁶ fall
+  back to `1/1000` with rounding), and `duration_micros` follows the
+  real time base. `demux(mux(frames)).delays == input` is pinned for
+  1/1000, 1/100, 1/30 and 1001/30000 streams.
+
 ### Changed
 
 - **Fallible constructors (`IMAGE_CRATE_API` fleet sweep, breaking).**
