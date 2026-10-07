@@ -6,8 +6,10 @@
 //! free-standing functions: it accepts a single video frame per
 //! `send_frame` and emits a full PNG on the first `receive_packet`. If
 //! multiple frames are submitted (`frame_rate` set, or multiple
-//! `send_frame` calls before the first drain), the trailing frames are
-//! buffered and an APNG is produced on `flush`.
+//! `send_frame` calls before the first drain), an APNG is produced on
+//! `flush`. Each frame is compressed in its `send_frame`, read in place
+//! from the caller's frame, so the encoder never buffers a frame's
+//! pixels.
 //!
 //! The IDAT / fdAT pixel stream is zlib-compressed at the level set by
 //! [`EncodeOptions::compression_level`] (`1..=9`); `None` selects
@@ -360,6 +362,8 @@ pub(crate) fn encode_view_into(
 /// splitting a chunk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Cut {
+    /// After the signature and the `IHDR` chunk.
+    AfterIhdr,
     /// After the last chunk before the pixel data; `out` ends where the
     /// `IDAT` chunk will start.
     BeforeIdat,
@@ -370,12 +374,17 @@ pub(crate) enum Cut {
 }
 
 /// Write `image` as a PNG file at the end of `out`, calling `cut` with
-/// `out` at each [`Cut`] in turn. A buffering caller passes a no-op; a
-/// streaming caller drains `out` to its writer there, so `out` holds
-/// one run at a time. The `IDAT` chunk is one run, held whole, because
-/// a chunk's length field precedes its data (RFC 2083 §3.2). Options
-/// and metadata are checked before the first cut. On error `out` may
-/// hold a partial file; the caller discards it.
+/// `out` at each [`Cut`] in turn (a caller may record where the parts
+/// of the file lie). A buffering caller passes a no-op; a streaming
+/// caller drains `out` to its writer there, so `out` holds one run at a
+/// time. The `IDAT` chunk is one run, held whole, because a chunk's
+/// length field precedes its data (RFC 2083 §3.2).
+///
+/// The options are checked before the first cut. The metadata chunks
+/// are written between [`Cut::AfterIhdr`] and [`Cut::BeforeIdat`] and
+/// can fail there, so a streaming caller that must not write a partial
+/// file on a metadata error does not drain at `AfterIhdr`. On error
+/// `out` may hold a partial file; the caller discards it.
 pub(crate) fn write_png(
     image: &ImageRef<'_>,
     opts: &EncodeOptions,
@@ -410,6 +419,7 @@ pub(crate) fn write_png(
     }
     out.extend_from_slice(&PNG_MAGIC);
     write_chunk(out, b"IHDR", &ihdr.to_bytes());
+    cut(Cut::AfterIhdr, out)?;
     // sBIT must precede PLTE + IDAT (RFC 2083 §4.3 / §4.2.6).
     write_metadata_before_plte(out, &chunks)?;
     if let Some(p) = plte_bytes.as_deref() {
@@ -1699,57 +1709,180 @@ pub fn encode_apng_threaded(
     // bracket subsequent frames).
     write_metadata_before_idat(&mut out, &chunks)?;
 
-    let mut seq: u32 = 0;
-    for (idx, frame) in frames.iter().enumerate() {
-        let fctl = Fctl {
-            sequence_number: seq,
-            width: ihdr.width,
-            height: ihdr.height,
-            x_offset: 0,
-            y_offset: 0,
-            delay_num: delay_centiseconds,
-            delay_den: 100,
-            dispose_op: Disposal::None,
-            blend_op: Blend::Source,
-        };
-        write_chunk(&mut out, b"fcTL", &fctl.to_bytes());
-        seq += 1;
-
-        // Same four filter sites as the standalone encoder (RFC 2083
-        // §A.8 sub-image-per-pass rule for the interlaced forms),
-        // streamed straight into the IDAT / fdAT chunk.
-        if idx == 0 {
-            // First frame is the default image → IDAT.
-            write_pixel_stream(
-                &mut out,
-                b"IDAT",
-                &[],
-                &frame.view(),
-                &ihdr,
-                row_bytes,
-                opts,
-                level,
-                threads,
-            )?;
-        } else {
-            write_pixel_stream(
-                &mut out,
-                b"fdAT",
-                &seq.to_be_bytes(),
-                &frame.view(),
-                &ihdr,
-                row_bytes,
-                opts,
-                level,
-                threads,
-            )?;
-            seq += 1;
-        }
+    // Same four filter sites as the standalone encoder (RFC 2083
+    // §A.8 sub-image-per-pass rule for the interlaced forms),
+    // streamed straight into the IDAT / fdAT chunk. The first frame is
+    // the default image: its fcTL (sequence 0) precedes the IDAT.
+    let fctl = Fctl::new(0, ihdr.width, ihdr.height).with_delay(delay_centiseconds, 100);
+    write_chunk(&mut out, b"fcTL", &fctl.to_bytes());
+    write_pixel_stream(
+        &mut out,
+        b"IDAT",
+        &[],
+        &frames[0].view(),
+        &ihdr,
+        row_bytes,
+        opts,
+        level,
+        threads,
+    )?;
+    let stream = FrameStream {
+        ihdr,
+        row_bytes,
+        level,
+    };
+    let mut seq: u32 = 1;
+    for frame in &frames[1..] {
+        stream.write_frame(
+            &mut out,
+            &frame.view(),
+            opts,
+            threads,
+            seq,
+            delay_centiseconds,
+            100,
+        )?;
+        seq += 2;
     }
 
     write_metadata_after_idat(&mut out, &chunks);
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
+}
+
+/// How every frame of a full-canvas APNG is compressed: the canvas
+/// IHDR (interlace included), its wire row length and the DEFLATE
+/// level. [`encode_apng_threaded`] and the framework encoder write the
+/// frames after the first through [`Self::write_frame`], so both put
+/// the same bytes on the wire.
+pub(crate) struct FrameStream {
+    ihdr: Ihdr,
+    row_bytes: usize,
+    level: u8,
+}
+
+impl FrameStream {
+    /// The stream for the frames of an animation whose first frame is
+    /// `image`, under `opts`: the IHDR, row length and level
+    /// [`encode_apng_threaded`] derives from its first frame. Reads the
+    /// geometry, layout and palette, never the pixels.
+    pub(crate) fn new(image: &ImageRef<'_>, opts: &EncodeOptions) -> Result<Self> {
+        let (mut ihdr, row_bytes, _, _) = ihdr_and_row_bytes(image, opts)?;
+        if opts.interlace {
+            ihdr.interlace = 1;
+        }
+        Ok(Self {
+            ihdr,
+            row_bytes,
+            level: resolve_compression_level(opts)?,
+        })
+    }
+
+    /// Append one full-canvas frame after the first: its `fcTL`
+    /// numbered `sequence`, then its pixels in an `fdAT` numbered
+    /// `sequence + 1` (W3C PNG3 §4.9.2: one sequence shared by `fcTL`
+    /// and `fdAT`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn write_frame(
+        &self,
+        out: &mut Vec<u8>,
+        image: &ImageRef<'_>,
+        opts: &EncodeOptions,
+        threads: usize,
+        sequence: u32,
+        delay_num: u16,
+        delay_den: u16,
+    ) -> Result<()> {
+        let fctl = crate::apng::Fctl::new(sequence, self.ihdr.width, self.ihdr.height)
+            .with_delay(delay_num, delay_den);
+        write_chunk(out, b"fcTL", &fctl.to_bytes());
+        write_pixel_stream(
+            out,
+            b"fdAT",
+            &(sequence + 1).to_be_bytes(),
+            image,
+            &self.ihdr,
+            self.row_bytes,
+            opts,
+            self.level,
+            threads,
+        )
+    }
+}
+
+/// Where the parts of a still PNG lie in the buffer it was written to,
+/// recorded at [`write_png`]'s cut points, plus the canvas size.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StillLayout {
+    width: u32,
+    height: u32,
+    /// End of the `IHDR` chunk.
+    ihdr_end: usize,
+    /// Start of the `IDAT` chunk.
+    idat_start: usize,
+    /// End of the `IDAT` chunk.
+    idat_end: usize,
+}
+
+/// [`write_png`] for `image` into a fresh buffer, returning the file
+/// and the [`StillLayout`] its cut points recorded.
+pub(crate) fn encode_still(
+    image: &ImageRef<'_>,
+    opts: &EncodeOptions,
+    threads: usize,
+) -> Result<(Vec<u8>, StillLayout)> {
+    let mut layout = StillLayout {
+        width: image.width,
+        height: image.height,
+        ihdr_end: 0,
+        idat_start: 0,
+        idat_end: 0,
+    };
+    let mut still = Vec::new();
+    write_png(image, opts, threads, &mut still, &mut |cut, out| {
+        match cut {
+            Cut::AfterIhdr => layout.ihdr_end = out.len(),
+            Cut::BeforeIdat => layout.idat_start = out.len(),
+            Cut::AfterIdat => layout.idat_end = out.len(),
+            Cut::End => {}
+        }
+        Ok(())
+    })?;
+    Ok((still, layout))
+}
+
+/// Turn a still from [`encode_still`] into the full-canvas APNG of
+/// `num_frames` frames whose first frame is that image: `acTL` after
+/// the `IHDR`, the first frame's `fcTL` (sequence 0, `delay_num /
+/// delay_den`) before the `IDAT`, and `later_frames` (the `fcTL` /
+/// `fdAT` pairs of the other frames, as [`FrameStream::write_frame`]
+/// writes them) after it. The result is the file
+/// [`encode_apng_threaded`] writes for the same frames, so a caller can
+/// compress each frame as it arrives and choose between a still and an
+/// animation afterwards. The still and the later frames are copied once
+/// into the new file.
+pub(crate) fn still_to_apng(
+    still: &[u8],
+    layout: &StillLayout,
+    later_frames: &[u8],
+    num_frames: u32,
+    num_plays: u32,
+    delay_num: u16,
+    delay_den: u16,
+) -> Vec<u8> {
+    let actl = crate::apng::Actl::new(num_frames, num_plays);
+    let first_fctl =
+        crate::apng::Fctl::new(0, layout.width, layout.height).with_delay(delay_num, delay_den);
+    // acTL and fcTL chunks: 12 bytes of framing plus 8 and 26 of data.
+    let mut out = Vec::with_capacity(still.len() + 20 + 38 + later_frames.len());
+    out.extend_from_slice(&still[..layout.ihdr_end]);
+    write_chunk(&mut out, b"acTL", &actl.to_bytes());
+    out.extend_from_slice(&still[layout.ihdr_end..layout.idat_start]);
+    write_chunk(&mut out, b"fcTL", &first_fctl.to_bytes());
+    out.extend_from_slice(&still[layout.idat_start..layout.idat_end]);
+    out.extend_from_slice(later_frames);
+    out.extend_from_slice(&still[layout.idat_end..]);
+    out
 }
 
 // ---- Region-aware APNG encode ------------------------------------------

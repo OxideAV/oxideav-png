@@ -261,9 +261,13 @@ pub fn encode_to<W: Write>(image: &PngImage, opts: &EncodeOptions, mut w: W) -> 
         opts,
         opts.threads.max(1),
         &mut run,
-        &mut |_, run| {
-            w.write_all(run)?;
-            run.clear();
+        &mut |cut, run| {
+            // The signature and IHDR go out with the metadata, so an
+            // error in the metadata leaves the writer untouched.
+            if cut != crate::encoder::Cut::AfterIhdr {
+                w.write_all(run)?;
+                run.clear();
+            }
             Ok(())
         },
     )

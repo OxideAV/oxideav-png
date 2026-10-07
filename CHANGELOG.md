@@ -66,6 +66,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plane and held 1,825,880 bytes at its peak; it now allocates no block
   larger than its 350,549-byte output reservation and peaks at 777,272
   bytes, output included. The output bytes are unchanged.
+- The framework `Encoder` no longer clones each frame in `send_frame`:
+  it compresses the frame there, read in place from the caller's frame,
+  and `flush` emits the PNG, or the APNG when more than one frame was
+  sent or a frame rate is set. Sending, flushing and receiving a
+  512 x 512 RGBA frame allocated a 1,048,576-byte copy of the plane and
+  held 1,826,040 bytes at its peak; it now allocates no block larger
+  than the 350,549-byte output reservation and peaks at 777,272 bytes,
+  output included. The output bytes are unchanged; an APNG is
+  assembled at `flush` with one copy of the compressed frames.
+- A frame the framework `Encoder` cannot encode is now reported by the
+  `send_frame` that carried it; before, every `send_frame` returned
+  `Ok` and the error came from `flush`. As before, the whole file
+  fails: later frames of that file are dropped (their `send_frame`
+  returns `Ok`), `flush` returns the same error, no packet is emitted
+  and no frame is renumbered, and frames sent after that `flush` start
+  a new file. When frames are sent after a `flush` and one fails,
+  `receive_packet` returns the error after any packet already queued,
+  as before. When a file has more than one fault, the error reported
+  is the first one the encoder meets in frame order, which can differ
+  from the one 0.1.12 reported.
 
 ## [0.1.12](https://github.com/OxideAV/oxideav-png/compare/v0.1.11...v0.1.12) - 2026-10-05
 

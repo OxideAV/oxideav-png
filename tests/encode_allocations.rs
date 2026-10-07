@@ -420,4 +420,29 @@ mod registry {
         let img = oxideav_png::decode(&png).unwrap();
         assert_eq!(img.as_bytes().unwrap(), &frame.planes[0].data[..]);
     }
+
+    /// The framework `Encoder`: `send_frame` takes the frame by
+    /// reference, and the encoder must not keep a copy of its pixels.
+    #[test]
+    fn framework_encoder_reads_the_frame_in_place() {
+        use oxideav_core::{CodecId, CodecParameters, Frame};
+        let mut params = CodecParameters::video(CodecId::new("png"));
+        params.width = Some(512);
+        params.height = Some(512);
+        params.pixel_format = Some(PixelFormat::Rgba);
+        let mut enc = oxideav_png::make_encoder(&params).unwrap();
+        let input = Frame::Video(frame());
+        let (packet, s) = measure(|| {
+            enc.send_frame(&input).unwrap();
+            enc.flush().unwrap();
+            enc.receive_packet().unwrap()
+        });
+        report("Encoder trait 512x512 RGBA", &s);
+        assert_no_plane_copy("Encoder trait", &s, packet.data.capacity());
+        let Frame::Video(frame) = input else {
+            unreachable!()
+        };
+        let img = oxideav_png::decode(&packet.data).unwrap();
+        assert_eq!(img.as_bytes().unwrap(), &frame.planes[0].data[..]);
+    }
 }
