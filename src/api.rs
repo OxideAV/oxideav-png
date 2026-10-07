@@ -234,6 +234,18 @@ pub fn encode_plane(
     crate::encoder::encode_view(&image, opts, opts.threads.max(1))
 }
 
+/// [`encode`] appended to `out`, so a caller can reserve the room once
+/// and encode into it, or pack several files into one buffer. The
+/// bytes already in `out` are kept and the file starts at `out.len()`.
+/// When `out` has less spare room than the size [`encode`] reserves up
+/// front (a third of the raw plane plus 1 KiB), that much is reserved;
+/// otherwise the caller's buffer is used as it is and grows only if the
+/// file needs more. On error `out` is truncated back to its original
+/// length.
+pub fn encode_into(image: &PngImage, opts: &EncodeOptions, out: &mut Vec<u8>) -> Result<()> {
+    crate::encoder::encode_into(image, opts, out)
+}
+
 /// [`encode`] straight into a writer.
 pub fn encode_to<W: Write>(image: &PngImage, opts: &EncodeOptions, mut w: W) -> Result<()> {
     let bytes = encode_image(image, opts)?;

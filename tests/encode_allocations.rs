@@ -166,3 +166,30 @@ mod planes {
         assert_eq!(decode(&png).unwrap().as_bytes().unwrap(), &rgba[..]);
     }
 }
+
+/// `encode_into` reserves its size estimate once when the caller's
+/// buffer has less spare room than that, however little is spare.
+mod reserve {
+    use super::*;
+    use oxideav_png::{encode_into, EncodeOptions, PngImage};
+
+    #[test]
+    fn a_buffer_with_a_few_spare_bytes_is_reserved_once() {
+        let data: Vec<u8> = (0..64 * 64 * 3).map(|i| (i % 251) as u8).collect();
+        let img = PngImage::from_rgb8(64, 64, data).unwrap();
+        let opts = EncodeOptions::default();
+        let mut full = Vec::with_capacity(10);
+        full.extend_from_slice(&[7; 10]);
+        let ((), no_spare) = measure(|| encode_into(&img, &opts, &mut full).unwrap());
+        let mut spare = Vec::with_capacity(14);
+        spare.extend_from_slice(&[7; 10]);
+        let ((), four_spare) = measure(|| encode_into(&img, &opts, &mut spare).unwrap());
+        report("encode_into, no spare room", &no_spare);
+        report("encode_into, 4 spare bytes", &four_spare);
+        assert_eq!(full, spare);
+        assert_eq!(
+            four_spare.count, no_spare.count,
+            "the buffer with 4 spare bytes was grown more often than the full one"
+        );
+    }
+}
