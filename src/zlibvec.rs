@@ -1,10 +1,12 @@
-//! One-shot zlib helpers shared by the IDAT / fdAT pixel paths and the
-//! `zTXt` / `iTXt` / `iCCP` metadata chunks.
+//! One-shot zlib helpers: the bounded whole-buffer inflate the decoder
+//! uses for IDAT / fdAT pixel streams and for the `zTXt` / `iTXt` /
+//! `iCCP` metadata chunks, and, in tests only, the whole-buffer deflate
+//! the encoder's streamed output is held to.
 //!
 //! RFC 1950 (zlib) / RFC 1951 (DEFLATE) framing is delegated to
-//! `compcol`, the workspace-wide compression collection. PNG-side code
-//! only ever needs whole-buffer compress / decompress, so these two
-//! thin `Vec<u8>` wrappers are the crate's entire compression surface.
+//! `compcol`, the workspace-wide compression collection. The encoder
+//! does not use these helpers: `crate::zstream` deflates each pixel
+//! stream and each metadata body straight into its chunk.
 //!
 //! Every decompression in this crate is **output-bounded**: a PNG chunk
 //! can be up to 2^31-1 bytes long (W3C PNG3 §13.3 "chunks can be
@@ -17,15 +19,21 @@
 //! `compcol::Error::OutputLimitExceeded` instead of growing the output
 //! without limit.
 
-use crate::error::{PngError, Result};
-use compcol::zlib::{EncoderConfig, Zlib};
+use compcol::zlib::Zlib;
 
 /// Compress `data` into a zlib (RFC 1950) stream at the given DEFLATE
 /// level (1..=9). The crate uses level 6 — the zlib default — for every
 /// stream it emits; PNG leaves the choice entirely to the encoder.
-pub(crate) fn compress_to_vec_zlib(data: &[u8], level: u8) -> Result<Vec<u8>> {
-    compcol::vec::compress_to_vec_with::<Zlib>(data, EncoderConfig { level })
-        .map_err(|e| PngError::invalid(format!("PNG: zlib compression failed: {e:?}")))
+///
+/// The encoder streams every zlib body straight into its chunk
+/// (`crate::zstream`); this one-shot form is the reference the tests
+/// hold those streams to.
+#[cfg(test)]
+pub(crate) fn compress_to_vec_zlib(data: &[u8], level: u8) -> crate::error::Result<Vec<u8>> {
+    compcol::vec::compress_to_vec_with::<Zlib>(data, compcol::zlib::EncoderConfig { level })
+        .map_err(|e| {
+            crate::error::PngError::invalid(format!("PNG: zlib compression failed: {e:?}"))
+        })
 }
 
 /// Decompress a zlib (RFC 1950) stream, refusing to produce more than

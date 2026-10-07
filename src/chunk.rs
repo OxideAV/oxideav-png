@@ -398,8 +398,10 @@ pub fn write_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
 /// `begin` writes a zero length placeholder + the type; every `write`
 /// extends the data and threads the CRC register; `finish` back-patches
 /// the 4-byte length (an error if the data exceeds the RFC 2083 §3.2
-/// `2^31 - 1` limit) and appends the CRC. Dropping a writer without
-/// `finish` leaves a malformed chunk, so callers always finish.
+/// `2^31 - 1` limit) and appends the CRC. A writer dropped without
+/// `finish`, because its caller failed while writing the data, leaves a
+/// partial chunk at the end of `out`: that caller truncates `out` back
+/// to where the chunk began, or discards `out`.
 pub(crate) struct ChunkWriter<'a> {
     out: &'a mut Vec<u8>,
     len_pos: usize,
