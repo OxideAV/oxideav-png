@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `encode_into(&PngImage, &EncodeOptions, &mut Vec<u8>)` appends the
+  file to a caller's buffer and truncates the buffer back to its
+  original length on error. When the buffer has less spare room than
+  the size `encode` reserves up front (a third of the raw plane plus
+  1 KiB), that much is reserved once; otherwise the caller's
+  reservation is used as it is. `encode` calls it.
 - `encode_plane(width, height, PixelFormat, stride, &[u8],
   Option<&Palette>, &EncodeOptions)` encodes a borrowed plane in any
   layout without copying it into a `PngImage`. It writes the file

@@ -289,7 +289,14 @@ pub fn encode_png_image_with_options(image: &PngImage, opts: &EncodeOptions) -> 
 /// one. A `transparency` / `palette` alpha pair that would put two
 /// `tRNS` chunks on the wire is [`crate::PngError::InvalidData`].
 pub fn encode(image: &PngImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
-    encode_threaded(image, opts, opts.threads.max(1))
+    let mut out = Vec::new();
+    encode_into(image, opts, &mut out)?;
+    Ok(out)
+}
+
+/// [`encode`] appended to `out`; see [`crate::encode_into`].
+pub(crate) fn encode_into(image: &PngImage, opts: &EncodeOptions, out: &mut Vec<u8>) -> Result<()> {
+    encode_view_into(&image.view(), opts, opts.threads.max(1), out)
 }
 
 /// The pre-contract spelling of [`encode`] with
@@ -328,6 +335,35 @@ pub(crate) fn encode_view(
     opts: &EncodeOptions,
     threads: usize,
 ) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    encode_view_into(image, opts, threads, &mut out)?;
+    Ok(out)
+}
+
+/// [`encode_view`] appended to `out`. On error `out` is truncated back
+/// to its original length, so a failed encode leaves no partial file.
+pub(crate) fn encode_view_into(
+    image: &ImageRef<'_>,
+    opts: &EncodeOptions,
+    threads: usize,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    let start = out.len();
+    let written = write_png(image, opts, threads, out);
+    if written.is_err() {
+        out.truncate(start);
+    }
+    written
+}
+
+/// Write `image` as a PNG file at the end of `out`. On error `out` may
+/// hold a partial file; the caller discards it.
+fn write_png(
+    image: &ImageRef<'_>,
+    opts: &EncodeOptions,
+    threads: usize,
+    out: &mut Vec<u8>,
+) -> Result<()> {
     let (mut ihdr, row_bytes, plte_bytes, trns_bytes) = ihdr_and_row_bytes(image, opts)?;
     if opts.interlace {
         ihdr.interlace = 1;
@@ -347,28 +383,32 @@ pub(crate) fn encode_view(
 
     // Reserve for the headers plus a typical photographic IDAT (about a
     // third of the raw plane); the reservation is virtual until touched,
-    // so highly compressible content does not pay for it.
+    // so highly compressible content does not pay for it. A caller that
+    // left at least that much spare room keeps its own buffer.
     let raw_len = row_bytes.saturating_mul(image.height as usize);
-    let mut out = Vec::with_capacity(1024 + raw_len / 3);
+    let estimate = 1024 + raw_len / 3;
+    if out.capacity() - out.len() < estimate {
+        out.reserve(estimate);
+    }
     out.extend_from_slice(&PNG_MAGIC);
-    write_chunk(&mut out, b"IHDR", &ihdr.to_bytes());
+    write_chunk(out, b"IHDR", &ihdr.to_bytes());
     // sBIT must precede PLTE + IDAT (RFC 2083 §4.3 / §4.2.6).
-    write_metadata_before_plte(&mut out, meta)?;
+    write_metadata_before_plte(out, meta)?;
     if let Some(p) = plte_bytes.as_deref() {
-        write_chunk(&mut out, b"PLTE", p);
+        write_chunk(out, b"PLTE", p);
     }
     if let Some(t) = trns_bytes.as_deref() {
-        write_chunk(&mut out, b"tRNS", t);
+        write_chunk(out, b"tRNS", t);
     }
     // pHYs + tIME go between PLTE/tRNS and IDAT (pHYs MUST be before
     // IDAT per RFC 2083 §4.2.5; tIME has no ordering constraint but we
     // bucket it here for determinism). sPLT also rides here.
-    write_metadata_before_idat(&mut out, meta)?;
+    write_metadata_before_idat(out, meta)?;
     // The pixel stream is filtered row by row and deflated straight
     // into the IDAT chunk — no filtered-image intermediate, no
     // compressed-stream intermediate.
     write_pixel_stream(
-        &mut out,
+        out,
         b"IDAT",
         &[],
         image,
@@ -378,9 +418,9 @@ pub(crate) fn encode_view(
         level,
         threads,
     )?;
-    write_metadata_after_idat(&mut out, meta);
-    write_chunk(&mut out, b"IEND", &[]);
-    Ok(out)
+    write_metadata_after_idat(out, meta);
+    write_chunk(out, b"IEND", &[]);
+    Ok(())
 }
 
 /// The metadata chunk set `encode` writes for `image` under `opts`:
