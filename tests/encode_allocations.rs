@@ -389,3 +389,35 @@ mod chunks {
         );
     }
 }
+
+/// The registry adapter's `encode_single` on a 512 x 512 RGBA frame:
+/// beyond the compressor's working memory and the output buffer,
+/// nothing plane-sized is allocated.
+#[cfg(feature = "registry")]
+mod registry {
+    use super::planes::{assert_no_plane_copy, gradient};
+    use super::*;
+    use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
+
+    pub(crate) fn frame() -> VideoFrame {
+        VideoFrame {
+            pts: Some(1),
+            planes: vec![VideoPlane {
+                stride: 512 * 4,
+                data: gradient(),
+            }],
+        }
+    }
+
+    #[test]
+    fn encode_single_reads_the_frame_in_place() {
+        let frame = frame();
+        let (png, s) = measure(|| {
+            oxideav_png::encode_single(&frame, 512, 512, PixelFormat::Rgba, &[]).unwrap()
+        });
+        report("encode_single 512x512 RGBA", &s);
+        assert_no_plane_copy("encode_single", &s, png.capacity());
+        let img = oxideav_png::decode(&png).unwrap();
+        assert_eq!(img.as_bytes().unwrap(), &frame.planes[0].data[..]);
+    }
+}
