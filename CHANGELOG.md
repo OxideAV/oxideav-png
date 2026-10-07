@@ -60,6 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the metadata still leaves the writer untouched; after an error in the
   pixel stream or in the writer, the writer may hold the start of the
   file.
+- `encode_single` / `encode_single_with_options` read the frame's plane
+  in place instead of cloning it into a `PngImage`. For a 512 x 512
+  RGBA frame, `encode_single` allocated a 1,048,576-byte copy of the
+  plane and held 1,825,880 bytes at its peak; it now allocates no block
+  larger than its 350,549-byte output reservation and peaks at 777,272
+  bytes, output included. The output bytes are unchanged.
 
 ## [0.1.12](https://github.com/OxideAV/oxideav-png/compare/v0.1.11...v0.1.12) - 2026-10-05
 
