@@ -19,7 +19,7 @@
 //! pins a fixed filter.
 
 use crate::error::{PngError as Error, Result};
-use crate::image::{PngImage, PngPixelFormat};
+use crate::image::{ImageRef, PngImage, PngPixelFormat};
 use crate::metadata::PngMetadata;
 
 // Backward-compat re-export: existing callers reach for
@@ -317,6 +317,17 @@ pub(crate) fn encode_threaded(
     opts: &EncodeOptions,
     threads: usize,
 ) -> Result<Vec<u8>> {
+    encode_view(&image.view(), opts, threads)
+}
+
+/// [`encode_threaded`] for a borrowed image (a [`PngImage`], a caller's
+/// plane, a framework frame): the pixels and the side fields are read
+/// where they lie.
+pub(crate) fn encode_view(
+    image: &ImageRef<'_>,
+    opts: &EncodeOptions,
+    threads: usize,
+) -> Result<Vec<u8>> {
     let (mut ihdr, row_bytes, plte_bytes, trns_bytes) = ihdr_and_row_bytes(image, opts)?;
     if opts.interlace {
         ihdr.interlace = 1;
@@ -395,15 +406,16 @@ pub(crate) fn encode_threaded(
 ///
 /// Returns `None` when the options carry no metadata and the image has
 /// nothing to add, so a plain image encodes exactly as before.
-fn effective_metadata(image: &PngImage, opts: &EncodeOptions) -> Result<Option<PngMetadata>> {
+fn effective_metadata(image: &ImageRef<'_>, opts: &EncodeOptions) -> Result<Option<PngMetadata>> {
     use crate::image::{ColorInfo, ColorRange};
     use crate::metadata::{Cicp, Exif, Gama, Iccp, Itxt, RenderingIntent, Srgb};
 
     let mut meta = opts.metadata.clone().unwrap_or_default();
     let mut added = false;
 
+    let image_meta = image.metadata;
     if meta.gama.is_none() {
-        if let Some(g) = image.metadata.gamma {
+        if let Some(g) = image_meta.and_then(|m| m.gamma) {
             if g.is_finite() && g >= 0.0 {
                 meta.gama = Some(Gama::new((g * 100_000.0).round() as u32));
                 added = true;
@@ -411,18 +423,18 @@ fn effective_metadata(image: &PngImage, opts: &EncodeOptions) -> Result<Option<P
         }
     }
     if meta.iccp.is_none() {
-        if let Some(icc) = &image.metadata.icc {
+        if let Some(icc) = image_meta.and_then(|m| m.icc.as_ref()) {
             meta.iccp = Some(Iccp::new("ICC Profile".to_string(), icc.clone()));
             added = true;
         }
     }
     if meta.exif.is_none() {
-        if let Some(exif) = &image.metadata.exif {
+        if let Some(exif) = image_meta.and_then(|m| m.exif.as_ref()) {
             meta.exif = Some(Exif::new(exif.clone()));
             added = true;
         }
     }
-    if let Some(xmp) = &image.metadata.xmp {
+    if let Some(xmp) = image_meta.and_then(|m| m.xmp.as_ref()) {
         if !meta
             .itxts
             .iter()
@@ -472,7 +484,7 @@ fn effective_metadata(image: &PngImage, opts: &EncodeOptions) -> Result<Option<P
         }
     }
     if meta.trns.is_none() {
-        if let Some(t) = &image.transparency {
+        if let Some(t) = image.transparency {
             meta.trns = Some(t.clone());
             added = true;
         }
@@ -496,7 +508,7 @@ fn write_pixel_stream(
     out: &mut Vec<u8>,
     chunk_type: &[u8; 4],
     prefix: &[u8],
-    image: &PngImage,
+    image: &ImageRef<'_>,
     ihdr: &Ihdr,
     row_bytes: usize,
     opts: &EncodeOptions,
@@ -824,7 +836,7 @@ fn resolve_bit_depth(base: u8, colour_type: u8, opts: &EncodeOptions) -> Result<
 /// is the *packed* on-wire row length (`(width * bit_depth + 7) / 8`)
 /// rather than the source `image.data` row stride. The packing itself
 /// happens in [`flatten_and_normalise_pixels`].
-fn ihdr_and_row_bytes(image: &PngImage, opts: &EncodeOptions) -> Result<IhdrAndRowInfo> {
+fn ihdr_and_row_bytes(image: &ImageRef<'_>, opts: &EncodeOptions) -> Result<IhdrAndRowInfo> {
     let (base_bit_depth, colour_type, channels): (u8, u8, usize) = match image.format {
         PngPixelFormat::Gray8 => (8, 0, 1),
         PngPixelFormat::Gray16Le => (16, 0, 1),
@@ -860,7 +872,7 @@ fn ihdr_and_row_bytes(image: &PngImage, opts: &EncodeOptions) -> Result<IhdrAndR
     // the last non-opaque entry (W3C PNG3 §11.3.1.1 — entries past the
     // tail are opaque, so a longer table would say the same thing).
     let (plte, trns) = if colour_type == 3 {
-        match image.palette.as_ref().filter(|p| !p.is_empty()) {
+        match image.palette.filter(|p| !p.is_empty()) {
             None => {
                 // Default: 1-entry black palette — useful fallback, but
                 // callers normally supply one.
@@ -890,7 +902,7 @@ fn ihdr_and_row_bytes(image: &PngImage, opts: &EncodeOptions) -> Result<IhdrAndR
 /// `ceil(width * bit_depth / 8)` for the sub-byte Gray / indexed cases
 /// and the source layout otherwise.
 fn flatten_and_normalise_pixels(
-    image: &PngImage,
+    image: &ImageRef<'_>,
     ihdr: &Ihdr,
     row_bytes: usize,
 ) -> Result<Vec<u8>> {
@@ -956,7 +968,7 @@ fn flatten_and_normalise_pixels(
 ///
 /// A sample whose top bits exceed the `bit_depth` cap is rejected so
 /// a malformed payload cannot reach the wire.
-fn pack_subbyte_rows(image: &PngImage, bit_depth: u8, row_bytes: usize) -> Result<Vec<u8>> {
+fn pack_subbyte_rows(image: &ImageRef<'_>, bit_depth: u8, row_bytes: usize) -> Result<Vec<u8>> {
     match bit_depth {
         1 => pack_subbyte_rows_const::<1>(image, row_bytes),
         2 => pack_subbyte_rows_const::<2>(image, row_bytes),
@@ -973,7 +985,10 @@ fn pack_subbyte_rows(image: &PngImage, bit_depth: u8, row_bytes: usize) -> Resul
 /// padding the low-order bits with zeros. Sample range validation is
 /// unchanged — the first out-of-range sample in row-major order errors
 /// with its pixel coordinates.
-fn pack_subbyte_rows_const<const BD: usize>(image: &PngImage, row_bytes: usize) -> Result<Vec<u8>> {
+fn pack_subbyte_rows_const<const BD: usize>(
+    image: &ImageRef<'_>,
+    row_bytes: usize,
+) -> Result<Vec<u8>> {
     let h = image.height as usize;
     let w = image.width as usize;
     let stride = image.stride();
@@ -1042,7 +1057,7 @@ pub(crate) struct RowPlane<'a> {
 }
 
 impl<'a> RowPlane<'a> {
-    pub(crate) fn new(image: &'a PngImage, ihdr: &Ihdr, row_bytes: usize) -> Result<Self> {
+    pub(crate) fn new(image: &ImageRef<'a>, ihdr: &Ihdr, row_bytes: usize) -> Result<Self> {
         let height = image.height as usize;
         if ihdr.bit_depth < 8 {
             let packed = pack_subbyte_rows(image, ihdr.bit_depth, row_bytes)?;
@@ -1363,7 +1378,7 @@ fn filter_image_stream_adam7(
 /// [`Ihdr::bpp_for_filter`]) and `strategy` (W3C PNG3 §12.7) to pick the
 /// filter for each pass row.
 fn deflate_encode_pixels_adam7_subbyte(
-    image: &PngImage,
+    image: &ImageRef<'_>,
     ihdr: &Ihdr,
     strategy: FilterStrategy,
     level: u8,
@@ -1398,7 +1413,7 @@ struct PackedPass {
 /// validating each source sample against `(1 << bit_depth) - 1`. The
 /// pack is strategy-independent, so it runs once even under the
 /// [`FilterStrategy::Brute`] multi-candidate search.
-fn pack_subbyte_adam7_passes(image: &PngImage, ihdr: &Ihdr) -> Result<Vec<PackedPass>> {
+fn pack_subbyte_adam7_passes(image: &ImageRef<'_>, ihdr: &Ihdr) -> Result<Vec<PackedPass>> {
     let bd = ihdr.bit_depth as usize;
     let max: u8 = ((1u16 << bd) - 1) as u8;
     let pixels_per_byte = 8 / bd;
@@ -1543,7 +1558,7 @@ pub fn encode_apng_threaded(
             ));
         }
     }
-    let (mut ihdr, row_bytes, plte, trns) = ihdr_and_row_bytes(&frames[0], opts)?;
+    let (mut ihdr, row_bytes, plte, trns) = ihdr_and_row_bytes(&frames[0].view(), opts)?;
     if opts.interlace {
         ihdr.interlace = 1;
     }
@@ -1552,7 +1567,7 @@ pub fn encode_apng_threaded(
     // exactly as `encode` would write them. The IHDR is fixed across
     // the whole APNG so a single resolve on the first-frame palette +
     // metadata covers every frame.
-    let meta = effective_metadata(&frames[0], opts)?;
+    let meta = effective_metadata(&frames[0].view(), opts)?;
     let meta = meta.as_ref();
     let trns = resolve_trns_bytes(&ihdr, trns.as_deref(), meta)?;
     let level = resolve_compression_level(opts)?;
@@ -1603,7 +1618,7 @@ pub fn encode_apng_threaded(
                 &mut out,
                 b"IDAT",
                 &[],
-                frame,
+                &frame.view(),
                 &ihdr,
                 row_bytes,
                 opts,
@@ -1615,7 +1630,7 @@ pub fn encode_apng_threaded(
                 &mut out,
                 b"fdAT",
                 &seq.to_be_bytes(),
-                frame,
+                &frame.view(),
                 &ihdr,
                 row_bytes,
                 opts,
@@ -2009,22 +2024,23 @@ fn encode_apng_regions(
     let palette_src = match default_image {
         Some(d) => d,
         None => frames[0].image,
+    }
+    .view();
+    let canvas_probe = ImageRef {
+        width: canvas_width,
+        height: canvas_height,
+        format: canvas_fmt,
+        stride: canvas_width as usize * canvas_fmt.bytes_per_pixel(),
+        data: &[],
+        ..palette_src
     };
-    let canvas_probe = PngImage::packed_unchecked(
-        canvas_width,
-        canvas_height,
-        canvas_fmt,
-        canvas_width as usize * canvas_fmt.bytes_per_pixel(),
-        Vec::new(),
-    )
-    .with_palette(palette_src.palette.clone());
     let (mut ihdr, _canvas_row_bytes, plte, trns) = ihdr_and_row_bytes(&canvas_probe, opts)?;
     if opts.interlace {
         ihdr.interlace = 1;
     }
     // The canvas source's `color` / `metadata` / `transparency` become
     // chunks exactly as `encode` would write them for a still image.
-    let meta = effective_metadata(palette_src, opts)?;
+    let meta = effective_metadata(&palette_src, opts)?;
     let meta = meta.as_ref();
     let trns = resolve_trns_bytes(&ihdr, trns.as_deref(), meta)?;
     let level = resolve_compression_level(opts)?;
@@ -2059,7 +2075,15 @@ fn encode_apng_regions(
             };
             let row_bytes = region_row_bytes(&sub_ihdr, img.width);
             write_pixel_stream(
-                out, chunk_type, prefix, img, &sub_ihdr, row_bytes, opts, level, threads,
+                out,
+                chunk_type,
+                prefix,
+                &img.view(),
+                &sub_ihdr,
+                row_bytes,
+                opts,
+                level,
+                threads,
             )
         };
 

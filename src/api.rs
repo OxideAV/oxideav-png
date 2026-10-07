@@ -10,7 +10,7 @@ use crate::decoder::{
 };
 use crate::encoder::{encode as encode_image, EncodeOptions};
 use crate::error::{PngError as Error, Result};
-use crate::image::{Frame, ImageInfo, PngImage, RgbImage, RgbaImage};
+use crate::image::{Frame, ImageInfo, ImageRef, PixelFormat, PngImage, RgbImage, RgbaImage};
 use crate::options::DecodeOptions;
 
 /// `true` when `bytes` starts with the eight-byte PNG signature (W3C
@@ -178,17 +178,23 @@ pub fn encode(image: &PngImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
 }
 
 /// Encode tightly packed 8-bit RGB (`3 × width × height` bytes) as a
-/// colour-type-2 PNG.
+/// colour-type-2 PNG. The pixels are read in place, never copied into
+/// a [`PngImage`].
 pub fn encode_rgb8(width: u32, height: u32, rgb: &[u8], opts: &EncodeOptions) -> Result<Vec<u8>> {
     check_raw_len(width, height, 3, rgb.len())?;
-    encode_image(&PngImage::from_rgb8(width, height, rgb.to_vec())?, opts)
+    let stride = packed_stride(width, 3)?;
+    let image = ImageRef::plane(width, height, PixelFormat::Rgb24, stride, rgb)?;
+    crate::encoder::encode_view(&image, opts, opts.threads.max(1))
 }
 
 /// Encode tightly packed 8-bit RGBA (`4 × width × height` bytes) as a
-/// colour-type-6 PNG.
+/// colour-type-6 PNG. The pixels are read in place, never copied into
+/// a [`PngImage`].
 pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8], opts: &EncodeOptions) -> Result<Vec<u8>> {
     check_raw_len(width, height, 4, rgba.len())?;
-    encode_image(&PngImage::from_rgba8(width, height, rgba.to_vec())?, opts)
+    let stride = packed_stride(width, 4)?;
+    let image = ImageRef::plane(width, height, PixelFormat::Rgba, stride, rgba)?;
+    crate::encoder::encode_view(&image, opts, opts.threads.max(1))
 }
 
 /// [`encode`] straight into a writer.
@@ -196,6 +202,15 @@ pub fn encode_to<W: Write>(image: &PngImage, opts: &EncodeOptions, mut w: W) -> 
     let bytes = encode_image(image, opts)?;
     w.write_all(&bytes)?;
     Ok(())
+}
+
+/// Row stride of a tightly packed plane, `width × bpp`, with the error
+/// [`PngImage::from_rgb8`] / [`PngImage::from_rgba8`] give when it
+/// overflows.
+fn packed_stride(width: u32, bpp: usize) -> Result<usize> {
+    (width as usize)
+        .checked_mul(bpp)
+        .ok_or_else(|| Error::invalid("PNG image: row size overflows usize"))
 }
 
 fn check_raw_len(width: u32, height: u32, bpp: usize, len: usize) -> Result<()> {
