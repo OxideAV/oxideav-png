@@ -45,7 +45,9 @@ if oxideav_png::probe(&bytes) {
 | `decode_from` | `fn<R: Read>(R) -> Result<PngImage, Error>` |
 | `encode` | `fn(&PngImage, &EncodeOptions) -> Result<Vec<u8>, Error>` — as given, never a silent conversion |
 | `encode_rgb8` / `encode_rgba8` | `fn(w, h, &[u8], &EncodeOptions)` — colour type 2 / 6 |
-| `encode_to` | `fn<W: Write>(&PngImage, &EncodeOptions, W) -> Result<(), Error>` |
+| `encode_to` | `fn<W: Write>(&PngImage, &EncodeOptions, W) -> Result<(), Error>` - streams the file in three runs; only the `IDAT` chunk is held whole |
+| `encode_into` | `fn(&PngImage, &EncodeOptions, &mut Vec<u8>) -> Result<(), Error>` - appends to the caller's buffer (PNG-specific) |
+| `encode_plane` | `fn(w, h, PixelFormat, stride, &[u8], Option<&Palette>, &EncodeOptions) -> Result<Vec<u8>, Error>` - a borrowed plane in any layout, read in place; `Pal8` needs the palette (PNG-specific) |
 | `PngImage` | `{ width, height, format: PixelFormat, planes: Vec<Plane>, color: ColorInfo, metadata: Metadata, palette: Option<Palette>, transparency: Option<Trns> }` with `new` / `packed` / `from_rgb8` / `from_rgba8` (each `Result`, rejecting geometry / length mismatches with `InvalidData`), `width()` / `height()` / `format()` / `stride()`, `as_bytes()` / `into_raw()`, `to_rgb8()` / `to_rgba8()` |
 | `PixelFormat` | `= PngPixelFormat`: `Gray8`, `Gray16Le`, `Rgb24`, `Rgb48Le`, `Pal8`, `Ya8`, `Rgba`, `Rgba64Le` (names mirror `oxideav_core::PixelFormat`) |
 | `Error` | `= PngError`: `InvalidData`, `Unsupported`, `LimitExceeded`, `Io`, `Eof`, `NeedMore`, `Other` |

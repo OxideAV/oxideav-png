@@ -285,7 +285,8 @@
 //! §11.3.3.4).
 
 use crate::error::{PngError as Error, Result};
-use crate::zlibvec::{compress_to_vec_zlib, decompress_to_vec_zlib_capped};
+use crate::zlibvec::decompress_to_vec_zlib_capped;
+use crate::zstream::compress_zlib_to;
 
 /// Upper bound, in bytes, on the *decompressed* body of a compressed
 /// metadata chunk (`zTXt` text, `iTXt` text, `iCCP` profile).
@@ -1929,28 +1930,71 @@ impl Text {
     /// fits in Latin-1 and isn't a `NUL` — so a malformed `Text` value
     /// can't silently corrupt the output PNG.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let keyword_bytes = validate_keyword(&self.keyword, "tEXt")?;
-        let mut text_bytes = Vec::with_capacity(self.text.len());
-        for ch in self.text.chars() {
-            let cp = ch as u32;
-            if cp > 0xFF {
-                return Err(Error::invalid(format!(
-                    "PNG tEXt: text char U+{cp:04X} is not Latin-1 (single-byte)"
-                )));
-            }
-            if cp == 0 {
-                return Err(Error::invalid(
-                    "PNG tEXt: text string contains a NUL (reserved as keyword separator)",
-                ));
-            }
-            text_bytes.push(cp as u8);
-        }
-        let mut out = Vec::with_capacity(keyword_bytes.len() + 1 + text_bytes.len());
-        out.extend_from_slice(&keyword_bytes);
-        out.push(0);
-        out.extend_from_slice(&text_bytes);
-        Ok(out)
+        collect_payload(|sink| self.write_payload(sink))
     }
+
+    /// [`Self::to_bytes`] handed to `sink` piece by piece, so the
+    /// encoder writes the payload straight into its chunk. On an error
+    /// `sink` may have received the start of the payload.
+    pub(crate) fn write_payload(&self, sink: &mut dyn FnMut(&[u8])) -> Result<()> {
+        let keyword_bytes = validate_keyword(&self.keyword, "tEXt")?;
+        sink(&keyword_bytes);
+        sink(&[0]);
+        feed_latin1(&self.text, "tEXt", sink)
+    }
+}
+
+/// Collect a payload writer's pieces into one buffer: the `to_bytes`
+/// form of the streaming `write_payload` methods.
+fn collect_payload(write: impl FnOnce(&mut dyn FnMut(&[u8])) -> Result<()>) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    write(&mut |bytes| out.extend_from_slice(bytes))?;
+    Ok(out)
+}
+
+/// The `tEXt` / `zTXt` error for a `NUL` in the text of `chunk`.
+fn latin1_nul_error(chunk: &str) -> Error {
+    Error::invalid(format!(
+        "PNG {chunk}: text string contains a NUL (reserved as keyword separator)"
+    ))
+}
+
+/// Hand `text` to `sink` as Latin-1 bytes (one byte per char), in
+/// pieces of at most 4 KiB, so no copy of the whole text is made. A
+/// char above `U+00FF`, or a `NUL`, fails with the `tEXt` / `zTXt` text
+/// error for `chunk`. ASCII text is already its own Latin-1 encoding
+/// and goes through in one piece.
+fn feed_latin1(text: &str, chunk: &str, sink: &mut dyn FnMut(&[u8])) -> Result<()> {
+    if text.is_ascii() {
+        if text.as_bytes().contains(&0) {
+            return Err(latin1_nul_error(chunk));
+        }
+        sink(text.as_bytes());
+        return Ok(());
+    }
+    let mut buf = [0u8; 4096];
+    let mut n = 0;
+    for ch in text.chars() {
+        let cp = ch as u32;
+        if cp > 0xFF {
+            return Err(Error::invalid(format!(
+                "PNG {chunk}: text char U+{cp:04X} is not Latin-1 (single-byte)"
+            )));
+        }
+        if cp == 0 {
+            return Err(latin1_nul_error(chunk));
+        }
+        buf[n] = cp as u8;
+        n += 1;
+        if n == buf.len() {
+            sink(&buf);
+            n = 0;
+        }
+    }
+    if n > 0 {
+        sink(&buf[..n]);
+    }
+    Ok(())
 }
 
 /// `zTXt` payload (RFC 2083 §4.2.10 / W3C PNG3 §11.3.3.3).
@@ -2074,6 +2118,17 @@ impl Ztxt {
     /// every text codepoint (Latin-1 single-byte, no `NUL`) — so a
     /// malformed `Ztxt` value cannot silently corrupt the output PNG.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        collect_payload(|sink| self.write_payload(sink))
+    }
+
+    /// [`Self::to_bytes`] handed to `sink` piece by piece: the compressed
+    /// body reaches `sink` as the compressor produces it, so it is never
+    /// held whole. ASCII text is compressed where it lies; other text is
+    /// first converted to its Latin-1 bytes, because the compressor must
+    /// get its input in one piece to write the same stream (see
+    /// `compress_zlib_to`). On an error `sink` may have received the
+    /// start of the payload.
+    pub(crate) fn write_payload(&self, sink: &mut dyn FnMut(&[u8])) -> Result<()> {
         let keyword_bytes = validate_keyword(&self.keyword, "zTXt")?;
         // Mirror the parse-side inflate bound so every chunk this
         // encoder emits round-trips through its own parser.
@@ -2084,31 +2139,24 @@ impl Ztxt {
                 self.text.len()
             )));
         }
-        let mut text_bytes = Vec::with_capacity(self.text.len());
-        for ch in self.text.chars() {
-            let cp = ch as u32;
-            if cp > 0xFF {
-                return Err(Error::invalid(format!(
-                    "PNG zTXt: text char U+{cp:04X} is not Latin-1 (single-byte)"
-                )));
-            }
-            if cp == 0 {
-                return Err(Error::invalid(
-                    "PNG zTXt: text string contains a NUL (reserved as keyword separator)",
-                ));
-            }
-            text_bytes.push(cp as u8);
-        }
+        sink(&keyword_bytes);
+        // NUL separator, compression method.
+        sink(&[0, Self::COMPRESSION_METHOD_DEFLATE]);
         // Level 6 (the zlib default) matches the encoder's IDAT
         // compression level — we don't yet expose a per-chunk knob, and
         // the spec leaves the choice entirely to the encoder.
-        let compressed = compress_to_vec_zlib(&text_bytes, 6)?;
-        let mut out = Vec::with_capacity(keyword_bytes.len() + 2 + compressed.len());
-        out.extend_from_slice(&keyword_bytes);
-        out.push(0); // NUL separator.
-        out.push(Self::COMPRESSION_METHOD_DEFLATE);
-        out.extend_from_slice(&compressed);
-        Ok(out)
+        if self.text.is_ascii() {
+            if self.text.as_bytes().contains(&0) {
+                return Err(latin1_nul_error("zTXt"));
+            }
+            compress_zlib_to(6, self.text.as_bytes(), sink)
+        } else {
+            let mut latin1 = Vec::with_capacity(self.text.len());
+            feed_latin1(&self.text, "zTXt", &mut |bytes| {
+                latin1.extend_from_slice(bytes)
+            })?;
+            compress_zlib_to(6, &latin1, sink)
+        }
     }
 }
 
@@ -2204,27 +2252,37 @@ impl Iccp {
     /// profile name — so a malformed `Iccp` value cannot silently
     /// corrupt the output PNG.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let name_bytes = validate_keyword(&self.name, "iCCP")?;
-        // Mirror the parse-side inflate bound so every chunk this
-        // encoder emits round-trips through its own parser.
-        if self.profile.len() as u64 > MAX_INFLATED_METADATA_LEN {
-            return Err(Error::invalid(format!(
-                "PNG iCCP: profile length {} exceeds the {MAX_INFLATED_METADATA_LEN}-byte \
-                 decompressed-size bound",
-                self.profile.len()
-            )));
-        }
-        // Level 6 (the zlib default) matches the encoder's IDAT
-        // compression level — we don't yet expose a per-chunk knob, and
-        // the spec leaves the choice entirely to the encoder.
-        let compressed = compress_to_vec_zlib(&self.profile, 6)?;
-        let mut out = Vec::with_capacity(name_bytes.len() + 2 + compressed.len());
-        out.extend_from_slice(&name_bytes);
-        out.push(0); // NUL separator.
-        out.push(Self::COMPRESSION_METHOD_DEFLATE);
-        out.extend_from_slice(&compressed);
-        Ok(out)
+        collect_payload(|sink| write_iccp_payload(&self.name, &self.profile, sink))
     }
+}
+
+/// The `iCCP` payload of [`Iccp::to_bytes`] for a borrowed name and
+/// profile, handed to `sink` piece by piece: the compressed profile
+/// reaches `sink` as the compressor produces it, so the encoder writes
+/// it straight into the chunk and never holds a second copy of the
+/// profile. Every check runs before the first byte reaches `sink`.
+pub(crate) fn write_iccp_payload(
+    name: &str,
+    profile: &[u8],
+    sink: &mut dyn FnMut(&[u8]),
+) -> Result<()> {
+    let name_bytes = validate_keyword(name, "iCCP")?;
+    // Mirror the parse-side inflate bound so every chunk this
+    // encoder emits round-trips through its own parser.
+    if profile.len() as u64 > MAX_INFLATED_METADATA_LEN {
+        return Err(Error::invalid(format!(
+            "PNG iCCP: profile length {} exceeds the {MAX_INFLATED_METADATA_LEN}-byte \
+             decompressed-size bound",
+            profile.len()
+        )));
+    }
+    sink(&name_bytes);
+    // NUL separator, compression method.
+    sink(&[0, Iccp::COMPRESSION_METHOD_DEFLATE]);
+    // Level 6 (the zlib default) matches the encoder's IDAT
+    // compression level — we don't yet expose a per-chunk knob, and
+    // the spec leaves the choice entirely to the encoder.
+    compress_zlib_to(6, profile, sink)
 }
 
 /// `iTXt` payload (W3C PNG3 §11.3.3.4).
@@ -2447,68 +2505,87 @@ impl Itxt {
     /// is ignored by decoders per the spec but we still emit `0` for
     /// determinism.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let keyword_bytes = validate_keyword(&self.keyword, "iTXt")?;
-        // Mirror the parse-side inflate bound so every chunk this
-        // encoder emits round-trips through its own parser.
-        if self.text.len() as u64 > MAX_INFLATED_METADATA_LEN {
+        collect_payload(|sink| self.write_payload(sink))
+    }
+
+    /// [`Self::to_bytes`] handed to `sink` piece by piece; see
+    /// [`write_itxt_payload`].
+    pub(crate) fn write_payload(&self, sink: &mut dyn FnMut(&[u8])) -> Result<()> {
+        write_itxt_payload(
+            &self.keyword,
+            self.compressed,
+            &self.language_tag,
+            &self.translated_keyword,
+            &self.text,
+            sink,
+        )
+    }
+}
+
+/// The `iTXt` payload of [`Itxt::to_bytes`] for borrowed fields, handed
+/// to `sink` piece by piece: the text goes to `sink` as it is, or, when
+/// `compressed`, as the compressor produces it, so the encoder writes
+/// it straight into the chunk without a copy of the text or of the
+/// compressed body. Every check runs before the first byte reaches
+/// `sink`.
+pub(crate) fn write_itxt_payload(
+    keyword: &str,
+    compressed: bool,
+    language_tag: &str,
+    translated_keyword: &str,
+    text: &str,
+    sink: &mut dyn FnMut(&[u8]),
+) -> Result<()> {
+    let keyword_bytes = validate_keyword(keyword, "iTXt")?;
+    // Mirror the parse-side inflate bound so every chunk this
+    // encoder emits round-trips through its own parser.
+    if text.len() as u64 > MAX_INFLATED_METADATA_LEN {
+        return Err(Error::invalid(format!(
+            "PNG iTXt: text length {} exceeds the {MAX_INFLATED_METADATA_LEN}-byte \
+             decompressed-size bound",
+            text.len()
+        )));
+    }
+    // Language tag: ASCII only (BCP47 is ASCII by construction).
+    // Empty is permitted (= "language unspecified", §11.3.3.4).
+    for ch in language_tag.chars() {
+        let cp = ch as u32;
+        if cp > 0x7F {
             return Err(Error::invalid(format!(
-                "PNG iTXt: text length {} exceeds the {MAX_INFLATED_METADATA_LEN}-byte \
-                 decompressed-size bound",
-                self.text.len()
+                "PNG iTXt: language tag char U+{cp:04X} not ASCII"
             )));
         }
-        // Language tag: ASCII only (BCP47 is ASCII by construction).
-        // Empty is permitted (= "language unspecified", §11.3.3.4).
-        for ch in self.language_tag.chars() {
-            let cp = ch as u32;
-            if cp > 0x7F {
-                return Err(Error::invalid(format!(
-                    "PNG iTXt: language tag char U+{cp:04X} not ASCII"
-                )));
-            }
-            if cp == 0 {
-                return Err(Error::invalid(
-                    "PNG iTXt: language tag contains a NUL (reserved as field separator)",
-                ));
-            }
-        }
-        // Translated keyword: UTF-8 (already enforced by String), no NUL.
-        if self.translated_keyword.contains('\0') {
+        if cp == 0 {
             return Err(Error::invalid(
-                "PNG iTXt: translated keyword contains a NUL byte (forbidden per §11.3.3.4)",
+                "PNG iTXt: language tag contains a NUL (reserved as field separator)",
             ));
         }
-        // Text: UTF-8, no NUL.
-        if self.text.contains('\0') {
-            return Err(Error::invalid(
-                "PNG iTXt: text contains a NUL byte (forbidden per §11.3.3.4)",
-            ));
-        }
+    }
+    // Translated keyword: UTF-8 (already enforced by String), no NUL.
+    if translated_keyword.contains('\0') {
+        return Err(Error::invalid(
+            "PNG iTXt: translated keyword contains a NUL byte (forbidden per §11.3.3.4)",
+        ));
+    }
+    // Text: UTF-8, no NUL.
+    if text.contains('\0') {
+        return Err(Error::invalid(
+            "PNG iTXt: text contains a NUL byte (forbidden per §11.3.3.4)",
+        ));
+    }
 
-        let text_bytes = self.text.as_bytes();
-        let text_payload: Vec<u8> = if self.compressed {
-            compress_to_vec_zlib(text_bytes, 6)?
-        } else {
-            text_bytes.to_vec()
-        };
-
-        let mut out = Vec::with_capacity(
-            keyword_bytes.len()
-                + 4
-                + self.language_tag.len()
-                + self.translated_keyword.len()
-                + text_payload.len(),
-        );
-        out.extend_from_slice(&keyword_bytes);
-        out.push(0); // NUL after keyword.
-        out.push(if self.compressed { 1 } else { 0 });
-        out.push(Self::COMPRESSION_METHOD_DEFLATE);
-        out.extend_from_slice(self.language_tag.as_bytes());
-        out.push(0); // NUL after language tag.
-        out.extend_from_slice(self.translated_keyword.as_bytes());
-        out.push(0); // NUL after translated keyword.
-        out.extend_from_slice(&text_payload);
-        Ok(out)
+    sink(&keyword_bytes);
+    // NUL after keyword, compression flag, compression method.
+    sink(&[0, u8::from(compressed), Itxt::COMPRESSION_METHOD_DEFLATE]);
+    sink(language_tag.as_bytes());
+    sink(&[0]); // NUL after language tag.
+    sink(translated_keyword.as_bytes());
+    sink(&[0]); // NUL after translated keyword.
+    if compressed {
+        compress_zlib_to(6, text.as_bytes(), sink)
+    } else {
+        sink(text.as_bytes());
+        Ok(())
     }
 }
 
@@ -2862,6 +2939,7 @@ impl ColourSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::zlibvec::compress_to_vec_zlib;
 
     #[test]
     fn sbit_grayscale_roundtrip() {
@@ -4858,5 +4936,104 @@ mod tests {
             ..Default::default()
         };
         assert!(!m.is_empty());
+    }
+
+    /// The streamed payload writers produce the 0.1.12 `to_bytes`
+    /// layouts byte for byte: each reference below is that layout,
+    /// built the way the one-shot code built it.
+    #[test]
+    fn streamed_payloads_match_the_one_shot_layouts() {
+        // Latin-1 text longer than the 4 KiB conversion piece, with
+        // characters outside ASCII on both sides of every piece edge.
+        let latin1: String = (0..10_000u32)
+            .map(|i| char::from_u32(0x20 + (i * 7) % 0xDF).unwrap())
+            .filter(|c| *c != '\u{7f}')
+            .collect();
+        let latin1_bytes: Vec<u8> = latin1.chars().map(|c| c as u8).collect();
+        let ascii = "plain ASCII text ".repeat(500);
+
+        let mut text = b"Comment\0".to_vec();
+        text.extend_from_slice(&latin1_bytes);
+        assert_eq!(
+            Text::new("Comment".to_string(), latin1.clone())
+                .to_bytes()
+                .unwrap(),
+            text
+        );
+
+        for body in [&latin1, &ascii] {
+            let body_bytes: Vec<u8> = body.chars().map(|c| c as u8).collect();
+            let mut ztxt = b"Description\0\0".to_vec();
+            ztxt.extend_from_slice(&compress_to_vec_zlib(&body_bytes, 6).unwrap());
+            assert_eq!(
+                Ztxt::new("Description".to_string(), body.to_string())
+                    .to_bytes()
+                    .unwrap(),
+                ztxt
+            );
+        }
+
+        let utf8 = "Grüße, 世界. ".repeat(700);
+        for compressed in [false, true] {
+            let mut itxt = b"Notes\0".to_vec();
+            itxt.extend_from_slice(&[u8::from(compressed), 0]);
+            itxt.extend_from_slice(b"de-DE\0Notizen\0");
+            if compressed {
+                itxt.extend_from_slice(&compress_to_vec_zlib(utf8.as_bytes(), 6).unwrap());
+            } else {
+                itxt.extend_from_slice(utf8.as_bytes());
+            }
+            assert_eq!(
+                Itxt::new("Notes".to_string(), utf8.clone())
+                    .with_compressed(compressed)
+                    .with_language_tag("de-DE".to_string())
+                    .with_translated_keyword("Notizen".to_string())
+                    .to_bytes()
+                    .unwrap(),
+                itxt
+            );
+        }
+
+        let profile: Vec<u8> = (0..300_000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        let mut iccp = b"Profile\0\0".to_vec();
+        iccp.extend_from_slice(&compress_to_vec_zlib(&profile, 6).unwrap());
+        assert_eq!(
+            Iccp::new("Profile".to_string(), profile)
+                .to_bytes()
+                .unwrap(),
+            iccp
+        );
+    }
+
+    /// The text checks keep their 0.1.12 errors, whichever conversion
+    /// path (ASCII or chunked Latin-1) finds the bad character.
+    #[test]
+    fn streamed_text_payloads_keep_their_errors() {
+        let err = |r: Result<Vec<u8>>| r.unwrap_err().to_string();
+        for (chunk, ztxt) in [("tEXt", false), ("zTXt", true)] {
+            let bytes = |text: &str| {
+                if ztxt {
+                    Ztxt::new("k".to_string(), text.to_string()).to_bytes()
+                } else {
+                    Text::new("k".to_string(), text.to_string()).to_bytes()
+                }
+            };
+            let wide = format!("{}é{}\u{100}", "a".repeat(5000), "b".repeat(5000));
+            assert_eq!(
+                err(bytes(&wide)),
+                format!("invalid data: PNG {chunk}: text char U+0100 is not Latin-1 (single-byte)")
+            );
+            for text in ["ascii\0nul".to_string(), format!("é{}\0", "c".repeat(5000))] {
+                assert_eq!(
+                    err(bytes(&text)),
+                    format!(
+                        "invalid data: PNG {chunk}: text string contains a NUL \
+                         (reserved as keyword separator)"
+                    )
+                );
+            }
+        }
     }
 }
