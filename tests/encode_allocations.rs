@@ -193,3 +193,199 @@ mod reserve {
         );
     }
 }
+
+/// Large metadata payloads (1 MiB each): measured through plain
+/// `encode` and through `encode_into` into a buffer reserved for the
+/// whole file. Through `encode_into` nothing payload-sized is
+/// allocated at all; through `encode` the only payload-sized block is
+/// the output itself, which must hold the payload.
+mod chunks {
+    use super::*;
+    use oxideav_png::{
+        encode, encode_into, EncodeOptions, Exif, Iccp, Itxt, Metadata, PngImage, PngMetadata,
+        PngPixelFormat, Text, Ztxt,
+    };
+
+    /// One mebibyte: the payload size of every case below.
+    const PAYLOAD: usize = 1 << 20;
+
+    /// Deterministic xorshift32 bytes: incompressible.
+    fn noise(len: usize, seed: u32) -> Vec<u8> {
+        let mut s = seed | 1;
+        (0..len)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                (s >> 11) as u8
+            })
+            .collect()
+    }
+
+    fn tiny() -> PngImage {
+        PngImage::packed(16, 16, PngPixelFormat::Gray8, 16, vec![0; 256]).unwrap()
+    }
+
+    /// `PAYLOAD` ASCII letters.
+    fn ascii_text() -> String {
+        noise(PAYLOAD, 0x7E57_0041)
+            .iter()
+            .map(|&b| (b'a' + b % 26) as char)
+            .collect()
+    }
+
+    /// `PAYLOAD` Latin-1 characters, a quarter of them outside ASCII so
+    /// the `String` holds more bytes than the chunk does.
+    fn latin1_text() -> String {
+        noise(PAYLOAD, 0x7E57_0042)
+            .iter()
+            .map(|&b| {
+                if b < 64 {
+                    'é'
+                } else {
+                    (b'a' + b % 26) as char
+                }
+            })
+            .collect()
+    }
+
+    fn with(meta: PngMetadata) -> EncodeOptions {
+        EncodeOptions::default().with_metadata(meta)
+    }
+
+    /// Measure `img` under `opts` through `encode` and through
+    /// `encode_into` into a buffer reserved for the whole file; check
+    /// both write the same bytes. Returns `(encode stats, output
+    /// capacity, encode_into stats)`.
+    fn measure_both(what: &str, img: &PngImage, opts: &EncodeOptions) -> (Stats, usize, Stats) {
+        let (plain, plain_stats) = measure(|| encode(img, opts).unwrap());
+        let mut out = Vec::with_capacity(plain.len());
+        let ((), into_stats) = measure(|| encode_into(img, opts, &mut out).unwrap());
+        report(&format!("{what}, encode"), &plain_stats);
+        report(&format!("{what}, encode_into reserved"), &into_stats);
+        assert_eq!(out, plain, "{what}: same bytes from both entries");
+        assert_eq!(
+            out.capacity(),
+            plain.len(),
+            "{what}: the reserved output was not regrown"
+        );
+        (plain_stats, plain.capacity(), into_stats)
+    }
+
+    /// No second payload-sized buffer. Through `encode_into` (output
+    /// reserved, so not counted) no block reaches half the payload and
+    /// less than a payload is live at once. Through `encode` no block
+    /// outgrows the output, and less than a payload is live besides it.
+    fn assert_no_payload_copy(what: &str, plain: &Stats, output_capacity: usize, into: &Stats) {
+        assert!(
+            into.largest < PAYLOAD / 2,
+            "{what}: encode_into allocated a {}-byte block next to the {PAYLOAD}-byte payload",
+            into.largest
+        );
+        assert!(
+            into.peak < PAYLOAD,
+            "{what}: encode_into held {} bytes at once, more than the {PAYLOAD}-byte payload",
+            into.peak
+        );
+        assert!(
+            plain.largest <= output_capacity,
+            "{what}: encode allocated a {}-byte block, more than its {output_capacity}-byte output",
+            plain.largest
+        );
+        let beside_output = plain.peak.saturating_sub(output_capacity);
+        assert!(
+            beside_output < PAYLOAD,
+            "{what}: encode held {beside_output} bytes at once besides its \
+             {output_capacity}-byte output"
+        );
+    }
+
+    fn check(what: &str, img: &PngImage, opts: &EncodeOptions) {
+        let (plain, cap, into) = measure_both(what, img, opts);
+        assert_no_payload_copy(what, &plain, cap, &into);
+    }
+
+    #[test]
+    fn iccp_from_options_has_no_second_profile_buffer() {
+        let opts = with(PngMetadata::default().with_iccp(Iccp::new(
+            "Big profile".to_string(),
+            noise(PAYLOAD, 0x1CC0_0001),
+        )));
+        check("iCCP 1 MiB (options)", &tiny(), &opts);
+    }
+
+    #[test]
+    fn iccp_from_image_has_no_second_profile_buffer() {
+        let img = tiny().with_metadata(Metadata::new().with_icc(noise(PAYLOAD, 0x1CC0_0002)));
+        check("iCCP 1 MiB (image)", &img, &EncodeOptions::default());
+    }
+
+    #[test]
+    fn exif_has_no_second_payload_buffer() {
+        let mut exif = vec![0x49, 0x49, 0x2A, 0x00];
+        exif.extend_from_slice(&noise(PAYLOAD - 4, 0xE71F_0001));
+        let opts = with(PngMetadata::default().with_exif(Exif::new(exif.clone())));
+        check("eXIf 1 MiB (options)", &tiny(), &opts);
+        let img = tiny().with_metadata(Metadata::new().with_exif(exif));
+        check("eXIf 1 MiB (image)", &img, &EncodeOptions::default());
+    }
+
+    #[test]
+    fn text_chunks_have_no_second_payload_buffer() {
+        let text = latin1_text();
+        let cases = [
+            (
+                "tEXt 1 MiB",
+                PngMetadata::default().with_texts(vec![Text::new("Big".to_string(), text.clone())]),
+            ),
+            (
+                "zTXt 1 MiB",
+                PngMetadata::default().with_ztxts(vec![Ztxt::new("Big".to_string(), ascii_text())]),
+            ),
+            (
+                "iTXt 1 MiB",
+                PngMetadata::default().with_itxts(vec![Itxt::new("Big".to_string(), text.clone())]),
+            ),
+            (
+                "iTXt 1 MiB compressed",
+                PngMetadata::default().with_itxts(vec![
+                    Itxt::new("Big".to_string(), text.clone()).with_compressed(true)
+                ]),
+            ),
+        ];
+        for (what, meta) in cases {
+            check(what, &tiny(), &with(meta));
+        }
+    }
+
+    #[test]
+    fn xmp_packet_has_no_second_payload_buffer() {
+        let xmp = latin1_text().into_bytes();
+        let img = tiny().with_metadata(Metadata::new().with_xmp(xmp));
+        check("XMP 1 MiB (image)", &img, &EncodeOptions::default());
+    }
+
+    /// `zTXt` text outside ASCII is converted to its Latin-1 bytes
+    /// before it is compressed, because compcol's stream depends on how
+    /// its input arrives and the bytes must match the one-shot
+    /// compression. That conversion is the one payload-sized block; the
+    /// compressed body still goes straight into the chunk.
+    #[test]
+    fn ztxt_with_non_ascii_text_converts_it_once() {
+        let text = latin1_text();
+        let meta =
+            PngMetadata::default().with_ztxts(vec![Ztxt::new("Big".to_string(), text.clone())]);
+        let (_, _, into) = measure_both("zTXt 1 MiB non-ASCII", &tiny(), &with(meta));
+        assert!(
+            into.largest <= text.len(),
+            "the largest block ({}) is more than the converted text ({})",
+            into.largest,
+            text.len()
+        );
+        assert!(
+            into.peak - into.largest < PAYLOAD,
+            "{} bytes were live besides the converted text",
+            into.peak - into.largest
+        );
+    }
+}
