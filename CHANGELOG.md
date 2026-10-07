@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `encode_into(&PngImage, &EncodeOptions, &mut Vec<u8>)` appends the
+  file to a caller's buffer and truncates the buffer back to its
+  original length on error. When the buffer has less spare room than
+  the size `encode` reserves up front (a third of the raw plane plus
+  1 KiB), that much is reserved once; otherwise the caller's
+  reservation is used as it is. `encode` calls it.
+- `encode_plane(width, height, PixelFormat, stride, &[u8],
+  Option<&Palette>, &EncodeOptions)` encodes a borrowed plane in any
+  layout without copying it into a `PngImage`. It writes the file
+  `encode` writes for the same plane, rejects what `PngImage::packed`
+  rejects, and rejects a `Pal8` plane without a palette.
+
+### Changed
+
+- `encode_rgb8` / `encode_rgba8` read the caller's slice in place,
+  through `encode_plane`, instead of copying it into a `PngImage`. For
+  a 512 x 512 RGBA slice, `encode_rgba8` allocated a 1,048,576-byte
+  copy of the plane and held 1,825,880 bytes at its peak; it now
+  allocates no block larger than its 350,549-byte output reservation
+  and peaks at 777,272 bytes, output included. The output bytes are
+  unchanged.
+- **Metadata payloads are written straight into the output.** `iCCP`,
+  `zTXt`, `iTXt` (the image's XMP packet included), `tEXt` and `eXIf`
+  go through the incremental chunk emitter: a compressed body reaches
+  the output as the compressor produces it, and no compressed-body
+  buffer, chunk-data buffer, clone of `EncodeOptions::metadata` or copy
+  of the image's ICC profile, Exif block or XMP packet is made. For a
+  1 MiB `iCCP` profile through `encode`, the largest block falls from
+  2,097,916 to 1,049,440 bytes (now the output itself) and the peak
+  from 4,195,776 to 1,772,054 bytes; through `encode_into` into a
+  buffer reserved for the whole file, from 2,097,152 to 186,672 bytes
+  and from 4,194,667 to 722,614 bytes. For a 1 MiB `tEXt` through
+  `encode`, the largest block falls from 2,097,242 to 1,060,096 bytes
+  and the peak from 4,457,481 to 1,457,432 bytes. A `zTXt` whose text
+  has characters outside ASCII still converts the text to its Latin-1
+  bytes once: compcol's output depends on how its input is split, so
+  the text goes to the compressor in one piece to keep the bytes
+  unchanged. Streamed chunks are checked against the `2^31 - 1`-byte
+  chunk limit, so a chunk over it is now an encode error; 0.1.12 wrote
+  its length field as given, wrapping at `2^32`. Only a `tEXt`, an
+  `eXIf`, or an `iTXt` whose language tag or translated keyword is that
+  long can reach the limit: the `iCCP`, `zTXt` and `iTXt` text bodies
+  are bounded at 64 MiB. The output bytes are unchanged.
+- `encode_to` streams the file to the writer in three runs (the
+  signature and the chunks before the pixel data, the `IDAT` chunk,
+  the trailer) instead of encoding the whole file first: the `IDAT`
+  chunk is buffered whole, because its length precedes its data, and
+  the rest streams. The bytes are unchanged. An error in the options or
+  the metadata still leaves the writer untouched; after an error in the
+  pixel stream or in the writer, the writer may hold the start of the
+  file.
+- `encode_single` / `encode_single_with_options` read the frame's plane
+  in place instead of cloning it into a `PngImage`. For a 512 x 512
+  RGBA frame, `encode_single` allocated a 1,048,576-byte copy of the
+  plane and held 1,825,880 bytes at its peak; it now allocates no block
+  larger than its 350,549-byte output reservation and peaks at 777,272
+  bytes, output included. The output bytes are unchanged.
+
 ## [0.1.12](https://github.com/OxideAV/oxideav-png/compare/v0.1.11...v0.1.12) - 2026-10-05
 
 ### Other

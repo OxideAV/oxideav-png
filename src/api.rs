@@ -10,7 +10,9 @@ use crate::decoder::{
 };
 use crate::encoder::{encode as encode_image, EncodeOptions};
 use crate::error::{PngError as Error, Result};
-use crate::image::{Frame, ImageInfo, PngImage, RgbImage, RgbaImage};
+use crate::image::{
+    Frame, ImageInfo, ImageRef, Palette, PixelFormat, PngImage, RgbImage, RgbaImage,
+};
 use crate::options::DecodeOptions;
 
 /// `true` when `bytes` starts with the eight-byte PNG signature (W3C
@@ -178,24 +180,102 @@ pub fn encode(image: &PngImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
 }
 
 /// Encode tightly packed 8-bit RGB (`3 × width × height` bytes) as a
-/// colour-type-2 PNG.
+/// colour-type-2 PNG. The pixels are read in place, through
+/// [`encode_plane`].
 pub fn encode_rgb8(width: u32, height: u32, rgb: &[u8], opts: &EncodeOptions) -> Result<Vec<u8>> {
     check_raw_len(width, height, 3, rgb.len())?;
-    encode_image(&PngImage::from_rgb8(width, height, rgb.to_vec())?, opts)
+    let stride = packed_stride(width, 3)?;
+    encode_plane(width, height, PixelFormat::Rgb24, stride, rgb, None, opts)
 }
 
 /// Encode tightly packed 8-bit RGBA (`4 × width × height` bytes) as a
-/// colour-type-6 PNG.
+/// colour-type-6 PNG. The pixels are read in place, through
+/// [`encode_plane`].
 pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8], opts: &EncodeOptions) -> Result<Vec<u8>> {
     check_raw_len(width, height, 4, rgba.len())?;
-    encode_image(&PngImage::from_rgba8(width, height, rgba.to_vec())?, opts)
+    let stride = packed_stride(width, 4)?;
+    encode_plane(width, height, PixelFormat::Rgba, stride, rgba, None, opts)
 }
 
-/// [`encode`] straight into a writer.
+/// Encode one borrowed pixel plane in any layout PNG carries: `data`
+/// holds `height` rows of `width` pixels in `format`, `stride` bytes
+/// apart (rows may carry padding past the visible width; the last row
+/// may be unpadded). The plane is read where it lies, never copied into
+/// an image first. The file is the one [`encode`] writes for
+/// `PngImage::packed(width, height, format, stride, data)` with
+/// `palette`, and the plane is rejected with the errors
+/// [`PngImage::packed`] gives.
+///
+/// `palette` is the colour table of a `Pal8` plane, which must have one
+/// with at least one entry; it is ignored for the other layouts, as
+/// [`encode`] ignores [`PngImage::palette`] for them. The image carries
+/// no other side fields: colour is
+/// [`ColorInfo::png_default`](crate::ColorInfo::png_default) and there
+/// is no image metadata or keyed transparency. Ancillary chunks still
+/// come from [`EncodeOptions::metadata`].
+pub fn encode_plane(
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    stride: usize,
+    data: &[u8],
+    palette: Option<&Palette>,
+    opts: &EncodeOptions,
+) -> Result<Vec<u8>> {
+    let mut image = ImageRef::plane(width, height, format, stride, data)?;
+    if format == PixelFormat::Pal8 {
+        if palette.map_or(true, Palette::is_empty) {
+            return Err(Error::invalid(
+                "PNG encoder: a Pal8 plane needs a palette with at least one entry",
+            ));
+        }
+        image.palette = palette;
+    }
+    crate::encoder::encode_view(&image, opts, opts.threads.max(1))
+}
+
+/// [`encode`] appended to `out`, so a caller can reserve the room once
+/// and encode into it, or pack several files into one buffer. The
+/// bytes already in `out` are kept and the file starts at `out.len()`.
+/// When `out` has less spare room than the size [`encode`] reserves up
+/// front (a third of the raw plane plus 1 KiB), that much is reserved;
+/// otherwise the caller's buffer is used as it is and grows only if the
+/// file needs more. On error `out` is truncated back to its original
+/// length.
+pub fn encode_into(image: &PngImage, opts: &EncodeOptions, out: &mut Vec<u8>) -> Result<()> {
+    crate::encoder::encode_into(image, opts, out)
+}
+
+/// [`encode`] streamed into a writer, in three runs: the signature and
+/// every chunk before the pixel data, then the `IDAT` chunk, then the
+/// trailer. Only one run is held at a time, never the whole file; the
+/// `IDAT` chunk is held whole because a chunk's length field precedes
+/// its data (RFC 2083 §3.2). The bytes are identical to [`encode`]'s.
+/// An error in the options or the metadata is found before anything is
+/// written; after an error in the pixel stream or in the writer, `w`
+/// may hold the start of the file.
 pub fn encode_to<W: Write>(image: &PngImage, opts: &EncodeOptions, mut w: W) -> Result<()> {
-    let bytes = encode_image(image, opts)?;
-    w.write_all(&bytes)?;
-    Ok(())
+    let mut run = Vec::new();
+    crate::encoder::write_png(
+        &image.view(),
+        opts,
+        opts.threads.max(1),
+        &mut run,
+        &mut |_, run| {
+            w.write_all(run)?;
+            run.clear();
+            Ok(())
+        },
+    )
+}
+
+/// Row stride of a tightly packed plane, `width × bpp`, with the error
+/// [`PngImage::from_rgb8`] / [`PngImage::from_rgba8`] give when it
+/// overflows.
+fn packed_stride(width: u32, bpp: usize) -> Result<usize> {
+    (width as usize)
+        .checked_mul(bpp)
+        .ok_or_else(|| Error::invalid("PNG image: row size overflows usize"))
 }
 
 fn check_raw_len(width: u32, height: u32, bpp: usize, len: usize) -> Result<()> {

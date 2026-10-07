@@ -19,8 +19,8 @@
 //! pins a fixed filter.
 
 use crate::error::{PngError as Error, Result};
-use crate::image::{PngImage, PngPixelFormat};
-use crate::metadata::PngMetadata;
+use crate::image::{ImageRef, PngImage, PngPixelFormat};
+use crate::metadata::{Chrm, Cicp, Gama, PngMetadata, Srgb, Trns};
 
 // Backward-compat re-export: existing callers reach for
 // `oxideav_png::encoder::make_encoder` to construct a framework-side
@@ -289,7 +289,14 @@ pub fn encode_png_image_with_options(image: &PngImage, opts: &EncodeOptions) -> 
 /// one. A `transparency` / `palette` alpha pair that would put two
 /// `tRNS` chunks on the wire is [`crate::PngError::InvalidData`].
 pub fn encode(image: &PngImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
-    encode_threaded(image, opts, opts.threads.max(1))
+    let mut out = Vec::new();
+    encode_into(image, opts, &mut out)?;
+    Ok(out)
+}
+
+/// [`encode`] appended to `out`; see [`crate::encode_into`].
+pub(crate) fn encode_into(image: &PngImage, opts: &EncodeOptions, out: &mut Vec<u8>) -> Result<()> {
+    encode_view_into(&image.view(), opts, opts.threads.max(1), out)
 }
 
 /// The pre-contract spelling of [`encode`] with
@@ -317,6 +324,65 @@ pub(crate) fn encode_threaded(
     opts: &EncodeOptions,
     threads: usize,
 ) -> Result<Vec<u8>> {
+    encode_view(&image.view(), opts, threads)
+}
+
+/// [`encode_threaded`] for a borrowed image (a [`PngImage`], a caller's
+/// plane, a framework frame): the pixels and the side fields are read
+/// where they lie.
+pub(crate) fn encode_view(
+    image: &ImageRef<'_>,
+    opts: &EncodeOptions,
+    threads: usize,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    encode_view_into(image, opts, threads, &mut out)?;
+    Ok(out)
+}
+
+/// [`encode_view`] appended to `out`. On error `out` is truncated back
+/// to its original length, so a failed encode leaves no partial file.
+pub(crate) fn encode_view_into(
+    image: &ImageRef<'_>,
+    opts: &EncodeOptions,
+    threads: usize,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    let start = out.len();
+    let written = write_png(image, opts, threads, out, &mut |_, _| Ok(()));
+    if written.is_err() {
+        out.truncate(start);
+    }
+    written
+}
+
+/// A point where [`write_png`] can hand `out` to its caller without
+/// splitting a chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Cut {
+    /// After the last chunk before the pixel data; `out` ends where the
+    /// `IDAT` chunk will start.
+    BeforeIdat,
+    /// After the `IDAT` chunk.
+    AfterIdat,
+    /// After `IEND`: the file is complete.
+    End,
+}
+
+/// Write `image` as a PNG file at the end of `out`, calling `cut` with
+/// `out` at each [`Cut`] in turn. A buffering caller passes a no-op; a
+/// streaming caller drains `out` to its writer there, so `out` holds
+/// one run at a time. The `IDAT` chunk is one run, held whole, because
+/// a chunk's length field precedes its data (RFC 2083 §3.2). Options
+/// and metadata are checked before the first cut. On error `out` may
+/// hold a partial file; the caller discards it.
+pub(crate) fn write_png(
+    image: &ImageRef<'_>,
+    opts: &EncodeOptions,
+    threads: usize,
+    out: &mut Vec<u8>,
+    cut: &mut dyn FnMut(Cut, &mut Vec<u8>) -> Result<()>,
+) -> Result<()> {
     let (mut ihdr, row_bytes, plte_bytes, trns_bytes) = ihdr_and_row_bytes(image, opts)?;
     if opts.interlace {
         ihdr.interlace = 1;
@@ -329,35 +395,39 @@ pub(crate) fn encode_threaded(
     // wire, violating §5.6 Table 1 "Multiple OK? No" — so the resolver
     // errors if both are populated and otherwise picks whichever is
     // present.
-    let meta = effective_metadata(image, opts)?;
-    let meta = meta.as_ref();
-    let trns_bytes = resolve_trns_bytes(&ihdr, trns_bytes.as_deref(), meta)?;
+    let chunks = chunk_set(image, opts)?;
+    let trns_bytes = resolve_trns_bytes(&ihdr, trns_bytes.as_deref(), chunks.trns)?;
     let level = resolve_compression_level(opts)?;
 
     // Reserve for the headers plus a typical photographic IDAT (about a
     // third of the raw plane); the reservation is virtual until touched,
-    // so highly compressible content does not pay for it.
+    // so highly compressible content does not pay for it. A caller that
+    // left at least that much spare room keeps its own buffer.
     let raw_len = row_bytes.saturating_mul(image.height as usize);
-    let mut out = Vec::with_capacity(1024 + raw_len / 3);
+    let estimate = 1024 + raw_len / 3;
+    if out.capacity() - out.len() < estimate {
+        out.reserve(estimate);
+    }
     out.extend_from_slice(&PNG_MAGIC);
-    write_chunk(&mut out, b"IHDR", &ihdr.to_bytes());
+    write_chunk(out, b"IHDR", &ihdr.to_bytes());
     // sBIT must precede PLTE + IDAT (RFC 2083 §4.3 / §4.2.6).
-    write_metadata_before_plte(&mut out, meta)?;
+    write_metadata_before_plte(out, &chunks)?;
     if let Some(p) = plte_bytes.as_deref() {
-        write_chunk(&mut out, b"PLTE", p);
+        write_chunk(out, b"PLTE", p);
     }
     if let Some(t) = trns_bytes.as_deref() {
-        write_chunk(&mut out, b"tRNS", t);
+        write_chunk(out, b"tRNS", t);
     }
     // pHYs + tIME go between PLTE/tRNS and IDAT (pHYs MUST be before
     // IDAT per RFC 2083 §4.2.5; tIME has no ordering constraint but we
     // bucket it here for determinism). sPLT also rides here.
-    write_metadata_before_idat(&mut out, meta)?;
+    write_metadata_before_idat(out, &chunks)?;
+    cut(Cut::BeforeIdat, out)?;
     // The pixel stream is filtered row by row and deflated straight
     // into the IDAT chunk — no filtered-image intermediate, no
     // compressed-stream intermediate.
     write_pixel_stream(
-        &mut out,
+        out,
         b"IDAT",
         &[],
         image,
@@ -367,9 +437,33 @@ pub(crate) fn encode_threaded(
         level,
         threads,
     )?;
-    write_metadata_after_idat(&mut out, meta);
-    write_chunk(&mut out, b"IEND", &[]);
-    Ok(out)
+    cut(Cut::AfterIdat, out)?;
+    write_metadata_after_idat(out, &chunks);
+    write_chunk(out, b"IEND", &[]);
+    cut(Cut::End, out)
+}
+
+/// The ancillary chunks one encode writes: [`EncodeOptions::metadata`]
+/// as given, with the image's own `metadata` / `color` /
+/// `transparency` filling every record the options leave unset (see
+/// [`chunk_set`]). Every variable-length payload is borrowed from the
+/// options or the image, so building the set copies nothing: an ICC
+/// profile, Exif block or XMP packet is read once, by the chunk writer.
+struct ChunkSet<'a> {
+    /// The options' records (empty when the options carry none). The
+    /// fields below override the records the image can also supply;
+    /// every other chunk comes from here.
+    meta: &'a PngMetadata,
+    gama: Option<Gama>,
+    /// `(profile name, profile)`.
+    iccp: Option<(&'a str, &'a [u8])>,
+    exif: Option<&'a [u8]>,
+    srgb: Option<Srgb>,
+    cicp: Option<Cicp>,
+    trns: Option<&'a Trns>,
+    /// The image's XMP packet, written as an uncompressed `iTXt` after
+    /// the options' `iTXt` chunks.
+    xmp: Option<&'a str>,
 }
 
 /// The metadata chunk set `encode` writes for `image` under `opts`:
@@ -393,55 +487,55 @@ pub(crate) fn encode_threaded(
 /// * `transparency` → `tRNS` (resolved against the palette tail by
 ///   [`resolve_trns_bytes`]).
 ///
-/// Returns `None` when the options carry no metadata and the image has
-/// nothing to add, so a plain image encodes exactly as before.
-fn effective_metadata(image: &PngImage, opts: &EncodeOptions) -> Result<Option<PngMetadata>> {
+/// With no options metadata and nothing on the image the set is empty
+/// and no ancillary chunk is written.
+fn chunk_set<'a>(image: &ImageRef<'a>, opts: &'a EncodeOptions) -> Result<ChunkSet<'a>> {
     use crate::image::{ColorInfo, ColorRange};
-    use crate::metadata::{Cicp, Exif, Gama, Iccp, Itxt, RenderingIntent, Srgb};
+    use crate::metadata::RenderingIntent;
 
-    let mut meta = opts.metadata.clone().unwrap_or_default();
-    let mut added = false;
+    static NO_METADATA: std::sync::OnceLock<PngMetadata> = std::sync::OnceLock::new();
+    let meta = match &opts.metadata {
+        Some(m) => m,
+        None => NO_METADATA.get_or_init(PngMetadata::default),
+    };
+    let image_meta = image.metadata;
 
-    if meta.gama.is_none() {
-        if let Some(g) = image.metadata.gamma {
+    let mut gama = meta.gama;
+    if gama.is_none() {
+        if let Some(g) = image_meta.and_then(|m| m.gamma) {
             if g.is_finite() && g >= 0.0 {
-                meta.gama = Some(Gama::new((g * 100_000.0).round() as u32));
-                added = true;
+                gama = Some(Gama::new((g * 100_000.0).round() as u32));
             }
         }
     }
-    if meta.iccp.is_none() {
-        if let Some(icc) = &image.metadata.icc {
-            meta.iccp = Some(Iccp::new("ICC Profile".to_string(), icc.clone()));
-            added = true;
-        }
-    }
-    if meta.exif.is_none() {
-        if let Some(exif) = &image.metadata.exif {
-            meta.exif = Some(Exif::new(exif.clone()));
-            added = true;
-        }
-    }
-    if let Some(xmp) = &image.metadata.xmp {
+    let iccp = match &meta.iccp {
+        Some(i) => Some((i.name.as_str(), i.profile.as_slice())),
+        None => image_meta
+            .and_then(|m| m.icc.as_deref())
+            .map(|icc| ("ICC Profile", icc)),
+    };
+    let exif = match &meta.exif {
+        Some(e) => Some(e.data.as_slice()),
+        None => image_meta.and_then(|m| m.exif.as_deref()),
+    };
+    let mut xmp = None;
+    if let Some(packet) = image_meta.and_then(|m| m.xmp.as_deref()) {
         if !meta
             .itxts
             .iter()
             .any(|t| t.keyword == crate::sideinfo::XMP_KEYWORD)
         {
-            let text = String::from_utf8(xmp.clone()).map_err(|_| {
+            xmp = Some(std::str::from_utf8(packet).map_err(|_| {
                 Error::invalid("PNG encoder: metadata.xmp is not UTF-8 (W3C PNG3 §11.3.3.4)")
-            })?;
-            meta.itxts
-                .push(Itxt::new(crate::sideinfo::XMP_KEYWORD.to_string(), text));
-            added = true;
+            })?);
         }
     }
-    if meta.srgb.is_none() && meta.cicp.is_none() {
+    let (mut srgb, mut cicp) = (meta.srgb, meta.cicp);
+    if srgb.is_none() && cicp.is_none() {
         let c = image.color;
         if c == ColorInfo::srgb() {
-            if meta.iccp.is_none() {
-                meta.srgb = Some(Srgb::new(RenderingIntent::Perceptual));
-                added = true;
+            if iccp.is_none() {
+                srgb = Some(Srgb::new(RenderingIntent::Perceptual));
             }
         } else if c.primaries != ColorInfo::UNSPECIFIED
             || c.transfer != ColorInfo::UNSPECIFIED
@@ -467,21 +561,36 @@ fn effective_metadata(image: &PngImage, opts: &EncodeOptions) -> Result<Option<P
                 )));
             }
             let full = u8::from(c.range != ColorRange::Limited);
-            meta.cicp = Some(Cicp::new(c.primaries, c.transfer, 0, full));
-            added = true;
+            cicp = Some(Cicp::new(c.primaries, c.transfer, 0, full));
         }
     }
-    if meta.trns.is_none() {
-        if let Some(t) = &image.transparency {
-            meta.trns = Some(t.clone());
-            added = true;
-        }
-    }
+    let trns = meta.trns.as_ref().or(image.transparency);
 
-    if opts.metadata.is_none() && !added {
-        return Ok(None);
-    }
-    Ok(Some(meta))
+    Ok(ChunkSet {
+        meta,
+        gama,
+        iccp,
+        exif,
+        srgb,
+        cicp,
+        trns,
+        xmp,
+    })
+}
+
+/// Write one chunk whose data `payload` hands over in pieces, straight
+/// into `out` through the incremental chunk emitter: the data is copied
+/// into the file once, with no chunk-data buffer in between, and a
+/// chunk over the `2^31 - 1`-byte limit is an error. On error the chunk
+/// is left unfinished; the caller truncates or discards `out`.
+fn write_chunk_streamed(
+    out: &mut Vec<u8>,
+    chunk_type: &[u8; 4],
+    payload: impl FnOnce(&mut dyn FnMut(&[u8])) -> Result<()>,
+) -> Result<()> {
+    let mut chunk = ChunkWriter::begin(out, chunk_type);
+    payload(&mut |bytes| chunk.write(bytes))?;
+    chunk.finish()
 }
 
 /// Compress `image`'s pixels under `ihdr` (whose `width` / `height`
@@ -496,7 +605,7 @@ fn write_pixel_stream(
     out: &mut Vec<u8>,
     chunk_type: &[u8; 4],
     prefix: &[u8],
-    image: &PngImage,
+    image: &ImageRef<'_>,
     ihdr: &Ihdr,
     row_bytes: usize,
     opts: &EncodeOptions,
@@ -559,10 +668,8 @@ fn write_pixel_stream(
 /// rather than the colour space itself — a viewer that walks the file
 /// in order picks up the basic colour signal before the supplemental
 /// HDR tone-mapping hints.
-fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> Result<()> {
-    let Some(meta) = meta else {
-        return Ok(());
-    };
+fn write_metadata_before_plte(out: &mut Vec<u8>, chunks: &ChunkSet<'_>) -> Result<()> {
+    let meta = chunks.meta;
     // W3C PNG3 §11.3.2.5 Table 17: an encoder writing the sRGB chunk
     // that also writes gAMA / cHRM companion chunks (recommended "for
     // compatibility with decoders that do not use the sRGB chunk") may
@@ -572,9 +679,9 @@ fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
     // gAMA / cHRM would hand sRGB-unaware decoders a different colour
     // space than sRGB-aware ones, so a mismatch is an encode error
     // ahead of the wire rather than a silently nonconformant stream.
-    if meta.srgb.is_some() {
-        if let Some(gama) = &meta.gama {
-            if *gama != crate::metadata::Gama::SRGB {
+    if chunks.srgb.is_some() {
+        if let Some(gama) = &chunks.gama {
+            if *gama != Gama::SRGB {
                 return Err(Error::invalid(format!(
                     "PNG encoder: gAMA {} alongside sRGB — W3C PNG3 §11.3.2.5 Table 17 \
                      permits only 45455 (Gama::SRGB) next to an sRGB chunk",
@@ -583,7 +690,7 @@ fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
             }
         }
         if let Some(chrm) = &meta.chrm {
-            if *chrm != crate::metadata::Chrm::SRGB {
+            if *chrm != Chrm::SRGB {
                 return Err(Error::invalid(
                     "PNG encoder: cHRM alongside sRGB does not match the sRGB \
                      primaries / D65 white point — W3C PNG3 §11.3.2.5 Table 17 \
@@ -592,19 +699,21 @@ fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
             }
         }
     }
-    if let Some(cicp) = &meta.cicp {
+    if let Some(cicp) = &chunks.cicp {
         write_chunk(out, b"cICP", &cicp.to_bytes());
     }
-    if let Some(iccp) = &meta.iccp {
-        write_chunk(out, b"iCCP", &iccp.to_bytes()?);
+    if let Some((name, profile)) = chunks.iccp {
+        write_chunk_streamed(out, b"iCCP", |sink| {
+            crate::metadata::write_iccp_payload(name, profile, sink)
+        })?;
     }
     if let Some(sbit) = &meta.sbit {
         write_chunk(out, b"sBIT", &sbit.to_bytes());
     }
-    if let Some(srgb) = &meta.srgb {
+    if let Some(srgb) = &chunks.srgb {
         write_chunk(out, b"sRGB", &srgb.to_bytes());
     }
-    if let Some(gama) = &meta.gama {
+    if let Some(gama) = &chunks.gama {
         write_chunk(out, b"gAMA", &gama.to_bytes());
     }
     if let Some(chrm) = &meta.chrm {
@@ -634,10 +743,8 @@ fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
 /// permitting multiple instances; each entry of the `splt` `Vec` is
 /// emitted in order. Returns an error if any `sPLT` payload is invalid
 /// (bad palette name / sample depth, or an 8-bit sample > 255).
-fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> Result<()> {
-    let Some(meta) = meta else {
-        return Ok(());
-    };
+fn write_metadata_before_idat(out: &mut Vec<u8>, chunks: &ChunkSet<'_>) -> Result<()> {
+    let meta = chunks.meta;
     if let Some(bkgd) = &meta.bkgd {
         write_chunk(out, b"bKGD", &bkgd.to_bytes());
     }
@@ -650,8 +757,11 @@ fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
     if let Some(time) = &meta.time {
         write_chunk(out, b"tIME", &time.to_bytes());
     }
-    if let Some(exif) = &meta.exif {
-        write_chunk(out, b"eXIf", &exif.to_bytes());
+    if let Some(exif) = chunks.exif {
+        write_chunk_streamed(out, b"eXIf", |sink| {
+            sink(exif);
+            Ok(())
+        })?;
     }
     for splt in &meta.splt {
         write_chunk(out, b"sPLT", &splt.to_bytes()?);
@@ -662,7 +772,7 @@ fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
     // the more structured chunks (palette, transparency, timing,
     // suggested-palette) precede free-form textual annotations.
     for text in &meta.texts {
-        write_chunk(out, b"tEXt", &text.to_bytes()?);
+        write_chunk_streamed(out, b"tEXt", |sink| text.write_payload(sink))?;
     }
     // `zTXt` (RFC 2083 §4.2.10) shares the "Before IDAT, no ordering
     // constraint" bucket with `tEXt`; "Any number of zTXt and tEXt
@@ -671,7 +781,7 @@ fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
     // compressed bulk-text payloads — a reader streaming the file gets
     // the human-readable annotations first.
     for ztxt in &meta.ztxts {
-        write_chunk(out, b"zTXt", &ztxt.to_bytes()?);
+        write_chunk_streamed(out, b"zTXt", |sink| ztxt.write_payload(sink))?;
     }
     // `iTXt` (W3C PNG3 §11.3.3.4) shares the same "Before IDAT, no
     // ordering constraint" bucket as `tEXt` and `zTXt`. Emitted after
@@ -679,7 +789,20 @@ fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
     // only need byte-exact metadata) lead the internationalised UTF-8
     // chunks in the stream.
     for itxt in &meta.itxts {
-        write_chunk(out, b"iTXt", &itxt.to_bytes()?);
+        write_chunk_streamed(out, b"iTXt", |sink| itxt.write_payload(sink))?;
+    }
+    // The image's XMP packet follows the options' iTXt chunks.
+    if let Some(xmp) = chunks.xmp {
+        write_chunk_streamed(out, b"iTXt", |sink| {
+            crate::metadata::write_itxt_payload(
+                crate::sideinfo::XMP_KEYWORD,
+                false,
+                "",
+                "",
+                xmp,
+                sink,
+            )
+        })?;
     }
     // Unrecognised ancillary chunks captured on decode that lived
     // *before* the first `IDAT` are replayed here, after the recognised
@@ -696,11 +819,8 @@ fn write_metadata_before_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
 /// captured *after* the `IDAT` run on decode. Emitted between the last
 /// `IDAT` / `fdAT` and `IEND`, preserving the before/after-IDAT side the
 /// §14.2 round-trip pins; a no-op when no such chunks were captured.
-fn write_metadata_after_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
-    let Some(meta) = meta else {
-        return;
-    };
-    for u in meta.unknowns.iter().filter(|u| u.after_idat) {
+fn write_metadata_after_idat(out: &mut Vec<u8>, chunks: &ChunkSet<'_>) {
+    for u in chunks.meta.unknowns.iter().filter(|u| u.after_idat) {
         write_chunk(out, &u.chunk_type, &u.data);
     }
 }
@@ -723,9 +843,8 @@ fn write_metadata_after_idat(out: &mut Vec<u8>, meta: Option<&PngMetadata>) {
 fn resolve_trns_bytes(
     ihdr: &Ihdr,
     palette_trns: Option<&[u8]>,
-    meta: Option<&PngMetadata>,
+    meta_trns: Option<&Trns>,
 ) -> Result<Option<Vec<u8>>> {
-    let meta_trns = meta.and_then(|m| m.trns.as_ref());
     match (palette_trns, meta_trns) {
         (None, None) => Ok(None),
         (Some(p), None) => Ok(Some(p.to_vec())),
@@ -740,7 +859,7 @@ fn resolve_trns_bytes(
             // For ct=0 / ct=2 the keyed sample must fit in `bit_depth`
             // bits — same range check the parse path enforces (Trns::parse).
             match t {
-                crate::metadata::Trns::Grayscale(v) => {
+                Trns::Grayscale(v) => {
                     let max = (1u32 << ihdr.bit_depth) - 1;
                     if (*v as u32) > max {
                         return Err(Error::invalid(format!(
@@ -749,7 +868,7 @@ fn resolve_trns_bytes(
                         )));
                     }
                 }
-                crate::metadata::Trns::Rgb(r, g, b) => {
+                Trns::Rgb(r, g, b) => {
                     let max = (1u32 << ihdr.bit_depth) - 1;
                     for (name, v) in [("R", *r), ("G", *g), ("B", *b)] {
                         if (v as u32) > max {
@@ -761,7 +880,7 @@ fn resolve_trns_bytes(
                         }
                     }
                 }
-                crate::metadata::Trns::Palette(_) => {
+                Trns::Palette(_) => {
                     // No bit-depth bound on indexed alpha tables — the
                     // chunk's length-vs-PLTE-entry-count constraint is
                     // enforced when the encoder reads image.palette,
@@ -824,7 +943,7 @@ fn resolve_bit_depth(base: u8, colour_type: u8, opts: &EncodeOptions) -> Result<
 /// is the *packed* on-wire row length (`(width * bit_depth + 7) / 8`)
 /// rather than the source `image.data` row stride. The packing itself
 /// happens in [`flatten_and_normalise_pixels`].
-fn ihdr_and_row_bytes(image: &PngImage, opts: &EncodeOptions) -> Result<IhdrAndRowInfo> {
+fn ihdr_and_row_bytes(image: &ImageRef<'_>, opts: &EncodeOptions) -> Result<IhdrAndRowInfo> {
     let (base_bit_depth, colour_type, channels): (u8, u8, usize) = match image.format {
         PngPixelFormat::Gray8 => (8, 0, 1),
         PngPixelFormat::Gray16Le => (16, 0, 1),
@@ -860,7 +979,7 @@ fn ihdr_and_row_bytes(image: &PngImage, opts: &EncodeOptions) -> Result<IhdrAndR
     // the last non-opaque entry (W3C PNG3 §11.3.1.1 — entries past the
     // tail are opaque, so a longer table would say the same thing).
     let (plte, trns) = if colour_type == 3 {
-        match image.palette.as_ref().filter(|p| !p.is_empty()) {
+        match image.palette.filter(|p| !p.is_empty()) {
             None => {
                 // Default: 1-entry black palette — useful fallback, but
                 // callers normally supply one.
@@ -890,7 +1009,7 @@ fn ihdr_and_row_bytes(image: &PngImage, opts: &EncodeOptions) -> Result<IhdrAndR
 /// `ceil(width * bit_depth / 8)` for the sub-byte Gray / indexed cases
 /// and the source layout otherwise.
 fn flatten_and_normalise_pixels(
-    image: &PngImage,
+    image: &ImageRef<'_>,
     ihdr: &Ihdr,
     row_bytes: usize,
 ) -> Result<Vec<u8>> {
@@ -956,7 +1075,7 @@ fn flatten_and_normalise_pixels(
 ///
 /// A sample whose top bits exceed the `bit_depth` cap is rejected so
 /// a malformed payload cannot reach the wire.
-fn pack_subbyte_rows(image: &PngImage, bit_depth: u8, row_bytes: usize) -> Result<Vec<u8>> {
+fn pack_subbyte_rows(image: &ImageRef<'_>, bit_depth: u8, row_bytes: usize) -> Result<Vec<u8>> {
     match bit_depth {
         1 => pack_subbyte_rows_const::<1>(image, row_bytes),
         2 => pack_subbyte_rows_const::<2>(image, row_bytes),
@@ -973,7 +1092,10 @@ fn pack_subbyte_rows(image: &PngImage, bit_depth: u8, row_bytes: usize) -> Resul
 /// padding the low-order bits with zeros. Sample range validation is
 /// unchanged — the first out-of-range sample in row-major order errors
 /// with its pixel coordinates.
-fn pack_subbyte_rows_const<const BD: usize>(image: &PngImage, row_bytes: usize) -> Result<Vec<u8>> {
+fn pack_subbyte_rows_const<const BD: usize>(
+    image: &ImageRef<'_>,
+    row_bytes: usize,
+) -> Result<Vec<u8>> {
     let h = image.height as usize;
     let w = image.width as usize;
     let stride = image.stride();
@@ -1042,7 +1164,7 @@ pub(crate) struct RowPlane<'a> {
 }
 
 impl<'a> RowPlane<'a> {
-    pub(crate) fn new(image: &'a PngImage, ihdr: &Ihdr, row_bytes: usize) -> Result<Self> {
+    pub(crate) fn new(image: &ImageRef<'a>, ihdr: &Ihdr, row_bytes: usize) -> Result<Self> {
         let height = image.height as usize;
         if ihdr.bit_depth < 8 {
             let packed = pack_subbyte_rows(image, ihdr.bit_depth, row_bytes)?;
@@ -1363,7 +1485,7 @@ fn filter_image_stream_adam7(
 /// [`Ihdr::bpp_for_filter`]) and `strategy` (W3C PNG3 §12.7) to pick the
 /// filter for each pass row.
 fn deflate_encode_pixels_adam7_subbyte(
-    image: &PngImage,
+    image: &ImageRef<'_>,
     ihdr: &Ihdr,
     strategy: FilterStrategy,
     level: u8,
@@ -1398,7 +1520,7 @@ struct PackedPass {
 /// validating each source sample against `(1 << bit_depth) - 1`. The
 /// pack is strategy-independent, so it runs once even under the
 /// [`FilterStrategy::Brute`] multi-candidate search.
-fn pack_subbyte_adam7_passes(image: &PngImage, ihdr: &Ihdr) -> Result<Vec<PackedPass>> {
+fn pack_subbyte_adam7_passes(image: &ImageRef<'_>, ihdr: &Ihdr) -> Result<Vec<PackedPass>> {
     let bd = ihdr.bit_depth as usize;
     let max: u8 = ((1u16 << bd) - 1) as u8;
     let pixels_per_byte = 8 / bd;
@@ -1543,7 +1665,7 @@ pub fn encode_apng_threaded(
             ));
         }
     }
-    let (mut ihdr, row_bytes, plte, trns) = ihdr_and_row_bytes(&frames[0], opts)?;
+    let (mut ihdr, row_bytes, plte, trns) = ihdr_and_row_bytes(&frames[0].view(), opts)?;
     if opts.interlace {
         ihdr.interlace = 1;
     }
@@ -1552,9 +1674,8 @@ pub fn encode_apng_threaded(
     // exactly as `encode` would write them. The IHDR is fixed across
     // the whole APNG so a single resolve on the first-frame palette +
     // metadata covers every frame.
-    let meta = effective_metadata(&frames[0], opts)?;
-    let meta = meta.as_ref();
-    let trns = resolve_trns_bytes(&ihdr, trns.as_deref(), meta)?;
+    let chunks = chunk_set(&frames[0].view(), opts)?;
+    let trns = resolve_trns_bytes(&ihdr, trns.as_deref(), chunks.trns)?;
     let level = resolve_compression_level(opts)?;
 
     let actl = Actl {
@@ -1567,7 +1688,7 @@ pub fn encode_apng_threaded(
     write_chunk(&mut out, b"IHDR", &ihdr.to_bytes());
     write_chunk(&mut out, b"acTL", &actl.to_bytes());
     // sBIT precedes PLTE + IDAT per RFC 2083 §4.3.
-    write_metadata_before_plte(&mut out, meta)?;
+    write_metadata_before_plte(&mut out, &chunks)?;
     if let Some(p) = plte.as_deref() {
         write_chunk(&mut out, b"PLTE", p);
     }
@@ -1576,7 +1697,7 @@ pub fn encode_apng_threaded(
     }
     // pHYs / tIME / sPLT precede IDAT (and APNG's fcTL/fdAT stream that
     // bracket subsequent frames).
-    write_metadata_before_idat(&mut out, meta)?;
+    write_metadata_before_idat(&mut out, &chunks)?;
 
     let mut seq: u32 = 0;
     for (idx, frame) in frames.iter().enumerate() {
@@ -1603,7 +1724,7 @@ pub fn encode_apng_threaded(
                 &mut out,
                 b"IDAT",
                 &[],
-                frame,
+                &frame.view(),
                 &ihdr,
                 row_bytes,
                 opts,
@@ -1615,7 +1736,7 @@ pub fn encode_apng_threaded(
                 &mut out,
                 b"fdAT",
                 &seq.to_be_bytes(),
-                frame,
+                &frame.view(),
                 &ihdr,
                 row_bytes,
                 opts,
@@ -1626,7 +1747,7 @@ pub fn encode_apng_threaded(
         }
     }
 
-    write_metadata_after_idat(&mut out, meta);
+    write_metadata_after_idat(&mut out, &chunks);
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
 }
@@ -2009,24 +2130,24 @@ fn encode_apng_regions(
     let palette_src = match default_image {
         Some(d) => d,
         None => frames[0].image,
+    }
+    .view();
+    let canvas_probe = ImageRef {
+        width: canvas_width,
+        height: canvas_height,
+        format: canvas_fmt,
+        stride: canvas_width as usize * canvas_fmt.bytes_per_pixel(),
+        data: &[],
+        ..palette_src
     };
-    let canvas_probe = PngImage::packed_unchecked(
-        canvas_width,
-        canvas_height,
-        canvas_fmt,
-        canvas_width as usize * canvas_fmt.bytes_per_pixel(),
-        Vec::new(),
-    )
-    .with_palette(palette_src.palette.clone());
     let (mut ihdr, _canvas_row_bytes, plte, trns) = ihdr_and_row_bytes(&canvas_probe, opts)?;
     if opts.interlace {
         ihdr.interlace = 1;
     }
     // The canvas source's `color` / `metadata` / `transparency` become
     // chunks exactly as `encode` would write them for a still image.
-    let meta = effective_metadata(palette_src, opts)?;
-    let meta = meta.as_ref();
-    let trns = resolve_trns_bytes(&ihdr, trns.as_deref(), meta)?;
+    let chunks = chunk_set(&palette_src, opts)?;
+    let trns = resolve_trns_bytes(&ihdr, trns.as_deref(), chunks.trns)?;
     let level = resolve_compression_level(opts)?;
 
     let actl = Actl {
@@ -2038,14 +2159,14 @@ fn encode_apng_regions(
     out.extend_from_slice(&PNG_MAGIC);
     write_chunk(&mut out, b"IHDR", &ihdr.to_bytes());
     write_chunk(&mut out, b"acTL", &actl.to_bytes());
-    write_metadata_before_plte(&mut out, meta)?;
+    write_metadata_before_plte(&mut out, &chunks)?;
     if let Some(p) = plte.as_deref() {
         write_chunk(&mut out, b"PLTE", p);
     }
     if let Some(t) = trns.as_deref() {
         write_chunk(&mut out, b"tRNS", t);
     }
-    write_metadata_before_idat(&mut out, meta)?;
+    write_metadata_before_idat(&mut out, &chunks)?;
 
     // Compress one frame's sub-region pixels straight into an IDAT /
     // fdAT chunk using the frame's own dimensions (the fcTL extent) as
@@ -2059,7 +2180,15 @@ fn encode_apng_regions(
             };
             let row_bytes = region_row_bytes(&sub_ihdr, img.width);
             write_pixel_stream(
-                out, chunk_type, prefix, img, &sub_ihdr, row_bytes, opts, level, threads,
+                out,
+                chunk_type,
+                prefix,
+                &img.view(),
+                &sub_ihdr,
+                row_bytes,
+                opts,
+                level,
+                threads,
             )
         };
 
@@ -2097,7 +2226,7 @@ fn encode_apng_regions(
         }
     }
 
-    write_metadata_after_idat(&mut out, meta);
+    write_metadata_after_idat(&mut out, &chunks);
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
 }

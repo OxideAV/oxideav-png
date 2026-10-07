@@ -32,9 +32,9 @@ use oxideav_core::{
 };
 
 use crate::decoder::CODEC_ID_STR;
-use crate::encoder::{encode_apng_threaded, encode_threaded, EncodeOptions};
+use crate::encoder::{encode_apng_threaded, encode_threaded, encode_view, EncodeOptions};
 use crate::error::PngError;
-use crate::image::{ColorInfo, ColorRange, Palette, PngImage, PngPixelFormat};
+use crate::image::{ColorInfo, ColorRange, ImageRef, Palette, PngImage, PngPixelFormat};
 use crate::options::DecodeOptions;
 
 /// Convert a [`PngError`] into the framework-shared
@@ -192,17 +192,64 @@ fn video_frame_into_png_image(
     Ok(img)
 }
 
+/// [`video_frame_to_png_image`] without the copy: the frame's first
+/// plane as the encoder reads it, borrowed, with the same side fields.
+/// The palette a `Pal8` frame gets is built into `palette`, which the
+/// view borrows.
+fn video_frame_view<'a>(
+    frame: &'a VideoFrame,
+    width: u32,
+    height: u32,
+    pix: PngPixelFormat,
+    legacy_palette: &[u8],
+    palette: &'a mut Option<Palette>,
+) -> Result<ImageRef<'a>, PngError> {
+    let plane = frame
+        .image_planes()
+        .first()
+        .ok_or_else(|| PngError::invalid("PNG encoder: frame has no planes"))?;
+    let mut image = ImageRef::plane(width, height, pix, plane.stride, &plane.data)?;
+    let (frame_palette, color) = frame_side_fields(frame, pix, legacy_palette, &plane.data);
+    *palette = frame_palette;
+    let palette: &'a Option<Palette> = palette;
+    image.palette = palette.as_ref();
+    if let Some(color) = color {
+        image.color = color;
+    }
+    Ok(image)
+}
+
+/// The side fields a frame's side-channels give an image of layout
+/// `pix` whose plane is `indices`: for `Pal8`, the palette side-channel
+/// when attached, else the legacy palette blob sized to the highest
+/// index used; and the colour-signal side-channel, when attached.
+fn frame_side_fields(
+    frame: &VideoFrame,
+    pix: PngPixelFormat,
+    legacy_palette: &[u8],
+    indices: &[u8],
+) -> (Option<Palette>, Option<ColorInfo>) {
+    let palette = if pix == PngPixelFormat::Pal8 {
+        match frame.palette() {
+            Some(rgb) => Some(Palette::from_rgb(rgb, None)),
+            None => palette_from_legacy_blob(legacy_palette, indices),
+        }
+    } else {
+        None
+    };
+    let color = frame.color_signal().map(|sig| from_color_signal(&sig));
+    (palette, color)
+}
+
 /// Fill `palette` / `color` of `img` from the frame's side-channels
 /// (falling back to the legacy palette blob).
 fn stamp_side_channels(img: &mut PngImage, frame: &VideoFrame, legacy_palette: &[u8]) {
+    let (palette, color) = frame_side_fields(frame, img.format, legacy_palette, img.data());
     if img.format == PngPixelFormat::Pal8 {
-        img.palette = match frame.palette() {
-            Some(rgb) => Some(Palette::from_rgb(rgb, None)),
-            None => palette_from_legacy_blob(legacy_palette, img.data()),
-        };
+        img.palette = palette;
     }
-    if let Some(sig) = frame.color_signal() {
-        img.color = from_color_signal(&sig);
+    if let Some(color) = color {
+        img.color = color;
     }
 }
 
@@ -669,8 +716,9 @@ pub fn encode_single_with_options(
     opts: &EncodeOptions,
 ) -> oxideav_core::Result<Vec<u8>> {
     let pix = from_core_pixel_format(pix)?;
-    let img = video_frame_to_png_image(frame, width, height, pix, palette)?;
-    Ok(crate::encoder::encode(&img, opts)?)
+    let mut frame_palette = None;
+    let image = video_frame_view(frame, width, height, pix, palette, &mut frame_palette)?;
+    Ok(encode_view(&image, opts, opts.threads.max(1))?)
 }
 
 // ---- Container + registration ----
