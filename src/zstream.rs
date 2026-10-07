@@ -163,16 +163,17 @@ fn map_err(e: compcol::Error) -> Error {
     Error::invalid(format!("PNG: zlib compression failed: {e:?}"))
 }
 
-/// Push `input` through `enc`, appending compressed bytes to `out`.
+/// Push `input` through `enc`, handing compressed bytes to `out` as
+/// they leave the encoder's `buf`.
 fn drive_encode(
     enc: &mut impl compcol::Encoder,
     mut input: &[u8],
     buf: &mut [u8],
-    out: &mut Vec<u8>,
+    out: &mut dyn FnMut(&[u8]),
 ) -> Result<()> {
     while !input.is_empty() {
         let (p, status) = enc.encode(input, buf).map_err(map_err)?;
-        out.extend_from_slice(&buf[..p.written]);
+        out(&buf[..p.written]);
         input = &input[p.consumed..];
         match status {
             Status::OutputFull => continue,
@@ -193,11 +194,11 @@ fn drive_encode(
 fn drive_sync_flush(
     enc: &mut impl compcol::Encoder,
     buf: &mut [u8],
-    out: &mut Vec<u8>,
+    out: &mut dyn FnMut(&[u8]),
 ) -> Result<()> {
     loop {
         let (p, status) = enc.flush(buf, Flush::Sync).map_err(map_err)?;
-        out.extend_from_slice(&buf[..p.written]);
+        out(&buf[..p.written]);
         match status {
             Status::OutputFull => continue,
             Status::InputEmpty | Status::StreamEnd => return Ok(()),
@@ -206,10 +207,14 @@ fn drive_sync_flush(
 }
 
 /// Finish the stream (single-segment zlib path) into `out`.
-fn drive_finish(enc: &mut impl compcol::Encoder, buf: &mut [u8], out: &mut Vec<u8>) -> Result<()> {
+fn drive_finish(
+    enc: &mut impl compcol::Encoder,
+    buf: &mut [u8],
+    out: &mut dyn FnMut(&[u8]),
+) -> Result<()> {
     loop {
         let (p, status) = enc.finish(buf).map_err(map_err)?;
-        out.extend_from_slice(&buf[..p.written]);
+        out(&buf[..p.written]);
         match status {
             Status::StreamEnd => return Ok(()),
             Status::OutputFull | Status::InputEmpty => continue,
@@ -233,9 +238,11 @@ fn compress_segment(src: &dyn SegmentSource, index: usize, level: u8) -> Result<
     let mut adler = Adler32::new();
     src.feed(index, &mut |chunk| {
         adler.update(chunk);
-        drive_encode(&mut enc, chunk, &mut buf, &mut bytes)
+        drive_encode(&mut enc, chunk, &mut buf, &mut |b| {
+            bytes.extend_from_slice(b)
+        })
     })?;
-    drive_sync_flush(&mut enc, &mut buf, &mut bytes)?;
+    drive_sync_flush(&mut enc, &mut buf, &mut |b| bytes.extend_from_slice(b))?;
     Ok(Segment { bytes, adler })
 }
 
@@ -247,14 +254,32 @@ fn compress_single(src: &dyn SegmentSource, level: u8, out: &mut dyn FnMut(&[u8]
     let mut buf = vec![0u8; OUT_CHUNK];
     let mut pending = Vec::new();
     src.feed(0, &mut |chunk| {
-        drive_encode(&mut enc, chunk, &mut buf, &mut pending)?;
+        drive_encode(&mut enc, chunk, &mut buf, &mut |b| {
+            pending.extend_from_slice(b)
+        })?;
         out(&pending);
         pending.clear();
         Ok(())
     })?;
-    drive_finish(&mut enc, &mut buf, &mut pending)?;
+    drive_finish(&mut enc, &mut buf, &mut |b| pending.extend_from_slice(b))?;
     out(&pending);
     Ok(())
+}
+
+/// Compress `input` as one ordinary zlib stream at `level` (compcol's
+/// own header and trailer, normal finish), handing the compressed bytes
+/// to `out` as they leave the encoder's output buffer, so nothing
+/// larger than that buffer is held whatever the input size. The
+/// encoder sees the same calls as a one-shot compression of `input`,
+/// so the bytes are the same. The input is one slice on purpose:
+/// compcol cuts its blocks by how much input it holds, so feeding the
+/// same bytes in pieces can change the stream.
+pub(crate) fn compress_zlib_to(level: u8, input: &[u8], out: &mut dyn FnMut(&[u8])) -> Result<()> {
+    use compcol::zlib::{Encoder, EncoderConfig};
+    let mut enc = Encoder::with_config(EncoderConfig { level });
+    let mut buf = vec![0u8; OUT_CHUNK];
+    drive_encode(&mut enc, input, &mut buf, out)?;
+    drive_finish(&mut enc, &mut buf, out)
 }
 
 /// RFC 1950 §2.2 `CMF` / `FLG` pair for a 32 KiB-window deflate stream
@@ -484,15 +509,44 @@ mod tests {
             let mut buf = vec![0u8; OUT_CHUNK];
             for i in 0..src.segment_count() {
                 src.feed(i, &mut |chunk| {
-                    drive_encode(&mut enc, chunk, &mut buf, &mut streamed)
+                    drive_encode(&mut enc, chunk, &mut buf, &mut |b| {
+                        streamed.extend_from_slice(b)
+                    })
                 })
                 .unwrap();
             }
-            drive_finish(&mut enc, &mut buf, &mut streamed).unwrap();
+            drive_finish(&mut enc, &mut buf, &mut |b| streamed.extend_from_slice(b)).unwrap();
             assert_eq!(streamed, one_shot, "level {level}");
             // And the public single-segment entry point.
             let single = compress_bytes_to_vec(&data, usize::MAX, level, 4).unwrap();
             assert_eq!(single, one_shot, "level {level} via compress_bytes_to_vec");
+        }
+    }
+
+    /// `compress_zlib_to` writes the one-shot compressor's bytes while
+    /// its output passes through the 64 KiB buffer many times, so a
+    /// metadata chunk streamed into the file matches the chunk the
+    /// one-shot `to_bytes` path used to build.
+    #[test]
+    fn compress_zlib_to_matches_one_shot_compression() {
+        use crate::zlibvec::compress_to_vec_zlib;
+        for (data, level) in [
+            (noisy(700_000, 0x5EED_0043), 6u8),
+            (noisy(300_000, 0x5EED_0044), 1),
+            (vec![b'a'; 200_000], 6),
+            (vec![7], 6),
+            (Vec::new(), 6),
+        ] {
+            let one_shot = compress_to_vec_zlib(&data, level).unwrap();
+            let mut streamed = Vec::new();
+            let mut pieces = 0usize;
+            compress_zlib_to(level, &data, &mut |b| {
+                streamed.extend_from_slice(b);
+                pieces += 1;
+            })
+            .unwrap();
+            assert_eq!(streamed, one_shot, "{} bytes at level {level}", data.len());
+            assert!(pieces >= one_shot.len() / OUT_CHUNK);
         }
     }
 
