@@ -402,11 +402,7 @@ impl PngImage {
         format: PixelFormat,
         planes: Vec<Plane>,
     ) -> Result<Self, PngError> {
-        if width == 0 || height == 0 {
-            return Err(PngError::invalid(format!(
-                "PNG image: zero dimension ({width}×{height})"
-            )));
-        }
+        check_dimensions(width, height)?;
         if planes.len() != 1 {
             return Err(PngError::invalid(format!(
                 "PNG image: {} planes supplied, PNG layouts are packed (exactly one)",
@@ -414,26 +410,7 @@ impl PngImage {
             )));
         }
         let plane = &planes[0];
-        let row_bytes = (width as usize)
-            .checked_mul(format.bytes_per_pixel())
-            .ok_or_else(|| PngError::invalid("PNG image: row size overflows usize"))?;
-        if plane.stride < row_bytes {
-            return Err(PngError::invalid(format!(
-                "PNG image: stride {} is shorter than the {row_bytes}-byte row",
-                plane.stride
-            )));
-        }
-        let needed = (height as usize - 1)
-            .checked_mul(plane.stride)
-            .and_then(|v| v.checked_add(row_bytes))
-            .ok_or_else(|| PngError::invalid("PNG image: plane size overflows usize"))?;
-        if plane.data.len() < needed {
-            return Err(PngError::invalid(format!(
-                "PNG image: pixel buffer holds {} bytes but {height} rows at stride {} need {needed}",
-                plane.data.len(),
-                plane.stride
-            )));
-        }
+        check_plane(width, height, format, plane.stride, plane.data.len())?;
         Ok(Self::new_unchecked(width, height, format, planes))
     }
 
@@ -578,6 +555,21 @@ impl PngImage {
     /// Pixel bytes of the single plane (empty if none).
     pub(crate) fn data(&self) -> &[u8] {
         self.as_bytes().unwrap_or(&[])
+    }
+
+    /// The image by reference, as the encoder reads it.
+    pub(crate) fn view(&self) -> ImageRef<'_> {
+        ImageRef {
+            width: self.width,
+            height: self.height,
+            format: self.format,
+            stride: self.stride(),
+            data: self.data(),
+            color: self.color,
+            metadata: Some(&self.metadata),
+            palette: self.palette.as_ref(),
+            transparency: self.transparency.as_ref(),
+        }
     }
 
     /// Mutable pixel bytes of the single plane.
@@ -772,6 +764,102 @@ impl PngImage {
             }
         }
         out
+    }
+}
+
+/// [`PngImage::new`]'s dimension check: both sides non-zero.
+fn check_dimensions(width: u32, height: u32) -> Result<(), PngError> {
+    if width == 0 || height == 0 {
+        return Err(PngError::invalid(format!(
+            "PNG image: zero dimension ({width}×{height})"
+        )));
+    }
+    Ok(())
+}
+
+/// [`PngImage::new`]'s plane check, for non-zero dimensions: `stride ≥
+/// width × bytes_per_pixel` and a buffer of `len` bytes that holds the
+/// rows (`(height - 1) × stride + width × bytes_per_pixel`; the last
+/// row may be unpadded).
+fn check_plane(
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    stride: usize,
+    len: usize,
+) -> Result<(), PngError> {
+    let row_bytes = (width as usize)
+        .checked_mul(format.bytes_per_pixel())
+        .ok_or_else(|| PngError::invalid("PNG image: row size overflows usize"))?;
+    if stride < row_bytes {
+        return Err(PngError::invalid(format!(
+            "PNG image: stride {stride} is shorter than the {row_bytes}-byte row"
+        )));
+    }
+    let needed = (height as usize - 1)
+        .checked_mul(stride)
+        .and_then(|v| v.checked_add(row_bytes))
+        .ok_or_else(|| PngError::invalid("PNG image: plane size overflows usize"))?;
+    if len < needed {
+        return Err(PngError::invalid(format!(
+            "PNG image: pixel buffer holds {len} bytes but {height} rows at stride {stride} need {needed}"
+        )));
+    }
+    Ok(())
+}
+
+/// What the encoder reads from an image: the fields of a [`PngImage`]
+/// with the plane and the side fields borrowed, so a caller's pixel
+/// buffer (a [`PngImage`], a raw slice, a framework frame) is encoded
+/// where it lies instead of being copied into an owned image first.
+/// `metadata` is `None` for a bare plane.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ImageRef<'a> {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) format: PixelFormat,
+    pub(crate) stride: usize,
+    pub(crate) data: &'a [u8],
+    pub(crate) color: ColorInfo,
+    pub(crate) metadata: Option<&'a Metadata>,
+    pub(crate) palette: Option<&'a Palette>,
+    pub(crate) transparency: Option<&'a Trns>,
+}
+
+impl<'a> ImageRef<'a> {
+    /// A bare plane: [`ColorInfo::png_default`], no metadata, palette or
+    /// transparency. Rejects what [`PngImage::packed`] rejects, with the
+    /// same errors.
+    pub(crate) fn plane(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        stride: usize,
+        data: &'a [u8],
+    ) -> Result<Self, PngError> {
+        check_dimensions(width, height)?;
+        check_plane(width, height, format, stride, data.len())?;
+        Ok(Self {
+            width,
+            height,
+            format,
+            stride,
+            data,
+            color: ColorInfo::png_default(),
+            metadata: None,
+            palette: None,
+            transparency: None,
+        })
+    }
+
+    /// The pixel bytes.
+    pub(crate) fn data(&self) -> &'a [u8] {
+        self.data
+    }
+
+    /// Row stride in bytes.
+    pub(crate) fn stride(&self) -> usize {
+        self.stride
     }
 }
 

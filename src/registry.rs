@@ -32,9 +32,11 @@ use oxideav_core::{
 };
 
 use crate::decoder::CODEC_ID_STR;
-use crate::encoder::{encode_apng_threaded, encode_threaded, EncodeOptions};
+use crate::encoder::{
+    encode_still, encode_view, still_to_apng, EncodeOptions, FrameStream, StillLayout,
+};
 use crate::error::PngError;
-use crate::image::{ColorInfo, ColorRange, Palette, PngImage, PngPixelFormat};
+use crate::image::{ColorInfo, ColorRange, ImageRef, Palette, PngImage, PngPixelFormat};
 use crate::options::DecodeOptions;
 
 /// Convert a [`PngError`] into the framework-shared
@@ -171,38 +173,64 @@ fn video_frame_to_png_image(
     Ok(img)
 }
 
-/// [`video_frame_to_png_image`] for a frame the encoder owns: the first
-/// plane's buffer moves into the [`PngImage`] instead of being copied,
-/// so the buffered frame is the only pixel copy the trait path holds.
-fn video_frame_into_png_image(
-    mut frame: VideoFrame,
+/// [`video_frame_to_png_image`] without the copy: the frame's first
+/// plane as the encoder reads it, borrowed, with the same side fields.
+/// The palette a `Pal8` frame gets is built into `palette`, which the
+/// view borrows.
+fn video_frame_view<'a>(
+    frame: &'a VideoFrame,
     width: u32,
     height: u32,
     pix: PngPixelFormat,
-    palette: &[u8],
-) -> oxideav_core::Result<PngImage> {
-    if frame.image_plane_count() == 0 {
-        return Err(oxideav_core::Error::invalid(
-            "PNG encoder: frame has no planes",
-        ));
+    legacy_palette: &[u8],
+    palette: &'a mut Option<Palette>,
+) -> Result<ImageRef<'a>, PngError> {
+    let plane = frame
+        .image_planes()
+        .first()
+        .ok_or_else(|| PngError::invalid("PNG encoder: frame has no planes"))?;
+    let mut image = ImageRef::plane(width, height, pix, plane.stride, &plane.data)?;
+    let (frame_palette, color) = frame_side_fields(frame, pix, legacy_palette, &plane.data);
+    *palette = frame_palette;
+    let palette: &'a Option<Palette> = palette;
+    image.palette = palette.as_ref();
+    if let Some(color) = color {
+        image.color = color;
     }
-    let plane = frame.planes.swap_remove(0);
-    let mut img = PngImage::packed(width, height, pix, plane.stride, plane.data)?;
-    stamp_side_channels(&mut img, &frame, palette);
-    Ok(img)
+    Ok(image)
+}
+
+/// The side fields a frame's side-channels give an image of layout
+/// `pix` whose plane is `indices`: for `Pal8`, the palette side-channel
+/// when attached, else the legacy palette blob sized to the highest
+/// index used; and the colour-signal side-channel, when attached.
+fn frame_side_fields(
+    frame: &VideoFrame,
+    pix: PngPixelFormat,
+    legacy_palette: &[u8],
+    indices: &[u8],
+) -> (Option<Palette>, Option<ColorInfo>) {
+    let palette = if pix == PngPixelFormat::Pal8 {
+        match frame.palette() {
+            Some(rgb) => Some(Palette::from_rgb(rgb, None)),
+            None => palette_from_legacy_blob(legacy_palette, indices),
+        }
+    } else {
+        None
+    };
+    let color = frame.color_signal().map(|sig| from_color_signal(&sig));
+    (palette, color)
 }
 
 /// Fill `palette` / `color` of `img` from the frame's side-channels
 /// (falling back to the legacy palette blob).
 fn stamp_side_channels(img: &mut PngImage, frame: &VideoFrame, legacy_palette: &[u8]) {
+    let (palette, color) = frame_side_fields(frame, img.format, legacy_palette, img.data());
     if img.format == PngPixelFormat::Pal8 {
-        img.palette = match frame.palette() {
-            Some(rgb) => Some(Palette::from_rgb(rgb, None)),
-            None => palette_from_legacy_blob(legacy_palette, img.data()),
-        };
+        img.palette = palette;
     }
-    if let Some(sig) = frame.color_signal() {
-        img.color = from_color_signal(&sig);
+    if let Some(color) = color {
+        img.color = color;
     }
 }
 
@@ -509,7 +537,8 @@ pub fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn En
         height,
         pix,
         time_base,
-        frames: Vec::new(),
+        pending: None,
+        failed: None,
         pending_out: VecDeque::new(),
         frame_rate: params.frame_rate,
         palette: params.extradata.clone(),
@@ -520,15 +549,26 @@ pub fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn En
     }))
 }
 
-/// PNG `Encoder` trait impl. Buffers up to N frames before emitting a
-/// single PNG (one frame) or APNG (multiple frames) on flush.
+/// PNG `Encoder` trait impl. Emits a single PNG (one frame) or an APNG
+/// (more frames, or a frame rate set) on flush.
+///
+/// Each frame is compressed in `send_frame`, read in place from the
+/// caller's frame, so the encoder holds compressed frames, never a copy
+/// of a frame's pixels. A frame that cannot be encoded fails the whole
+/// file: its `send_frame` returns the error, later frames of the file
+/// are dropped, `flush` returns the same error and no packet is
+/// emitted. Frames sent after that `flush` start a new file.
 pub struct PngEncoder {
     output_params: CodecParameters,
     width: u32,
     height: u32,
     pix: PngPixelFormat,
     time_base: TimeBase,
-    frames: Vec<VideoFrame>,
+    /// The frames sent since the last packet, compressed.
+    pending: Option<PendingFile>,
+    /// The error that failed the file being built; `flush` (or, after
+    /// one, `receive_packet`) returns it and starts a new file.
+    failed: Option<PngError>,
     pending_out: VecDeque<Packet>,
     frame_rate: Option<Rational>,
     /// Raw palette + optional trns carried on `extradata`. Only used when
@@ -554,8 +594,16 @@ impl Encoder for PngEncoder {
     fn send_frame(&mut self, frame: &Frame) -> oxideav_core::Result<()> {
         match frame {
             Frame::Video(v) => {
-                self.frames.push(v.clone());
-                Ok(())
+                if self.failed.is_some() {
+                    // The file this frame belongs to has already failed;
+                    // `flush` reports why.
+                    return Ok(());
+                }
+                self.compress_frame(v).map_err(|e| {
+                    self.pending = None;
+                    self.failed = Some(copy_error(&e));
+                    e.into()
+                })
             }
             _ => Err(oxideav_core::Error::invalid(
                 "PNG encoder: video frames only",
@@ -564,16 +612,17 @@ impl Encoder for PngEncoder {
     }
 
     fn receive_packet(&mut self) -> oxideav_core::Result<Packet> {
-        if !self.pending_out.is_empty() {
-            return Ok(self.pending_out.pop_front().unwrap());
+        if let Some(p) = self.pending_out.pop_front() {
+            return Ok(p);
         }
         if self.eof {
+            if let Some(e) = self.failed.take() {
+                return Err(e.into());
+            }
             // Produce output now if we haven't already.
-            if !self.frames.is_empty() {
-                self.finalize()?;
-                if let Some(p) = self.pending_out.pop_front() {
-                    return Ok(p);
-                }
+            self.finalize();
+            if let Some(p) = self.pending_out.pop_front() {
+                return Ok(p);
             }
             return Err(oxideav_core::Error::Eof);
         }
@@ -582,8 +631,11 @@ impl Encoder for PngEncoder {
 
     fn flush(&mut self) -> oxideav_core::Result<()> {
         self.eof = true;
-        if !self.frames.is_empty() && self.pending_out.is_empty() {
-            self.finalize()?;
+        if let Some(e) = self.failed.take() {
+            return Err(e.into());
+        }
+        if self.pending_out.is_empty() {
+            self.finalize();
         }
         Ok(())
     }
@@ -596,44 +648,126 @@ impl Encoder for PngEncoder {
     }
 }
 
+/// The frames of the next packet, compressed as they were sent.
+struct PendingFile {
+    /// Frame 0 as a complete still PNG: the packet itself when it stays
+    /// a still, else the source of the APNG's header chunks, default
+    /// image and trailer (see [`still_to_apng`]).
+    still: Vec<u8>,
+    /// Where the parts of `still` lie.
+    layout: StillLayout,
+    /// How frames 1 and up are compressed, derived from frame 0.
+    stream: FrameStream,
+    /// The `fcTL` / `fdAT` pairs of frames 1 and up, in order.
+    later_frames: Vec<u8>,
+    /// Frames compressed so far.
+    frames: u32,
+    /// Frame 0's timestamp: the packet's.
+    pts: Option<i64>,
+}
+
+/// Per-frame `fcTL` delay in centiseconds: from the stream's frame
+/// rate, else 10 cs (10 Hz).
+fn delay_cs(frame_rate: Option<Rational>) -> u16 {
+    match frame_rate {
+        Some(r) if r.num > 0 && r.den > 0 => (100 * r.den as u32 / r.num as u32) as u16,
+        _ => 10,
+    }
+}
+
+/// A second [`PngError`] equal to `e`, to report one error twice (from
+/// `send_frame` and from `flush`). An I/O error keeps its kind and
+/// message; the encoder writes to memory, so it raises none.
+fn copy_error(e: &PngError) -> PngError {
+    match e {
+        PngError::InvalidData(s) => PngError::InvalidData(s.clone()),
+        PngError::Unsupported(s) => PngError::Unsupported(s.clone()),
+        PngError::LimitExceeded(s) => PngError::LimitExceeded(s.clone()),
+        PngError::Io(io) => PngError::Io(std::io::Error::new(io.kind(), io.to_string())),
+        PngError::Eof => PngError::Eof,
+        PngError::NeedMore => PngError::NeedMore,
+        PngError::Other(s) => PngError::Other(s.clone()),
+    }
+}
+
 impl PngEncoder {
-    fn finalize(&mut self) -> oxideav_core::Result<()> {
-        let is_animated = self.frames.len() > 1 || self.animated_hint;
-        let first_pts = self.frames[0].pts;
-        let bytes = if is_animated {
-            // Default delay per frame: derived from frame_rate or
-            // 10cs = 10Hz.
-            let delay_cs: u16 = match self.frame_rate {
-                Some(r) if r.num > 0 && r.den > 0 => (100 * r.den as u32 / r.num as u32) as u16,
-                _ => 10,
-            };
-            let frames: Vec<PngImage> = std::mem::take(&mut self.frames)
-                .into_iter()
-                .map(|f| {
-                    video_frame_into_png_image(f, self.width, self.height, self.pix, &self.palette)
-                })
-                .collect::<oxideav_core::Result<_>>()?;
-            encode_apng_threaded(&frames, delay_cs, 0, &self.opts, self.threads)?
-        } else {
-            // Move the buffered frame's plane into the image (no copy)
-            // and stream it straight into the PNG.
-            let frame = self.frames.swap_remove(0);
-            self.frames.clear();
-            let img = video_frame_into_png_image(
+    /// Compress `frame` into the pending file, reading its plane in
+    /// place. Frame 0 becomes a complete still PNG; every later frame is
+    /// appended as the `fcTL` / `fdAT` pair an APNG carries it in (its
+    /// palette and colour are not read: the APNG takes them from frame
+    /// 0, as [`crate::encode_apng`] does).
+    fn compress_frame(&mut self, frame: &VideoFrame) -> Result<(), PngError> {
+        let Some(file) = self.pending.as_mut() else {
+            let mut palette = None;
+            let image = video_frame_view(
                 frame,
                 self.width,
                 self.height,
                 self.pix,
                 &self.palette,
+                &mut palette,
             )?;
-            encode_threaded(&img, &self.opts, self.threads)?
+            let (still, layout) = encode_still(&image, &self.opts, self.threads)?;
+            // Derived once, from frame 0 with its palette, as
+            // `encode_apng_threaded` derives it from its first frame; the
+            // still above already passed the same checks.
+            let stream = FrameStream::new(&image, &self.opts)?;
+            self.pending = Some(PendingFile {
+                still,
+                layout,
+                stream,
+                later_frames: Vec::new(),
+                frames: 1,
+                pts: frame.pts,
+            });
+            return Ok(());
+        };
+        let plane = frame
+            .image_planes()
+            .first()
+            .ok_or_else(|| PngError::invalid("PNG encoder: frame has no planes"))?;
+        let image = ImageRef::plane(self.width, self.height, self.pix, plane.stride, &plane.data)?;
+        // Frame n's fcTL carries sequence 2n - 1 and its fdAT 2n; frame
+        // 0's fcTL is sequence 0 (W3C PNG3 §4.9.2).
+        let sequence = 2 * file.frames - 1;
+        file.stream.write_frame(
+            &mut file.later_frames,
+            &image,
+            &self.opts,
+            self.threads,
+            sequence,
+            delay_cs(self.frame_rate),
+            100,
+        )?;
+        file.frames += 1;
+        Ok(())
+    }
+
+    /// Turn the pending file, if any, into a packet: the still when one
+    /// frame was sent and no frame rate was set, else the APNG of every
+    /// frame.
+    fn finalize(&mut self) {
+        let Some(file) = self.pending.take() else {
+            return;
+        };
+        let bytes = if file.frames > 1 || self.animated_hint {
+            still_to_apng(
+                &file.still,
+                &file.layout,
+                &file.later_frames,
+                file.frames,
+                0,
+                delay_cs(self.frame_rate),
+                100,
+            )
+        } else {
+            file.still
         };
         let mut pkt = Packet::new(0, self.time_base, bytes);
-        pkt.pts = first_pts;
+        pkt.pts = file.pts;
         pkt.dts = pkt.pts;
         pkt.flags.keyframe = true;
         self.pending_out.push_back(pkt);
-        Ok(())
     }
 }
 
@@ -669,8 +803,9 @@ pub fn encode_single_with_options(
     opts: &EncodeOptions,
 ) -> oxideav_core::Result<Vec<u8>> {
     let pix = from_core_pixel_format(pix)?;
-    let img = video_frame_to_png_image(frame, width, height, pix, palette)?;
-    Ok(crate::encoder::encode(&img, opts)?)
+    let mut frame_palette = None;
+    let image = video_frame_view(frame, width, height, pix, palette, &mut frame_palette)?;
+    Ok(encode_view(&image, opts, opts.threads.max(1))?)
 }
 
 // ---- Container + registration ----

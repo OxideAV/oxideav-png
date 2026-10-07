@@ -36,7 +36,9 @@
 //!   ([`Frame`]); [`decode_from`] reads a `Read` to its end.
 //! * [`encode`] / [`encode_rgb8`] / [`encode_rgba8`] / [`encode_to`]
 //!   with [`EncodeOptions`] (level, filter, interlace, sub-byte depth,
-//!   threads, extra chunks).
+//!   threads, extra chunks). [`encode_plane`] encodes a borrowed plane
+//!   in any layout without copying it into a [`PngImage`] first;
+//!   [`encode_into`] appends the file to a caller's buffer.
 //! * [`PngError`] (alias [`Error`]): `InvalidData`, `Unsupported`,
 //!   `LimitExceeded`, `Io`, …
 //!
@@ -186,6 +188,7 @@ pub use options::DecodeOptions;
 pub use sideinfo::XMP_KEYWORD;
 
 // ---- PNG-specific depth (the contract is a floor, not a ceiling) ----------
+pub use api::{encode_into, encode_plane};
 pub use apng::{Blend as ApngBlend, Disposal as ApngDisposal};
 pub use chunk::{ChunkType, ColourType};
 pub use decoder::CODEC_ID_STR;
