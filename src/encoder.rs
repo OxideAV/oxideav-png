@@ -349,20 +349,39 @@ pub(crate) fn encode_view_into(
     out: &mut Vec<u8>,
 ) -> Result<()> {
     let start = out.len();
-    let written = write_png(image, opts, threads, out);
+    let written = write_png(image, opts, threads, out, &mut |_, _| Ok(()));
     if written.is_err() {
         out.truncate(start);
     }
     written
 }
 
-/// Write `image` as a PNG file at the end of `out`. On error `out` may
+/// A point where [`write_png`] can hand `out` to its caller without
+/// splitting a chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Cut {
+    /// After the last chunk before the pixel data; `out` ends where the
+    /// `IDAT` chunk will start.
+    BeforeIdat,
+    /// After the `IDAT` chunk.
+    AfterIdat,
+    /// After `IEND`: the file is complete.
+    End,
+}
+
+/// Write `image` as a PNG file at the end of `out`, calling `cut` with
+/// `out` at each [`Cut`] in turn. A buffering caller passes a no-op; a
+/// streaming caller drains `out` to its writer there, so `out` holds
+/// one run at a time. The `IDAT` chunk is one run, held whole, because
+/// a chunk's length field precedes its data (RFC 2083 §3.2). Options
+/// and metadata are checked before the first cut. On error `out` may
 /// hold a partial file; the caller discards it.
-fn write_png(
+pub(crate) fn write_png(
     image: &ImageRef<'_>,
     opts: &EncodeOptions,
     threads: usize,
     out: &mut Vec<u8>,
+    cut: &mut dyn FnMut(Cut, &mut Vec<u8>) -> Result<()>,
 ) -> Result<()> {
     let (mut ihdr, row_bytes, plte_bytes, trns_bytes) = ihdr_and_row_bytes(image, opts)?;
     if opts.interlace {
@@ -403,6 +422,7 @@ fn write_png(
     // IDAT per RFC 2083 §4.2.5; tIME has no ordering constraint but we
     // bucket it here for determinism). sPLT also rides here.
     write_metadata_before_idat(out, &chunks)?;
+    cut(Cut::BeforeIdat, out)?;
     // The pixel stream is filtered row by row and deflated straight
     // into the IDAT chunk — no filtered-image intermediate, no
     // compressed-stream intermediate.
@@ -417,9 +437,10 @@ fn write_png(
         level,
         threads,
     )?;
+    cut(Cut::AfterIdat, out)?;
     write_metadata_after_idat(out, &chunks);
     write_chunk(out, b"IEND", &[]);
-    Ok(())
+    cut(Cut::End, out)
 }
 
 /// The ancillary chunks one encode writes: [`EncodeOptions::metadata`]

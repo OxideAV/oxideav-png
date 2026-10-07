@@ -52,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `eXIf`, or an `iTXt` whose language tag or translated keyword is that
   long can reach the limit: the `iCCP`, `zTXt` and `iTXt` text bodies
   are bounded at 64 MiB. The output bytes are unchanged.
+- `encode_to` streams the file to the writer in three runs (the
+  signature and the chunks before the pixel data, the `IDAT` chunk,
+  the trailer) instead of encoding the whole file first: the `IDAT`
+  chunk is buffered whole, because its length precedes its data, and
+  the rest streams. The bytes are unchanged. An error in the options or
+  the metadata still leaves the writer untouched; after an error in the
+  pixel stream or in the writer, the writer may hold the start of the
+  file.
 
 ## [0.1.12](https://github.com/OxideAV/oxideav-png/compare/v0.1.11...v0.1.12) - 2026-10-05
 

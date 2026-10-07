@@ -246,11 +246,27 @@ pub fn encode_into(image: &PngImage, opts: &EncodeOptions, out: &mut Vec<u8>) ->
     crate::encoder::encode_into(image, opts, out)
 }
 
-/// [`encode`] straight into a writer.
+/// [`encode`] streamed into a writer, in three runs: the signature and
+/// every chunk before the pixel data, then the `IDAT` chunk, then the
+/// trailer. Only one run is held at a time, never the whole file; the
+/// `IDAT` chunk is held whole because a chunk's length field precedes
+/// its data (RFC 2083 §3.2). The bytes are identical to [`encode`]'s.
+/// An error in the options or the metadata is found before anything is
+/// written; after an error in the pixel stream or in the writer, `w`
+/// may hold the start of the file.
 pub fn encode_to<W: Write>(image: &PngImage, opts: &EncodeOptions, mut w: W) -> Result<()> {
-    let bytes = encode_image(image, opts)?;
-    w.write_all(&bytes)?;
-    Ok(())
+    let mut run = Vec::new();
+    crate::encoder::write_png(
+        &image.view(),
+        opts,
+        opts.threads.max(1),
+        &mut run,
+        &mut |_, run| {
+            w.write_all(run)?;
+            run.clear();
+            Ok(())
+        },
+    )
 }
 
 /// Row stride of a tightly packed plane, `width × bpp`, with the error
