@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `encode_plane(width, height, PixelFormat, stride, &[u8],
+  Option<&Palette>, &EncodeOptions)` encodes a borrowed plane in any
+  layout without copying it into a `PngImage`. It writes the file
+  `encode` writes for the same plane, rejects what `PngImage::packed`
+  rejects, and rejects a `Pal8` plane without a palette.
+
+### Changed
+
+- `encode_rgb8` / `encode_rgba8` read the caller's slice in place,
+  through `encode_plane`, instead of copying it into a `PngImage`. For
+  a 512 x 512 RGBA slice, `encode_rgba8` allocated a 1,048,576-byte
+  copy of the plane and held 1,825,880 bytes at its peak; it now
+  allocates no block larger than its 350,549-byte output reservation
+  and peaks at 777,272 bytes, output included. The output bytes are
+  unchanged.
+
 ## [0.1.12](https://github.com/OxideAV/oxideav-png/compare/v0.1.11...v0.1.12) - 2026-10-05
 
 ### Other
