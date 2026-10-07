@@ -10,7 +10,9 @@ use crate::decoder::{
 };
 use crate::encoder::{encode as encode_image, EncodeOptions};
 use crate::error::{PngError as Error, Result};
-use crate::image::{Frame, ImageInfo, ImageRef, PixelFormat, PngImage, RgbImage, RgbaImage};
+use crate::image::{
+    Frame, ImageInfo, ImageRef, Palette, PixelFormat, PngImage, RgbImage, RgbaImage,
+};
 use crate::options::DecodeOptions;
 
 /// `true` when `bytes` starts with the eight-byte PNG signature (W3C
@@ -178,22 +180,57 @@ pub fn encode(image: &PngImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
 }
 
 /// Encode tightly packed 8-bit RGB (`3 × width × height` bytes) as a
-/// colour-type-2 PNG. The pixels are read in place, never copied into
-/// a [`PngImage`].
+/// colour-type-2 PNG. The pixels are read in place, through
+/// [`encode_plane`].
 pub fn encode_rgb8(width: u32, height: u32, rgb: &[u8], opts: &EncodeOptions) -> Result<Vec<u8>> {
     check_raw_len(width, height, 3, rgb.len())?;
     let stride = packed_stride(width, 3)?;
-    let image = ImageRef::plane(width, height, PixelFormat::Rgb24, stride, rgb)?;
-    crate::encoder::encode_view(&image, opts, opts.threads.max(1))
+    encode_plane(width, height, PixelFormat::Rgb24, stride, rgb, None, opts)
 }
 
 /// Encode tightly packed 8-bit RGBA (`4 × width × height` bytes) as a
-/// colour-type-6 PNG. The pixels are read in place, never copied into
-/// a [`PngImage`].
+/// colour-type-6 PNG. The pixels are read in place, through
+/// [`encode_plane`].
 pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8], opts: &EncodeOptions) -> Result<Vec<u8>> {
     check_raw_len(width, height, 4, rgba.len())?;
     let stride = packed_stride(width, 4)?;
-    let image = ImageRef::plane(width, height, PixelFormat::Rgba, stride, rgba)?;
+    encode_plane(width, height, PixelFormat::Rgba, stride, rgba, None, opts)
+}
+
+/// Encode one borrowed pixel plane in any layout PNG carries: `data`
+/// holds `height` rows of `width` pixels in `format`, `stride` bytes
+/// apart (rows may carry padding past the visible width; the last row
+/// may be unpadded). The plane is read where it lies, never copied into
+/// an image first. The file is the one [`encode`] writes for
+/// `PngImage::packed(width, height, format, stride, data)` with
+/// `palette`, and the plane is rejected with the errors
+/// [`PngImage::packed`] gives.
+///
+/// `palette` is the colour table of a `Pal8` plane, which must have one
+/// with at least one entry; it is ignored for the other layouts, as
+/// [`encode`] ignores [`PngImage::palette`] for them. The image carries
+/// no other side fields: colour is
+/// [`ColorInfo::png_default`](crate::ColorInfo::png_default) and there
+/// is no image metadata or keyed transparency. Ancillary chunks still
+/// come from [`EncodeOptions::metadata`].
+pub fn encode_plane(
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    stride: usize,
+    data: &[u8],
+    palette: Option<&Palette>,
+    opts: &EncodeOptions,
+) -> Result<Vec<u8>> {
+    let mut image = ImageRef::plane(width, height, format, stride, data)?;
+    if format == PixelFormat::Pal8 {
+        if palette.map_or(true, Palette::is_empty) {
+            return Err(Error::invalid(
+                "PNG encoder: a Pal8 plane needs a palette with at least one entry",
+            ));
+        }
+        image.palette = palette;
+    }
     crate::encoder::encode_view(&image, opts, opts.threads.max(1))
 }
 
