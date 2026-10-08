@@ -12,7 +12,7 @@ use crate::error::{PngError, Result};
 /// [`PngError::LimitExceeded`] instead of committing memory. The
 /// defaults are: no dimension / pixel-count limit, decoded planes
 /// capped at [`DecodeOptions::DEFAULT_MAX_BYTES`] (1 GiB) per image,
-/// `strict = false`.
+/// `strict = false`, `inflate_metadata = true`.
 ///
 /// `strict` selects how much of W3C PNG3's *should* language is
 /// enforced on ancillary chunks:
@@ -29,6 +29,20 @@ use crate::error::{PngError, Result};
 /// * `strict = true`: those chunks must parse and be unique, and the
 ///   §5.6 Table 7 ancillary ordering rules are enforced; any violation
 ///   is [`PngError::InvalidData`].
+///
+/// `inflate_metadata` selects whether the compressed metadata bodies a
+/// decode reads (the `iCCP` profile, a compressed XMP `iTXt`) are
+/// inflated into [`crate::PngImage::metadata`]. They are by default.
+/// Each may inflate to [`crate::MAX_INFLATED_METADATA_LEN`] (64 MiB)
+/// whatever the image's size, so a caller that wants the pixels, or
+/// that reads those chunks itself under its own limits, turns it off:
+/// nothing is inflated, `metadata.icc` is `None`, and so is
+/// `metadata.xmp` when its `iTXt` is compressed (an uncompressed XMP
+/// packet is still read). An `iCCP` chunk whose profile name and
+/// compression method are valid still ranks above `sRGB` and `cHRM`
+/// in the colour precedence. In strict mode the parts before a
+/// compressed body are still checked; the body itself is not
+/// inflated, so a corrupt zlib stream in it is not detected.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DecodeOptions {
@@ -44,6 +58,9 @@ pub struct DecodeOptions {
     pub max_bytes: Option<u64>,
     /// Enforce the ancillary-chunk rules (see the type docs).
     pub strict: bool,
+    /// Inflate the compressed metadata bodies into the decoded image's
+    /// metadata (see the type docs). Default `true`.
+    pub inflate_metadata: bool,
 }
 
 impl DecodeOptions {
@@ -82,6 +99,13 @@ impl DecodeOptions {
     /// Set strict mode.
     pub fn with_strict(mut self, strict: bool) -> Self {
         self.strict = strict;
+        self
+    }
+
+    /// Set whether the compressed metadata bodies are inflated (see the
+    /// type docs).
+    pub fn with_inflate_metadata(mut self, inflate_metadata: bool) -> Self {
+        self.inflate_metadata = inflate_metadata;
         self
     }
 
@@ -138,6 +162,7 @@ impl Default for DecodeOptions {
             max_pixels: None,
             max_bytes: Some(Self::DEFAULT_MAX_BYTES),
             strict: false,
+            inflate_metadata: true,
         }
     }
 }
