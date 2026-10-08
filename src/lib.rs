@@ -81,8 +81,10 @@
 //!
 //! [`DecodeOptions`]: `max_width` / `max_height` / `max_pixels` /
 //! `max_bytes` (checked against the header before any allocation;
-//! default 1 GiB of decoded plane) and `strict` (ancillary-chunk
-//! rules, see the type docs). [`EncodeOptions`]: `compression_level`
+//! default 1 GiB of decoded plane), `strict` (ancillary-chunk
+//! rules, see the type docs) and `inflate_metadata` (whether the
+//! `iCCP` profile and a compressed XMP packet are inflated into the
+//! decoded image's metadata; default `true`). [`EncodeOptions`]: `compression_level`
 //! (`with_level`, 1..=9, default [`DEFAULT_COMPRESSION_LEVEL`]),
 //! `filter_strategy`, `interlace`, `bit_depth`, `threads`, and
 //! `metadata` ([`PngMetadata`], every ancillary chunk).

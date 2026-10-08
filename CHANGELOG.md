@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `DecodeOptions::inflate_metadata` / `with_inflate_metadata(bool)`
+  (default `true`, today's behaviour). With `false`, `decode_with` and
+  `decode_all_with` inflate no metadata body: the `iCCP` profile and a
+  compressed XMP `iTXt` packet are left out of `metadata`, and their
+  chunks are checked only up to the compressed body (an uncompressed
+  XMP packet is still read). Each body may inflate to
+  `MAX_INFLATED_METADATA_LEN` (64 MiB) whatever the image's size, so a
+  caller that wants the pixels, or that reads those chunks itself
+  under its own limits, can now decode without paying for them. For a
+  16 x 16 RGBA file whose `iCCP` and XMP each inflate to 32 MiB, the
+  decode allocated 288,027,585 bytes, its largest block 59,064,320
+  bytes; under the option it allocates 37,329 bytes, against 37,081
+  for the same image without the two chunks. An `iCCP` chunk with a
+  valid profile name and compression method still outranks `sRGB` and
+  `cHRM` in the colour precedence (W3C PNG3 §4.3).
+
 ## [0.1.12](https://github.com/OxideAV/oxideav-png/compare/v0.1.11...v0.1.12) - 2026-10-05
 
 ### Other

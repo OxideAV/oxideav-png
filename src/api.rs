@@ -37,7 +37,7 @@ pub fn info(bytes: &[u8]) -> Result<ImageInfo> {
             .data,
     )?;
     let format = ihdr.output_pixel_format()?;
-    let side = crate::sideinfo::extract(&chunks, false)?;
+    let side = crate::sideinfo::extract(&chunks, false, true)?;
     let mut out = ImageInfo::new(ihdr.width, ihdr.height, format);
     out.bit_depth = ihdr.bit_depth;
     out.colour_type = ihdr.colour_type;
@@ -66,7 +66,8 @@ pub fn decode(bytes: &[u8]) -> Result<PngImage> {
     decode_image(bytes, &DecodeOptions::default())
 }
 
-/// [`decode`] under explicit limits / strictness.
+/// [`decode`] under explicit limits / strictness / metadata inflation
+/// ([`DecodeOptions`]).
 pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<PngImage> {
     decode_image(bytes, opts)
 }
@@ -94,7 +95,8 @@ pub fn decode_all(bytes: &[u8]) -> Result<Vec<Frame>> {
     decode_all_with(bytes, &DecodeOptions::default())
 }
 
-/// [`decode_all`] under explicit limits / strictness.
+/// [`decode_all`] under explicit limits / strictness / metadata
+/// inflation ([`DecodeOptions`]).
 pub fn decode_all_with(bytes: &[u8], opts: &DecodeOptions) -> Result<Vec<Frame>> {
     let chunks = parse_all_chunks(bytes)?;
     let animated = chunks.iter().any(|c| c.is_type(b"acTL"));

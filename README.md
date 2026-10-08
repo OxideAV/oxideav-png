@@ -137,7 +137,10 @@ chunk is dropped and the pixels still decode; in strict mode those
 chunks must parse and be unique and the §5.6 Table 7 ancillary
 ordering is enforced. Signature, CRCs, critical-chunk ordering, IHDR
 validity, `tRNS` validity and the inflate bound are enforced in both
-modes.
+modes. `inflate_metadata` (default `true`): with `false`, a decode
+inflates no metadata body, so the `iCCP` profile and a compressed XMP
+packet are left out of `metadata` and cost nothing however far they
+would inflate; the `iCCP` chunk still governs the colour.
 
 `EncodeOptions` (`Default` + `with_*`): `compression_level`
 (`with_level`, 1..=9, default 2), `filter_strategy` (adaptive §12.8

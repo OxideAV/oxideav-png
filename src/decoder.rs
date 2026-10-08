@@ -903,7 +903,7 @@ pub(crate) fn decode_png_chunks(chunks: &[ChunkRef<'_>], opts: &DecodeOptions) -
     // pixel buffer exists (IMAGE_CRATE_API: "limits are enforced before
     // allocation").
     opts.check(ihdr.width, ihdr.height, ihdr.decoded_plane_bytes()?)?;
-    let side = crate::sideinfo::extract(chunks, opts.strict)?;
+    let side = crate::sideinfo::extract(chunks, opts.strict, opts.inflate_metadata)?;
 
     // W3C PNG3 §5.4 / §13.1: a decoder "encountering an unknown chunk in
     // which the ancillary bit is 0" — a critical chunk it cannot
@@ -1787,7 +1787,7 @@ pub(crate) fn parse_apng_chunks(chunks: &[ChunkRef<'_>], opts: &DecodeOptions) -
     // §5.6 / §11.2.3: the default image's IDAT run shall be consecutive.
     validate_idat_consecutive(chunks)?;
     opts.check(ihdr.width, ihdr.height, ihdr.decoded_plane_bytes()?)?;
-    let side = crate::sideinfo::extract(chunks, opts.strict)?;
+    let side = crate::sideinfo::extract(chunks, opts.strict, opts.inflate_metadata)?;
 
     let actl_index = chunks
         .iter()
