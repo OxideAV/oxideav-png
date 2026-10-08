@@ -2162,24 +2162,7 @@ impl Iccp {
     /// predicate, rejects any compression method other than `0`, and
     /// inflates the body via `compcol`.
     pub fn parse(data: &[u8]) -> Result<Self> {
-        let nul = data
-            .iter()
-            .position(|&b| b == 0)
-            .ok_or_else(|| Error::invalid("PNG iCCP: missing NUL separator after profile name"))?;
-        let name_bytes = &data[..nul];
-        let name_str: String = name_bytes.iter().map(|&b| b as char).collect();
-        validate_keyword(&name_str, "iCCP")?;
-
-        let rest = &data[nul + 1..];
-        let method = *rest
-            .first()
-            .ok_or_else(|| Error::invalid("PNG iCCP: missing compression-method byte"))?;
-        if method != Self::COMPRESSION_METHOD_DEFLATE {
-            return Err(Error::invalid(format!(
-                "PNG iCCP: unknown compression method {method} (only 0 = deflate is defined)"
-            )));
-        }
-        let compressed = &rest[1..];
+        let (name_str, compressed) = Self::parse_header(data)?;
         // Bounded inflate: an ICC profile has no intrinsic expected
         // size, so a hostile chunk could otherwise inflate to gigabytes
         // (decompression bomb, W3C PNG3 §13.3). Legitimate profiles are
@@ -2197,6 +2180,32 @@ impl Iccp {
             name: name_str,
             profile,
         })
+    }
+
+    /// The profile name and the still-compressed profile of an `iCCP`
+    /// chunk payload, checked as [`Self::parse`] checks them but not
+    /// inflated. A decode under
+    /// [`crate::DecodeOptions::inflate_metadata`] `= false` reads the
+    /// chunk this far.
+    pub(crate) fn parse_header(data: &[u8]) -> Result<(String, &[u8])> {
+        let nul = data
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| Error::invalid("PNG iCCP: missing NUL separator after profile name"))?;
+        let name_bytes = &data[..nul];
+        let name_str: String = name_bytes.iter().map(|&b| b as char).collect();
+        validate_keyword(&name_str, "iCCP")?;
+
+        let rest = &data[nul + 1..];
+        let method = *rest
+            .first()
+            .ok_or_else(|| Error::invalid("PNG iCCP: missing compression-method byte"))?;
+        if method != Self::COMPRESSION_METHOD_DEFLATE {
+            return Err(Error::invalid(format!(
+                "PNG iCCP: unknown compression method {method} (only 0 = deflate is defined)"
+            )));
+        }
+        Ok((name_str, &rest[1..]))
     }
 
     /// Emit the on-wire payload (profile-name bytes, `NUL`,
@@ -2318,13 +2327,13 @@ impl Itxt {
     /// defined in this specification is 0").
     pub const COMPRESSION_METHOD_DEFLATE: u8 = 0;
 
-    /// Parse an `iTXt` chunk payload (§11.3.3.4): keyword bytes, `NUL`,
-    /// compression flag, compression method, language tag, `NUL`,
-    /// translated keyword, `NUL`, text. Validates the keyword, the
-    /// compression flag / method combination, the UTF-8 encoding of
-    /// the translated keyword and text, and the no-`NUL` rule on the
-    /// translated keyword and text bodies.
-    pub fn parse(data: &[u8]) -> Result<Self> {
+    /// Every field of an `iTXt` chunk payload before its text, checked
+    /// as [`Self::parse`] checks them, with an empty
+    /// [`text`](Self::text), and the text as it is on the wire
+    /// (compressed when [`compressed`](Self::compressed) is set). A
+    /// decode under [`crate::DecodeOptions::inflate_metadata`]
+    /// `= false` reads a compressed XMP packet this far.
+    pub(crate) fn parse_header(data: &[u8]) -> Result<(Self, &[u8])> {
         // Keyword: bytes up to first NUL.
         let k_nul = data
             .iter()
@@ -2399,6 +2408,28 @@ impl Itxt {
             .to_string();
         let text_region = &after_lang[tk_nul + 1..];
 
+        Ok((
+            Self {
+                keyword: keyword_str,
+                compressed,
+                language_tag,
+                translated_keyword,
+                text: String::new(),
+            },
+            text_region,
+        ))
+    }
+
+    /// Parse an `iTXt` chunk payload (§11.3.3.4): keyword bytes, `NUL`,
+    /// compression flag, compression method, language tag, `NUL`,
+    /// translated keyword, `NUL`, text. Validates the keyword, the
+    /// compression flag / method combination, the UTF-8 encoding of
+    /// the translated keyword and text, and the no-`NUL` rule on the
+    /// translated keyword and text bodies.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        let (mut itxt, text_region) = Self::parse_header(data)?;
+        let compressed = itxt.compressed;
+
         // Text: rest of payload, possibly zlib-compressed.
         let text_bytes_owned: Vec<u8>;
         let text_bytes: &[u8] = if compressed {
@@ -2425,17 +2456,10 @@ impl Itxt {
                 "PNG iTXt: text contains a NUL byte (forbidden per §11.3.3.4)",
             ));
         }
-        let text = std::str::from_utf8(text_bytes)
+        itxt.text = std::str::from_utf8(text_bytes)
             .map_err(|e| Error::invalid(format!("PNG iTXt: text is not valid UTF-8: {e}")))?
             .to_string();
-
-        Ok(Self {
-            keyword: keyword_str,
-            compressed,
-            language_tag,
-            translated_keyword,
-            text,
-        })
+        Ok(itxt)
     }
 
     /// Emit the on-wire payload. Re-validates the keyword, the

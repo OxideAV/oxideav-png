@@ -81,7 +81,11 @@ const BT2020_CHRM: [(u32, u32); 4] = [
 ];
 
 /// Resolve colour signalling and the contract metadata from a chunk
-/// list. `strict` is [`crate::DecodeOptions::strict`].
+/// list. `strict` is [`crate::DecodeOptions::strict`] and `inflate`
+/// [`crate::DecodeOptions::inflate_metadata`]: without it the `iCCP`
+/// profile and a compressed XMP packet are checked up to their
+/// compressed body and left out of the metadata, and the `iCCP` chunk
+/// still governs the colour.
 ///
 /// Colour precedence is W3C PNG3 §4.3 Table 1: `cICP` (1) > `iCCP`
 /// (2) > `sRGB` (3) > `cHRM` + `gAMA` (4). The mapping to H.273 code
@@ -99,7 +103,7 @@ const BT2020_CHRM: [(u32, u32); 4] = [
 ///
 /// Lower-precedence chunks still fill `metadata` (`gamma` from `gAMA`,
 /// `icc` from `iCCP`) so nothing the file carries is lost.
-pub(crate) fn extract(chunks: &[ChunkRef<'_>], strict: bool) -> Result<SideInfo> {
+pub(crate) fn extract(chunks: &[ChunkRef<'_>], strict: bool, inflate: bool) -> Result<SideInfo> {
     if strict {
         validate_ancillary_ordering(chunks)?;
     }
@@ -108,8 +112,13 @@ pub(crate) fn extract(chunks: &[ChunkRef<'_>], strict: bool) -> Result<SideInfo>
     let mut srgb: Option<Srgb> = None;
     let mut cicp: Option<Cicp> = None;
     let mut iccp: Option<Iccp> = None;
+    // A valid `iCCP` chunk, inflated into `iccp` or not.
+    let mut iccp_valid = false;
     let mut exif: Option<Exif> = None;
     let mut xmp: Option<Vec<u8>> = None;
+    // The first valid XMP `iTXt` was read, whether its packet was kept
+    // or left compressed: a later one is ignored either way.
+    let mut xmp_read = false;
     let (mut s_gama, mut s_chrm, mut s_srgb, mut s_cicp, mut s_iccp, mut s_exif) =
         (false, false, false, false, false, false);
     let mut info = SideInfo::default();
@@ -142,8 +151,17 @@ pub(crate) fn extract(chunks: &[ChunkRef<'_>], strict: bool) -> Result<SideInfo>
             }
             b"iCCP" => {
                 info.has_icc = true;
-                if let Some(v) = take("iCCP", s_iccp, strict, || Iccp::parse(c.data))? {
-                    iccp = Some(v);
+                if inflate {
+                    if let Some(v) = take("iCCP", s_iccp, strict, || Iccp::parse(c.data))? {
+                        iccp = Some(v);
+                        iccp_valid = true;
+                    }
+                } else if take("iCCP", s_iccp, strict, || {
+                    Iccp::parse_header(c.data).map(|_| ())
+                })?
+                .is_some()
+                {
+                    iccp_valid = true;
                 }
                 s_iccp = true;
             }
@@ -161,9 +179,20 @@ pub(crate) fn extract(chunks: &[ChunkRef<'_>], strict: bool) -> Result<SideInfo>
                     && c.data.get(XMP_KEYWORD.len()) == Some(&0);
                 if is_xmp {
                     info.has_xmp = true;
-                    if xmp.is_none() {
-                        match Itxt::parse(c.data) {
-                            Ok(t) => xmp = Some(t.text.into_bytes()),
+                    if !xmp_read {
+                        // The byte after the keyword's NUL is the
+                        // compression flag.
+                        let compressed = c.data.get(XMP_KEYWORD.len() + 1) == Some(&1);
+                        let parsed = if inflate || !compressed {
+                            Itxt::parse(c.data).map(|t| Some(t.text.into_bytes()))
+                        } else {
+                            Itxt::parse_header(c.data).map(|_| None)
+                        };
+                        match parsed {
+                            Ok(packet) => {
+                                xmp = packet;
+                                xmp_read = true;
+                            }
                             Err(e) if strict => return Err(e),
                             Err(_) => {}
                         }
@@ -186,7 +215,7 @@ pub(crate) fn extract(chunks: &[ChunkRef<'_>], strict: bool) -> Result<SideInfo>
             ci.transfer_function,
             ci.matrix_coefficients,
         )
-    } else if iccp.is_some() {
+    } else if iccp_valid {
         ColorInfo::png_default()
     } else if srgb.is_some() {
         ColorInfo::srgb()
