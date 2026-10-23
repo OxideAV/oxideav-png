@@ -480,12 +480,12 @@ fn chunk_set<'a>(image: &ImageRef<'a>, opts: &'a EncodeOptions) -> Result<ChunkS
     let image_meta = image.metadata;
 
     let mut gama = meta.gama;
-    if gama.is_none() {
-        if let Some(g) = image_meta.and_then(|m| m.gamma) {
-            if g.is_finite() && g >= 0.0 {
-                gama = Some(Gama::new((g * 100_000.0).round() as u32));
-            }
-        }
+    if gama.is_none()
+        && let Some(g) = image_meta.and_then(|m| m.gamma)
+        && g.is_finite()
+        && g >= 0.0
+    {
+        gama = Some(Gama::new((g * 100_000.0).round() as u32));
     }
     let iccp = match &meta.iccp {
         Some(i) => Some((i.name.as_str(), i.profile.as_slice())),
@@ -498,16 +498,15 @@ fn chunk_set<'a>(image: &ImageRef<'a>, opts: &'a EncodeOptions) -> Result<ChunkS
         None => image_meta.and_then(|m| m.exif.as_deref()),
     };
     let mut xmp = None;
-    if let Some(packet) = image_meta.and_then(|m| m.xmp.as_deref()) {
-        if !meta
+    if let Some(packet) = image_meta.and_then(|m| m.xmp.as_deref())
+        && !meta
             .itxts
             .iter()
             .any(|t| t.keyword == crate::sideinfo::XMP_KEYWORD)
-        {
-            xmp = Some(std::str::from_utf8(packet).map_err(|_| {
-                Error::invalid("PNG encoder: metadata.xmp is not UTF-8 (W3C PNG3 §11.3.3.4)")
-            })?);
-        }
+    {
+        xmp = Some(std::str::from_utf8(packet).map_err(|_| {
+            Error::invalid("PNG encoder: metadata.xmp is not UTF-8 (W3C PNG3 §11.3.3.4)")
+        })?);
     }
     let (mut srgb, mut cicp) = (meta.srgb, meta.cicp);
     if srgb.is_none() && cicp.is_none() {

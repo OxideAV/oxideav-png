@@ -202,8 +202,8 @@ mod reserve {
 mod chunks {
     use super::*;
     use oxideav_png::{
-        encode, encode_into, EncodeOptions, Exif, Iccp, Itxt, Metadata, PngImage, PngMetadata,
-        PngPixelFormat, Text, Ztxt,
+        EncodeOptions, Exif, Iccp, Itxt, Metadata, PngImage, PngMetadata, PngPixelFormat, Text,
+        Ztxt, encode, encode_into,
     };
 
     /// One mebibyte: the payload size of every case below.
@@ -349,7 +349,7 @@ mod chunks {
             (
                 "iTXt 1 MiB compressed",
                 PngMetadata::default().with_itxts(vec![
-                    Itxt::new("Big".to_string(), text.clone()).with_compressed(true)
+                    Itxt::new("Big".to_string(), text.clone()).with_compressed(true),
                 ]),
             ),
         ];
