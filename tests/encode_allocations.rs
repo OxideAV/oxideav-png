@@ -171,7 +171,7 @@ mod planes {
 /// buffer has less spare room than that, however little is spare.
 mod reserve {
     use super::*;
-    use oxideav_png::{encode_into, EncodeOptions, PngImage};
+    use oxideav_png::{EncodeOptions, PngImage, encode_into};
 
     #[test]
     fn a_buffer_with_a_few_spare_bytes_is_reserved_once() {

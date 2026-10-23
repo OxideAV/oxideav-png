@@ -1,7 +1,7 @@
 //! `encode_into` appends the file to a caller's buffer.
 
 use oxideav_png::{
-    encode, encode_into, EncodeOptions, Iccp, PngImage, PngMetadata, PngPixelFormat,
+    EncodeOptions, Iccp, PngImage, PngMetadata, PngPixelFormat, encode, encode_into,
 };
 
 fn image() -> PngImage {
