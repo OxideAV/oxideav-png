@@ -13,7 +13,7 @@
 use oxideav_core::{
     CodecId, CodecOptions, CodecParameters, Frame, PixelFormat, VideoFrame, VideoPlane,
 };
-use oxideav_png::{encode, EncodeOptions, PngImage, PngPixelFormat};
+use oxideav_png::{EncodeOptions, PngImage, PngPixelFormat, encode};
 
 const W: u32 = 33;
 const H: u32 = 17;
