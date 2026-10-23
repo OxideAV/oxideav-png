@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `tests/encode_output_pinned.rs` pins the length and FNV-1a 64 hash of
+  the file every encode entry point writes for 103 synthetic cases
+  (every layout, padded strides, sub-byte depths, Adam7, every filter
+  strategy, three DEFLATE levels, multi-segment pixel streams, the full
+  ancillary chunk set, the image-derived chunks, APNG, `encode_rgb8` /
+  `encode_rgba8`, `encode_single` and the framework `Encoder`, four
+  threads) plus nine compressor block / window edge sizes, recorded from
+  the v0.1.12 encoder; byte-movement refactors must leave them unchanged
+  (#18, eas4ai).
+
 ### Changed
 
 - edition 2024, MSRV 1.95; tests / fuzz harness load their black-box reference (libpng) through dlsym instead of libloading

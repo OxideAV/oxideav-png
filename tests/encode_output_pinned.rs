@@ -13,11 +13,11 @@
 //! deliberate output change re-records in one paste.
 
 use oxideav_png::{
-    encode, encode_all, encode_apng, encode_apng_frames_with_options, encode_apng_with_options,
-    encode_rgb8, encode_rgba8, ApngBlend, ApngDisposal, ApngFrameSpec, Bkgd, Chrm, Cicp, Clli,
-    ColorInfo, ColorRange, EncodeOptions, Exif, FilterStrategy, FilterType, Frame, Gama, Hist,
-    Iccp, Itxt, Mdcv, Metadata, Palette, Phys, PhysUnit, PngImage, PngMetadata, PngPixelFormat,
-    RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time, Trns, UnknownChunk, Ztxt,
+    ApngBlend, ApngDisposal, ApngFrameSpec, Bkgd, Chrm, Cicp, Clli, ColorInfo, ColorRange,
+    EncodeOptions, Exif, FilterStrategy, FilterType, Frame, Gama, Hist, Iccp, Itxt, Mdcv, Metadata,
+    Palette, Phys, PhysUnit, PngImage, PngMetadata, PngPixelFormat, RenderingIntent, Sbit, Splt,
+    SpltEntry, Srgb, Text, Time, Trns, UnknownChunk, Ztxt, encode, encode_all, encode_apng,
+    encode_apng_frames_with_options, encode_apng_with_options, encode_rgb8, encode_rgba8,
 };
 
 /// FNV-1a, 64-bit. Enough to tell two encoder outputs apart; not a
@@ -531,7 +531,7 @@ fn edge_cases() -> Vec<(String, Vec<u8>)> {
                 latin1_text(n, 0xED03 + n as u32),
             )])
             .with_itxts(vec![
-                Itxt::new("Edge".to_string(), itxt).with_compressed(true)
+                Itxt::new("Edge".to_string(), itxt).with_compressed(true),
             ]);
         out.push((
             format!("edge iCCP zTXt iTXt {n}"),
