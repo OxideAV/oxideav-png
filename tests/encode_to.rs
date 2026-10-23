@@ -1,7 +1,7 @@
 //! `encode_to` streams the file to its writer a run of chunks at a
 //! time instead of building the whole file first.
 
-use oxideav_png::{encode, encode_to, EncodeOptions, Iccp, PngError, PngImage, PngMetadata};
+use oxideav_png::{EncodeOptions, Iccp, PngError, PngImage, PngMetadata, encode, encode_to};
 
 /// Records every `write` call so a test can see how the bytes arrived.
 #[derive(Default)]
