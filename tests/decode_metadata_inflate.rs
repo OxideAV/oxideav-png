@@ -15,8 +15,8 @@ use std::sync::OnceLock;
 use compcol::zlib::{EncoderConfig, Zlib};
 use oxideav_png::chunk::write_chunk;
 use oxideav_png::{
-    decode_all_with, decode_with, encode, encode_all, ColorInfo, DecodeOptions, EncodeOptions,
-    Frame, PngImage,
+    ColorInfo, DecodeOptions, EncodeOptions, Frame, PngImage, decode_all_with, decode_with, encode,
+    encode_all,
 };
 
 struct Counting;
@@ -37,23 +37,23 @@ fn record(size: usize) {
 }
 
 // SAFETY: every method forwards to `System` with the caller's own
-// arguments; the bookkeeping only touches thread-local counters, which
+// arguments (the caller upholds `GlobalAlloc`'s contract); the bookkeeping only touches thread-local counters, which
 // never allocate.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         record(layout.size());
-        System.alloc(layout)
+        unsafe { System.alloc(layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         record(layout.size());
-        System.alloc_zeroed(layout)
+        unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
+        unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         record(new_size);
-        System.realloc(ptr, layout, new_size)
+        unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
 
