@@ -49,24 +49,24 @@ fn release(size: usize) {
 }
 
 // SAFETY: every method forwards to `System` with the caller's own
-// arguments; the bookkeeping only touches thread-local counters, which
-// never allocate.
+// arguments (the caller upholds `GlobalAlloc`'s contract); the
+// bookkeeping only touches thread-local counters, which never allocate.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         record(layout.size(), 0);
-        System.alloc(layout)
+        unsafe { System.alloc(layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         record(layout.size(), 0);
-        System.alloc_zeroed(layout)
+        unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         release(layout.size());
-        System.dealloc(ptr, layout)
+        unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         record(new_size, layout.size());
-        System.realloc(ptr, layout, new_size)
+        unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
 
@@ -116,7 +116,7 @@ fn report(what: &str, s: &Stats) {
 /// plane-sized is allocated.
 mod planes {
     use super::*;
-    use oxideav_png::{decode, encode_rgba8, EncodeOptions};
+    use oxideav_png::{EncodeOptions, decode, encode_rgba8};
 
     const W: usize = 512;
     const H: usize = 512;
