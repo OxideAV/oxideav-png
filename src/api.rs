@@ -224,7 +224,7 @@ pub fn encode_plane(
 ) -> Result<Vec<u8>> {
     let mut image = ImageRef::plane(width, height, format, stride, data)?;
     if format == PixelFormat::Pal8 {
-        if palette.map_or(true, Palette::is_empty) {
+        if palette.is_none_or(Palette::is_empty) {
             return Err(Error::invalid(
                 "PNG encoder: a Pal8 plane needs a palette with at least one entry",
             ));

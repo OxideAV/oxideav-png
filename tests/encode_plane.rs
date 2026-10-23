@@ -3,7 +3,7 @@
 //! same plane.
 
 use oxideav_png::{
-    decode_rgba8, encode, encode_plane, EncodeOptions, Palette, PngImage, PngPixelFormat,
+    EncodeOptions, Palette, PngImage, PngPixelFormat, decode_rgba8, encode, encode_plane,
 };
 
 /// A four-entry palette, one entry translucent.
