@@ -15,7 +15,7 @@
 //!   - Rgba      → identity
 //!   - Rgba64Le  → (r_hi,g_hi,b_hi,a_hi)
 
-use oxideav_png::{decode_rgba8, encode, EncodeOptions, Palette, PngImage, PngPixelFormat};
+use oxideav_png::{EncodeOptions, Palette, PngImage, PngPixelFormat, decode_rgba8, encode};
 
 /// `palette` is the legacy `PLTE || tRNS` blob: `plte_entries` RGB
 /// triples followed by the alpha tail.

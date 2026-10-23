@@ -14,9 +14,9 @@
 //! Run with:
 //!     cargo bench -p oxideav-png --bench crc
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use oxideav_png::filter::{crc32, crc32_update, CRC32_INIT};
+use oxideav_png::filter::{CRC32_INIT, crc32, crc32_update};
 
 /// Deterministic pseudo-random fill so the table-index distribution is
 /// realistic (a flat ramp would hammer a narrow slice of the table).

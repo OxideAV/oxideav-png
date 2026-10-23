@@ -65,11 +65,11 @@
 //! Run with:
 //!     cargo bench -p oxideav-png --bench decode
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_png::{
-    decode, decode_apng, decode_rgba8, encode, encode_apng, parse_metadata, EncodeOptions, Phys,
-    PhysUnit, PngImage, PngPixelFormat, RenderingIntent, Sbit, Srgb, Time,
+    EncodeOptions, Phys, PhysUnit, PngImage, PngPixelFormat, RenderingIntent, Sbit, Srgb, Time,
+    decode, decode_apng, decode_rgba8, encode, encode_apng, parse_metadata,
 };
 
 /// Cheap deterministic xorshift32 — keeps the bench inputs from being

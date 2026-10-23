@@ -30,11 +30,11 @@ use crate::metadata::PngMetadata;
 pub use crate::registry::make_encoder;
 
 use crate::apng::{Blend, Disposal};
-use crate::chunk::{write_chunk, ChunkWriter, PNG_MAGIC};
-use crate::decoder::{adam7_pass_dims, Ihdr, ADAM7};
-use crate::filter::{choose_filter_heuristic, filter_row, FilterStrategy, FilterType};
+use crate::chunk::{ChunkWriter, PNG_MAGIC, write_chunk};
+use crate::decoder::{ADAM7, Ihdr, adam7_pass_dims};
+use crate::filter::{FilterStrategy, FilterType, choose_filter_heuristic, filter_row};
 use crate::zstream::{
-    compress_bytes_to_vec, compress_zlib, rows_per_segment, SegmentSource, SEGMENT_TARGET_BYTES,
+    SEGMENT_TARGET_BYTES, SegmentSource, compress_bytes_to_vec, compress_zlib, rows_per_segment,
 };
 
 /// PNG encoder tuning knobs, attached via
@@ -402,39 +402,38 @@ fn effective_metadata(image: &PngImage, opts: &EncodeOptions) -> Result<Option<P
     let mut meta = opts.metadata.clone().unwrap_or_default();
     let mut added = false;
 
-    if meta.gama.is_none() {
-        if let Some(g) = image.metadata.gamma {
-            if g.is_finite() && g >= 0.0 {
-                meta.gama = Some(Gama::new((g * 100_000.0).round() as u32));
-                added = true;
-            }
-        }
+    if meta.gama.is_none()
+        && let Some(g) = image.metadata.gamma
+        && g.is_finite()
+        && g >= 0.0
+    {
+        meta.gama = Some(Gama::new((g * 100_000.0).round() as u32));
+        added = true;
     }
-    if meta.iccp.is_none() {
-        if let Some(icc) = &image.metadata.icc {
-            meta.iccp = Some(Iccp::new("ICC Profile".to_string(), icc.clone()));
-            added = true;
-        }
+    if meta.iccp.is_none()
+        && let Some(icc) = &image.metadata.icc
+    {
+        meta.iccp = Some(Iccp::new("ICC Profile".to_string(), icc.clone()));
+        added = true;
     }
-    if meta.exif.is_none() {
-        if let Some(exif) = &image.metadata.exif {
-            meta.exif = Some(Exif::new(exif.clone()));
-            added = true;
-        }
+    if meta.exif.is_none()
+        && let Some(exif) = &image.metadata.exif
+    {
+        meta.exif = Some(Exif::new(exif.clone()));
+        added = true;
     }
-    if let Some(xmp) = &image.metadata.xmp {
-        if !meta
+    if let Some(xmp) = &image.metadata.xmp
+        && !meta
             .itxts
             .iter()
             .any(|t| t.keyword == crate::sideinfo::XMP_KEYWORD)
-        {
-            let text = String::from_utf8(xmp.clone()).map_err(|_| {
-                Error::invalid("PNG encoder: metadata.xmp is not UTF-8 (W3C PNG3 §11.3.3.4)")
-            })?;
-            meta.itxts
-                .push(Itxt::new(crate::sideinfo::XMP_KEYWORD.to_string(), text));
-            added = true;
-        }
+    {
+        let text = String::from_utf8(xmp.clone()).map_err(|_| {
+            Error::invalid("PNG encoder: metadata.xmp is not UTF-8 (W3C PNG3 §11.3.3.4)")
+        })?;
+        meta.itxts
+            .push(Itxt::new(crate::sideinfo::XMP_KEYWORD.to_string(), text));
+        added = true;
     }
     if meta.srgb.is_none() && meta.cicp.is_none() {
         let c = image.color;
@@ -471,11 +470,11 @@ fn effective_metadata(image: &PngImage, opts: &EncodeOptions) -> Result<Option<P
             added = true;
         }
     }
-    if meta.trns.is_none() {
-        if let Some(t) = &image.transparency {
-            meta.trns = Some(t.clone());
-            added = true;
-        }
+    if meta.trns.is_none()
+        && let Some(t) = &image.transparency
+    {
+        meta.trns = Some(t.clone());
+        added = true;
     }
 
     if opts.metadata.is_none() && !added {
@@ -573,23 +572,23 @@ fn write_metadata_before_plte(out: &mut Vec<u8>, meta: Option<&PngMetadata>) -> 
     // space than sRGB-aware ones, so a mismatch is an encode error
     // ahead of the wire rather than a silently nonconformant stream.
     if meta.srgb.is_some() {
-        if let Some(gama) = &meta.gama {
-            if *gama != crate::metadata::Gama::SRGB {
-                return Err(Error::invalid(format!(
-                    "PNG encoder: gAMA {} alongside sRGB — W3C PNG3 §11.3.2.5 Table 17 \
+        if let Some(gama) = &meta.gama
+            && *gama != crate::metadata::Gama::SRGB
+        {
+            return Err(Error::invalid(format!(
+                "PNG encoder: gAMA {} alongside sRGB — W3C PNG3 §11.3.2.5 Table 17 \
                      permits only 45455 (Gama::SRGB) next to an sRGB chunk",
-                    gama.gamma_times_100000
-                )));
-            }
+                gama.gamma_times_100000
+            )));
         }
-        if let Some(chrm) = &meta.chrm {
-            if *chrm != crate::metadata::Chrm::SRGB {
-                return Err(Error::invalid(
-                    "PNG encoder: cHRM alongside sRGB does not match the sRGB \
+        if let Some(chrm) = &meta.chrm
+            && *chrm != crate::metadata::Chrm::SRGB
+        {
+            return Err(Error::invalid(
+                "PNG encoder: cHRM alongside sRGB does not match the sRGB \
                      primaries / D65 white point — W3C PNG3 §11.3.2.5 Table 17 \
                      permits only those values (Chrm::SRGB) next to an sRGB chunk",
-                ));
-            }
+            ));
         }
     }
     if let Some(cicp) = &meta.cicp {
@@ -931,7 +930,12 @@ fn flatten_and_normalise_pixels(
             for y in 0..h {
                 let src = &image.data()[y * stride..y * stride + row_bytes];
                 let dst = &mut out[y * row_bytes..(y + 1) * row_bytes];
-                for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)) {
+                for (s, d) in src
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .zip(dst.as_chunks_mut::<2>().0)
+                {
                     d[0] = s[1];
                     d[1] = s[0];
                 }
@@ -1169,7 +1173,12 @@ impl SegmentSource for RowSource<'_, '_> {
             // and swap the current row in (RFC 2083 §2.1). Paired-byte
             // lockstep walk — no per-sample index arithmetic.
             let swap_into = |src: &[u8], dst: &mut [u8]| {
-                for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)) {
+                for (s, d) in src
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .zip(dst.as_chunks_mut::<2>().0)
+                {
                     d[0] = s[1];
                     d[1] = s[0];
                 }
@@ -1240,7 +1249,7 @@ fn brute_compress(mut compress: impl FnMut(FilterStrategy) -> Result<Vec<u8>>) -
     let mut best: Option<Vec<u8>> = None;
     for &cand in FilterStrategy::BRUTE_CANDIDATES.iter() {
         let compressed = compress(cand)?;
-        let smaller = best.as_ref().map_or(true, |b| compressed.len() < b.len());
+        let smaller = best.as_ref().is_none_or(|b| compressed.len() < b.len());
         if smaller {
             best = Some(compressed);
         }
@@ -1372,9 +1381,9 @@ fn deflate_encode_pixels_adam7_subbyte(
     debug_assert!(ihdr.bit_depth == 1 || ihdr.bit_depth == 2 || ihdr.bit_depth == 4);
     debug_assert!(ihdr.colour_type == 0 || ihdr.colour_type == 3);
     let bpp = ihdr.bpp_for_filter()?; // = 1 for sub-byte
-                                      // Gather + MSB-pack every non-empty Adam7 pass once (this is where
-                                      // the per-sample bit-depth validation lives, so it must run exactly
-                                      // once regardless of how many filter candidates we later try).
+    // Gather + MSB-pack every non-empty Adam7 pass once (this is where
+    // the per-sample bit-depth validation lives, so it must run exactly
+    // once regardless of how many filter candidates we later try).
     let packed_passes = pack_subbyte_adam7_passes(image, ihdr)?;
     if strategy == FilterStrategy::Brute {
         return brute_compress(|cand| {
@@ -1953,13 +1962,13 @@ fn encode_apng_regions(
             )));
         }
     }
-    if let Some(d) = default_image {
-        if d.width != canvas_width || d.height != canvas_height {
-            return Err(Error::invalid(format!(
-                "PNG encoder: APNG default image {}x{} must span the full canvas {canvas_width}x{canvas_height}",
-                d.width, d.height
-            )));
-        }
+    if let Some(d) = default_image
+        && (d.width != canvas_width || d.height != canvas_height)
+    {
+        return Err(Error::invalid(format!(
+            "PNG encoder: APNG default image {}x{} must span the full canvas {canvas_width}x{canvas_height}",
+            d.width, d.height
+        )));
     }
     if default_image.is_none() {
         let f0 = &frames[0];

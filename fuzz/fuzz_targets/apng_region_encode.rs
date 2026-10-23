@@ -22,8 +22,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_png::{
-    decode_apng, encode_apng_frames_with_options, ApngBlend, ApngDisposal, ApngFrameSpec,
-    EncodeOptions, PngImage, PngPixelFormat,
+    ApngBlend, ApngDisposal, ApngFrameSpec, EncodeOptions, PngImage, PngPixelFormat, decode_apng,
+    encode_apng_frames_with_options,
 };
 
 /// Canvas cap. Encode + decode cost is O(canvas * frames); keep both
@@ -119,7 +119,8 @@ fn solid_region(w: u32, h: u32, seed: u8) -> PngImage {
         data.push(b);
         data.push(a);
     }
-    PngImage::packed(w, h, PngPixelFormat::Rgba, stride, data).expect("synthetic image geometry is valid")
+    PngImage::packed(w, h, PngPixelFormat::Rgba, stride, data)
+        .expect("synthetic image geometry is valid")
 }
 
 struct FramePlan {

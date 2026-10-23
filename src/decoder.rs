@@ -46,9 +46,9 @@ pub use crate::api::{decode_png, decode_png_over_background, decode_png_to_rgba}
 use crate::zlibvec::decompress_to_vec_zlib_capped;
 use compcol::{Decoder as _, Status};
 
-use crate::apng::{parse_fdat, Actl, Blend, Disposal, Fctl};
-use crate::chunk::{read_chunk, ChunkRef, PNG_MAGIC};
-use crate::filter::{unfilter_row, FilterType};
+use crate::apng::{Actl, Blend, Disposal, Fctl, parse_fdat};
+use crate::chunk::{ChunkRef, PNG_MAGIC, read_chunk};
+use crate::filter::{FilterType, unfilter_row};
 use crate::metadata::{
     Bkgd, Chrm, Cicp, Clli, Exif, Gama, Hist, Iccp, Itxt, Mdcv, Phys, PngMetadata, Sbit, Splt,
     Srgb, Text, Time, Trns, Ztxt,
@@ -329,7 +329,7 @@ impl Ihdr {
             (ct, bd) => {
                 return Err(Error::unsupported(format!(
                     "PNG: colour type {ct} bit depth {bd} not implemented"
-                )))
+                )));
             }
         })
     }
@@ -410,7 +410,7 @@ fn validate_critical_ordering(chunks: &[ChunkRef<'_>]) -> Result<()> {
             return Err(Error::invalid(
                 "PNG: first chunk is not IHDR \
                  (W3C PNG3 §5.1: signature \"immediately followed by an IHDR chunk\")",
-            ))
+            ));
         }
         None => return Err(Error::invalid("PNG: no chunks")),
     }
@@ -423,13 +423,13 @@ fn validate_critical_ordering(chunks: &[ChunkRef<'_>]) -> Result<()> {
     // PLTE shall precede the first IDAT (§5.6 Table 7: "Before first IDAT").
     let first_idat = chunks.iter().position(|c| c.is_type(b"IDAT"));
     let first_plte = chunks.iter().position(|c| c.is_type(b"PLTE"));
-    if let (Some(plte), Some(idat)) = (first_plte, first_idat) {
-        if plte > idat {
-            return Err(Error::invalid(
-                "PNG: PLTE appears after IDAT \
+    if let (Some(plte), Some(idat)) = (first_plte, first_idat)
+        && plte > idat
+    {
+        return Err(Error::invalid(
+            "PNG: PLTE appears after IDAT \
                  (W3C PNG3 §5.6 Table 7: PLTE \"Before first IDAT\")",
-            ));
-        }
+        ));
     }
     Ok(())
 }
@@ -696,12 +696,12 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
                         None => {
                             return Err(Error::invalid(
                                 "PNG bKGD: indexed colour type requires a PLTE chunk",
-                            ))
+                            ));
                         }
                         Some(n) if (idx as usize) >= n => {
                             return Err(Error::invalid(format!(
                                 "PNG bKGD: palette index {idx} out of range (PLTE has {n} entries)",
-                            )))
+                            )));
                         }
                         _ => {}
                     }
@@ -1037,7 +1037,7 @@ fn inflate_image_pixels(stream: &[u8], ihdr: &Ihdr, what: &str, header: &str) ->
             match status {
                 Status::StreamEnd if filled < wire_row => return Err(truncated()),
                 Status::InputEmpty if p.written == 0 && consumed >= stream.len() => {
-                    return Err(truncated())
+                    return Err(truncated());
                 }
                 _ => {}
             }
@@ -1317,7 +1317,12 @@ fn build_png_image(
                 // colour type 4 + 16 bit → (G16, A16) in BE per sample.
                 // Expand to (G,G,G,A) LE.
                 let mut out = vec![0u8; w * h * 8];
-                for (src, dst) in raw.chunks_exact(4).zip(out.chunks_exact_mut(8)) {
+                for (src, dst) in raw
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(out.as_chunks_mut::<8>().0)
+                {
                     let (g_hi, g_lo, a_hi, a_lo) = (src[0], src[1], src[2], src[3]);
                     dst[0] = g_lo;
                     dst[1] = g_hi;
@@ -1356,7 +1361,7 @@ fn build_png_image(
 /// straight-line byte-shuffle loop and avoids allocating a second
 /// full-size plane just to reorder bytes.
 fn swap16_in_place(mut plane: Vec<u8>) -> Vec<u8> {
-    for px in plane.chunks_exact_mut(2) {
+    for px in plane.as_chunks_mut::<2>().0 {
         px.swap(0, 1);
     }
     plane
@@ -1511,7 +1516,7 @@ fn scatter_pass<const N: usize>(
         let dst_y = sr + py * rs;
         let src_row = &expanded[py * pw * N..(py + 1) * pw * N];
         let dst_row = &mut canvas[dst_y * img_w * N..(dst_y * img_w + sc + (pw - 1) * cs + 1) * N];
-        for (px, src) in src_row.chunks_exact(N).enumerate() {
+        for (px, src) in src_row.as_chunks::<N>().0.iter().enumerate() {
             let dst_off = (sc + px * cs) * N;
             dst_row[dst_off..dst_off + N].copy_from_slice(src);
         }
@@ -1579,7 +1584,7 @@ fn expand_byte_plane(raw: Vec<u8>, ihdr: &Ihdr, w: usize, h: usize) -> Result<Ve
         other => {
             return Err(Error::invalid(format!(
                 "PNG: expand_byte_plane: unexpected sub-byte depth {other}"
-            )))
+            )));
         }
     }
     Ok(out)
@@ -1804,13 +1809,13 @@ pub(crate) fn parse_apng_chunks(chunks: &[ChunkRef<'_>], opts: &DecodeOptions) -
     // IDAT chunk within a valid PNG stream." An acTL that follows IDAT names
     // an animation the renderer would have to retro-fit onto an already-shown
     // static image; reject it as malformed rather than silently animating.
-    if let Some(first_idat) = chunks.iter().position(|c| c.is_type(b"IDAT")) {
-        if actl_index > first_idat {
-            return Err(Error::invalid(
-                "PNG acTL: appears after the first IDAT (W3C PNG3 §4.9: \
+    if let Some(first_idat) = chunks.iter().position(|c| c.is_type(b"IDAT"))
+        && actl_index > first_idat
+    {
+        return Err(Error::invalid(
+            "PNG acTL: appears after the first IDAT (W3C PNG3 §4.9: \
                  \"The acTL chunk must appear before the first IDAT chunk\")",
-            ));
-        }
+        ));
     }
     let actl = Actl::parse(chunks[actl_index].data)?;
 

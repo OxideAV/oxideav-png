@@ -182,7 +182,7 @@ fn drive_encode(
             Status::InputEmpty | Status::StreamEnd => {
                 return Err(Error::other(
                     "PNG: zlib encoder stopped consuming input before the end",
-                ))
+                ));
             }
         }
     }

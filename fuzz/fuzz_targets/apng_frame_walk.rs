@@ -27,7 +27,7 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_png::chunk::PNG_MAGIC;
 use oxideav_png::{
-    decode_apng_info, encode_apng, parse_apng, ApngFrameImage, ApngImage, PngImage, PngPixelFormat,
+    ApngFrameImage, ApngImage, PngImage, PngPixelFormat, decode_apng_info, encode_apng, parse_apng,
 };
 
 /// Canvas dimensions cap. APNG composite cost is O(canvas * frames),
@@ -186,7 +186,8 @@ fn solid_frame(width: u32, height: u32, seed: u8) -> PngImage {
             data.push(a);
         }
     }
-    PngImage::packed(width, height, PngPixelFormat::Rgba, stride, data).expect("synthetic image geometry is valid")
+    PngImage::packed(width, height, PngPixelFormat::Rgba, stride, data)
+        .expect("synthetic image geometry is valid")
 }
 
 /// Walk `png`, find every `fcTL` chunk, rewrite its payload's offset /

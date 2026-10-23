@@ -37,7 +37,7 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_png::chunk::PNG_MAGIC;
 use oxideav_png::{
-    decode, decode_rgba8, encode, parse_metadata, EncodeOptions, PngImage, PngPixelFormat,
+    EncodeOptions, PngImage, PngPixelFormat, decode, decode_rgba8, encode, parse_metadata,
 };
 
 /// Ancillary chunk types `parse_metadata` dispatches on (decoder.rs
@@ -161,13 +161,15 @@ impl Plan {
             // Grayscale 8-bit.
             0 => {
                 let data = vec![0x80u8; (W * H) as usize];
-                PngImage::packed(W, H, PngPixelFormat::Gray8, W as usize, data).expect("synthetic image geometry is valid")
+                PngImage::packed(W, H, PngPixelFormat::Gray8, W as usize, data)
+                    .expect("synthetic image geometry is valid")
             }
             // RGB 8-bit.
             1 => {
                 let stride = (W * 3) as usize;
                 let data = vec![0x40u8; stride * H as usize];
-                PngImage::packed(W, H, PngPixelFormat::Rgb24, stride, data).expect("synthetic image geometry is valid")
+                PngImage::packed(W, H, PngPixelFormat::Rgb24, stride, data)
+                    .expect("synthetic image geometry is valid")
             }
             // Palette 8-bit, 4-entry palette, all pixels index 0.
             _ => {
@@ -178,7 +180,8 @@ impl Plan {
                     0, 255, 0, // entry 2
                     0, 0, 255, // entry 3
                 ];
-                PngImage::packed(W, H, PngPixelFormat::Pal8, W as usize, data).expect("synthetic image geometry is valid")
+                PngImage::packed(W, H, PngPixelFormat::Pal8, W as usize, data)
+                    .expect("synthetic image geometry is valid")
                     .with_palette(oxideav_png::Palette::from_rgb(&palette, None))
             }
         }

@@ -21,7 +21,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_png::{
-    decode, decode_apng, encode, encode_apng, EncodeOptions, PngImage, PngPixelFormat,
+    EncodeOptions, PngImage, PngPixelFormat, decode, decode_apng, encode, encode_apng,
 };
 
 /// Maximum per-frame dimension. Static + animated round-trip cost is
@@ -240,7 +240,8 @@ fn solid_frame(width: u32, height: u32, format: PngPixelFormat, seed: u8) -> Png
     for _ in 0..(width as usize * height as usize) {
         data.extend_from_slice(&pixel);
     }
-    PngImage::packed(width, height, format, stride, data).expect("synthetic image geometry is valid")
+    PngImage::packed(width, height, format, stride, data)
+        .expect("synthetic image geometry is valid")
 }
 
 enum Plan {

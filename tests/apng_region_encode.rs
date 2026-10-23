@@ -11,14 +11,14 @@
 //! canvases match the model computed in the test.
 
 use oxideav_png::{
-    decode_apng, encode_apng_frames, encode_apng_frames_with_options, ApngBlend, ApngDisposal,
-    ApngFrameSpec, EncodeOptions, PngImage, PngPixelFormat,
+    ApngBlend, ApngDisposal, ApngFrameSpec, EncodeOptions, PngImage, PngPixelFormat, decode_apng,
+    encode_apng_frames, encode_apng_frames_with_options,
 };
 
 /// A solid-colour RGBA region of the given extent.
 fn solid_rgba(w: u32, h: u32, rgba: [u8; 4]) -> PngImage {
     let mut data = vec![0u8; w as usize * h as usize * 4];
-    for px in data.chunks_exact_mut(4) {
+    for px in data.as_chunks_mut::<4>().0 {
         px.copy_from_slice(&rgba);
     }
     PngImage::packed(w, h, PngPixelFormat::Rgba, w as usize * 4, data).unwrap()

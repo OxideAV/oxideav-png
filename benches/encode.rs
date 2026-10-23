@@ -31,9 +31,9 @@
 //! Run with:
 //!     cargo bench -p oxideav-png --bench encode
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use oxideav_png::{encode, encode_apng, EncodeOptions, PngImage, PngPixelFormat};
+use oxideav_png::{EncodeOptions, PngImage, PngPixelFormat, encode, encode_apng};
 
 fn xorshift_byte(state: &mut u32) -> u8 {
     *state ^= *state << 13;

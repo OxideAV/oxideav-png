@@ -129,15 +129,15 @@ pub fn unfilter_row(filter: FilterType, row: &mut [u8], prev_row: &[u8], bpp: us
 #[inline]
 fn unfilter_sub_lanes<const N: usize>(row: &mut [u8]) {
     let mut left = [0u8; N];
-    let mut chunks = row.chunks_exact_mut(N);
-    for px in &mut chunks {
+    let (chunks, chunks_rem) = row.as_chunks_mut::<N>();
+    for px in chunks {
         for k in 0..N {
             let v = px[k].wrapping_add(left[k]);
             px[k] = v;
             left[k] = v;
         }
     }
-    for (k, b) in chunks.into_remainder().iter_mut().enumerate() {
+    for (k, b) in chunks_rem.iter_mut().enumerate() {
         *b = b.wrapping_add(left[k]);
     }
 }
@@ -149,17 +149,17 @@ fn unfilter_sub_lanes<const N: usize>(row: &mut [u8]) {
 #[inline]
 fn unfilter_avg_lanes<const N: usize>(row: &mut [u8], prev_row: &[u8]) {
     let mut left = [0u8; N];
-    let mut rc = row.chunks_exact_mut(N);
-    let mut pc = prev_row.chunks_exact(N);
-    for (px, up) in (&mut rc).zip(&mut pc) {
+    let (rc, rc_rem) = row.as_chunks_mut::<N>();
+    let (pc, pc_rem) = prev_row.as_chunks::<N>();
+    for (px, up) in rc.iter_mut().zip(pc.iter()) {
         for k in 0..N {
             let v = px[k].wrapping_add(((left[k] as u16 + up[k] as u16) >> 1) as u8);
             px[k] = v;
             left[k] = v;
         }
     }
-    let rem = rc.into_remainder();
-    let prem = pc.remainder();
+    let rem = rc_rem;
+    let prem = pc_rem;
     for k in 0..rem.len() {
         rem[k] = rem[k].wrapping_add(((left[k] as u16 + prem[k] as u16) >> 1) as u8);
     }
@@ -172,9 +172,9 @@ fn unfilter_avg_lanes<const N: usize>(row: &mut [u8], prev_row: &[u8]) {
 fn unfilter_paeth_lanes<const N: usize>(row: &mut [u8], prev_row: &[u8]) {
     let mut left = [0u8; N];
     let mut up_left = [0u8; N];
-    let mut rc = row.chunks_exact_mut(N);
-    let mut pc = prev_row.chunks_exact(N);
-    for (px, up) in (&mut rc).zip(&mut pc) {
+    let (rc, rc_rem) = row.as_chunks_mut::<N>();
+    let (pc, pc_rem) = prev_row.as_chunks::<N>();
+    for (px, up) in rc.iter_mut().zip(pc.iter()) {
         for k in 0..N {
             let b = up[k];
             let p = paeth_predictor(left[k] as i16, b as i16, up_left[k] as i16) as u8;
@@ -184,8 +184,8 @@ fn unfilter_paeth_lanes<const N: usize>(row: &mut [u8], prev_row: &[u8]) {
             up_left[k] = b;
         }
     }
-    let rem = rc.into_remainder();
-    let prem = pc.remainder();
+    let rem = rc_rem;
+    let prem = pc_rem;
     for k in 0..rem.len() {
         let p = paeth_predictor(left[k] as i16, prem[k] as i16, up_left[k] as i16) as u8;
         rem[k] = rem[k].wrapping_add(p);
@@ -602,8 +602,8 @@ pub const CRC32_INIT: u32 = 0xFFFF_FFFF;
 pub fn crc32_update(mut c: u32, bytes: &[u8]) -> u32 {
     let tables = crc_tables();
 
-    let mut chunks = bytes.chunks_exact(CRC_SLICES);
-    for block in &mut chunks {
+    let (chunks, tail) = bytes.as_chunks::<CRC_SLICES>();
+    for block in chunks {
         // Fold the running CRC into the first four input bytes (little-endian,
         // matching the reflected polynomial's bit order) before indexing.
         let a = c ^ u32::from_le_bytes([block[0], block[1], block[2], block[3]]);
@@ -621,7 +621,7 @@ pub fn crc32_update(mut c: u32, bytes: &[u8]) -> u32 {
 
     // Tail: fewer than CRC_SLICES bytes left — classic byte-at-a-time.
     let tbl = &tables[0];
-    for &b in chunks.remainder() {
+    for &b in tail {
         c = tbl[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8);
     }
     c

@@ -17,8 +17,8 @@ use oxideav_core::{
     CodecId, CodecParameters, ExecutionContext, Frame, PixelFormat, VideoFrame, VideoPlane,
 };
 use oxideav_png::{
-    decode, decode_apng, encode, encode_apng_frames_threaded, encode_apng_threaded, ApngFrameSpec,
-    EncodeOptions, FilterStrategy, FilterType, PngImage, PngPixelFormat,
+    ApngFrameSpec, EncodeOptions, FilterStrategy, FilterType, PngImage, PngPixelFormat, decode,
+    decode_apng, encode, encode_apng_frames_threaded, encode_apng_threaded,
 };
 
 /// Deterministic "photographic" plane: gradients + 4 bits of noise, so
@@ -177,7 +177,7 @@ fn adam7_and_subbyte_are_thread_stable() {
 fn apng_frames_stream_into_chunks_thread_stably() {
     let a = synth(W, H / 4, PngPixelFormat::Rgba, 0);
     let mut b = a.clone();
-    for px in b.planes[0].data.chunks_exact_mut(4) {
+    for px in b.planes[0].data.as_chunks_mut::<4>().0 {
         px[0] = px[0].wrapping_add(40);
     }
     let opts = EncodeOptions::default().with_compression_level(Some(1));

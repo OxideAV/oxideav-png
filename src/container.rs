@@ -38,8 +38,8 @@ use oxideav_core::{
 use oxideav_core::{ContainerRegistry, Demuxer, Error, Muxer, ProbeData, ReadSeek, WriteSeek};
 
 use crate::apng::parse_fdat;
-use crate::chunk::{write_chunk, ChunkRef, PNG_MAGIC};
-use crate::decoder::{parse_all_chunks, validate_ancillary_ordering, Ihdr};
+use crate::chunk::{ChunkRef, PNG_MAGIC, write_chunk};
+use crate::decoder::{Ihdr, parse_all_chunks, validate_ancillary_ordering};
 use crate::registry::to_core_pixel_format;
 
 /// Register the PNG / APNG container (demuxer + muxer + extensions + probe).
@@ -55,11 +55,7 @@ pub fn probe(p: &ProbeData) -> u8 {
     if p.buf.len() < 8 {
         return 0;
     }
-    if p.buf[0..8] == PNG_MAGIC {
-        100
-    } else {
-        0
-    }
+    if p.buf[0..8] == PNG_MAGIC { 100 } else { 0 }
 }
 
 // ---- Demuxer ------------------------------------------------------------
@@ -283,13 +279,13 @@ pub(crate) fn validate_apng_chunk_placement(chunks: &[ChunkRef<'_>]) -> Result<(
     }
     let actl_pos = chunks.iter().position(|c| c.is_type(b"acTL"));
     let idat_pos = chunks.iter().position(|c| c.is_type(b"IDAT"));
-    if let (Some(a), Some(i)) = (actl_pos, idat_pos) {
-        if a > i {
-            return Err(Error::invalid(
-                "PNG acTL: appears after the first IDAT (W3C PNG3 §4.9.1: \
+    if let (Some(a), Some(i)) = (actl_pos, idat_pos)
+        && a > i
+    {
+        return Err(Error::invalid(
+            "PNG acTL: appears after the first IDAT (W3C PNG3 §4.9.1: \
                  \"an acTL chunk must appear in the stream before any IDAT chunks\")",
-            ));
-        }
+        ));
     }
     Ok(())
 }

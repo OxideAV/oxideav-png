@@ -10,7 +10,7 @@
 //! test pins the OVER arithmetic at 16-bit precision.
 
 use oxideav_png::chunk::write_chunk;
-use oxideav_png::{decode_apng, PngPixelFormat};
+use oxideav_png::{PngPixelFormat, decode_apng};
 
 const SIG: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 

@@ -28,7 +28,7 @@ use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 // rationale comments.
 // ---------------------------------------------------------------------------
 mod libpng {
-    use libloading::{Library, Symbol};
+    use dlsym::Library;
     use std::sync::OnceLock;
 
     const CANDIDATES: &[&str] = &[
@@ -40,6 +40,9 @@ mod libpng {
         "libpng16-16.dll",
     ];
 
+    // The `Library` lives in a `'static` `OnceLock` and is never closed, so
+    // the raw function pointers detached below with `Symbol::into_inner`
+    // can never dangle.
     fn lib() -> Option<&'static Library> {
         static LIB: OnceLock<Option<Library>> = OnceLock::new();
         LIB.get_or_init(|| {
@@ -47,7 +50,7 @@ mod libpng {
                 // SAFETY: loading a system shared library may execute init
                 // code. libpng is well-behaved; we accept the risk for
                 // test tooling.
-                if let Ok(l) = unsafe { Library::new(name) } {
+                if let Ok(l) = unsafe { Library::open(name) } {
                     return Some(l);
                 }
             }
@@ -120,8 +123,11 @@ mod libpng {
 
         let l = lib()?;
         unsafe {
-            let write: Symbol<WriteFn> = l.get(b"png_image_write_to_memory").ok()?;
-            let free: Symbol<FreeFn> = l.get(b"png_image_free").ok()?;
+            let write: WriteFn = l
+                .get::<WriteFn>(c"png_image_write_to_memory")
+                .ok()?
+                .into_inner();
+            let free: FreeFn = l.get::<FreeFn>(c"png_image_free").ok()?.into_inner();
 
             let mut img = PngImage::zeroed();
             img.version = PNG_IMAGE_VERSION;
@@ -182,9 +188,15 @@ mod libpng {
 
         let l = lib()?;
         unsafe {
-            let begin: Symbol<BeginFn> = l.get(b"png_image_begin_read_from_memory").ok()?;
-            let finish: Symbol<FinishFn> = l.get(b"png_image_finish_read").ok()?;
-            let free: Symbol<FreeFn> = l.get(b"png_image_free").ok()?;
+            let begin: BeginFn = l
+                .get::<BeginFn>(c"png_image_begin_read_from_memory")
+                .ok()?
+                .into_inner();
+            let finish: FinishFn = l
+                .get::<FinishFn>(c"png_image_finish_read")
+                .ok()?
+                .into_inner();
+            let free: FreeFn = l.get::<FreeFn>(c"png_image_free").ok()?.into_inner();
 
             let mut img = PngImage::zeroed();
             img.version = PNG_IMAGE_VERSION;

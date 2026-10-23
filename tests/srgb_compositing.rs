@@ -10,9 +10,9 @@
 //! linear one, and that is what `composite_over_background` does.
 
 use oxideav_png::{
+    EncodeOptions, PngImage, PngMetadata, PngPixelFormat, RenderingIntent, RgbaImage, Srgb,
     composite_over_background, decode_rgba8, encode, linearize_rgba, parse_metadata,
-    srgb_from_linear, srgb_to_linear8, srgb_to_scaled_linear8, EncodeOptions, PngImage,
-    PngMetadata, PngPixelFormat, RenderingIntent, RgbaImage, Srgb,
+    srgb_from_linear, srgb_to_linear8, srgb_to_scaled_linear8,
 };
 
 fn rgba_image(w: u32, h: u32, data: Vec<u8>) -> PngImage {

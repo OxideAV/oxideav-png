@@ -12,7 +12,7 @@
 //! Run with:
 //!     cargo bench -p oxideav-png --bench depth
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_png::depth::{rescale_16bit_to_8bit, rescale_16bit_to_8bit_via_sbit};
 use oxideav_png::image::{PngImage, PngPixelFormat};

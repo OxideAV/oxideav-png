@@ -13,7 +13,7 @@ use oxideav_png::depth::{
 };
 use oxideav_png::image::{PngImage, PngPixelFormat};
 use oxideav_png::metadata::Sbit;
-use oxideav_png::{decode, encode, EncodeOptions};
+use oxideav_png::{EncodeOptions, decode, encode};
 
 fn png16(format: PngPixelFormat, w: u32, h: u32, samples: &[u16]) -> PngImage {
     let mut data = Vec::with_capacity(samples.len() * 2);

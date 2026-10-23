@@ -190,28 +190,29 @@ pub use apng::{Blend as ApngBlend, Disposal as ApngDisposal};
 pub use chunk::{ChunkType, ColourType};
 pub use decoder::CODEC_ID_STR;
 pub use decoder::{
-    decode_apng, decode_apng_info, parse_apng, parse_metadata, ApngInfo, Ihdr,
-    DEFAULT_BACKGROUND_GREY,
+    ApngInfo, DEFAULT_BACKGROUND_GREY, Ihdr, decode_apng, decode_apng_info, parse_apng,
+    parse_metadata,
 };
 pub use depth::{
     max_sample, recover_sbit, rescale_16bit_to_8bit, rescale_16bit_to_8bit_via_sbit,
     rescale_sample, scale_up_bit_replication, scale_up_zero_fill,
 };
 pub use encoder::{
-    encode_apng, encode_apng_frames, encode_apng_frames_threaded, encode_apng_frames_with_options,
-    encode_apng_threaded, encode_apng_with_options, ApngFrameSpec, DEFAULT_COMPRESSION_LEVEL,
+    ApngFrameSpec, DEFAULT_COMPRESSION_LEVEL, encode_apng, encode_apng_frames,
+    encode_apng_frames_threaded, encode_apng_frames_with_options, encode_apng_threaded,
+    encode_apng_with_options,
 };
 pub use filter::{FilterStrategy, FilterType};
 pub use gamma::{
-    apply_gama_to_palette, apply_gama_to_png16, apply_gama_to_rgba,
+    GammaParams, apply_gama_to_palette, apply_gama_to_png16, apply_gama_to_rgba,
     apply_to_palette as apply_gamma_to_palette, apply_to_png16 as apply_gamma_to_png16,
-    apply_to_rgba as apply_gamma_to_rgba, GammaParams,
+    apply_to_rgba as apply_gamma_to_rgba,
 };
 pub use image::{ApngFrameImage, ApngImage};
 pub use metadata::{
-    Bkgd, Chrm, Cicp, Clli, ColourSource, Exif, Gama, Hist, Iccp, Itxt, Mdcv, Phys, PhysUnit,
-    PngMetadata, RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time, Trns, UnknownChunk,
-    Ztxt, MAX_INFLATED_METADATA_LEN,
+    Bkgd, Chrm, Cicp, Clli, ColourSource, Exif, Gama, Hist, Iccp, Itxt, MAX_INFLATED_METADATA_LEN,
+    Mdcv, Phys, PhysUnit, PngMetadata, RenderingIntent, Sbit, Splt, SpltEntry, Srgb, Text, Time,
+    Trns, UnknownChunk, Ztxt,
 };
 pub use srgb::{
     composite_over_background, from_linear as srgb_from_linear, linearize_rgba,
@@ -226,7 +227,7 @@ pub use srgb::{
 // without dragging in `oxideav-core`.
 #[cfg(feature = "registry")]
 pub use registry::{
-    __oxideav_entry, decode_png_to_frame, encode_single, encode_single_with_options,
-    from_color_signal, make_decoder, make_encoder, register, register_codecs, register_containers,
-    to_color_signal, to_core_pixel_format, PngDecoder, PngEncoder,
+    __oxideav_entry, PngDecoder, PngEncoder, decode_png_to_frame, encode_single,
+    encode_single_with_options, from_color_signal, make_decoder, make_encoder, register,
+    register_codecs, register_containers, to_color_signal, to_core_pixel_format,
 };

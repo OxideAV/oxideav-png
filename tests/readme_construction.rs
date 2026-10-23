@@ -5,8 +5,8 @@
 //! round-trips.
 
 use oxideav_png::{
-    decode, encode, parse_metadata, ApngFrameSpec, EncodeOptions, FilterStrategy, FilterType, Gama,
-    Ihdr, Itxt, PngImage, PngMetadata, PngPixelFormat, Text,
+    ApngFrameSpec, EncodeOptions, FilterStrategy, FilterType, Gama, Ihdr, Itxt, PngImage,
+    PngMetadata, PngPixelFormat, Text, decode, encode, parse_metadata,
 };
 
 #[test]

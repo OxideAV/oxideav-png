@@ -12,7 +12,7 @@
 //! scale. For colour type 3 (indexed), the decoder hands back one
 //! palette-index byte per pixel, matching the source 1:1.
 
-use oxideav_png::{decode, encode, EncodeOptions, Palette, PngImage, PngPixelFormat};
+use oxideav_png::{EncodeOptions, Palette, PngImage, PngPixelFormat, decode, encode};
 
 fn gray_source(w: u32, h: u32, bit_depth: u8) -> PngImage {
     let max = (1u16 << bit_depth) as u8 - 1;

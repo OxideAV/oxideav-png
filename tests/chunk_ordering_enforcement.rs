@@ -19,8 +19,8 @@
 //! positive cases that conformant ordering still parses.
 
 use oxideav_png::{
-    decode, encode, encode_apng, parse_apng, parse_metadata, EncodeOptions, PngImage,
-    PngPixelFormat,
+    EncodeOptions, PngImage, PngPixelFormat, decode, encode, encode_apng, parse_apng,
+    parse_metadata,
 };
 
 fn rgba_2x2() -> PngImage {

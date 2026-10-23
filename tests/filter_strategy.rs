@@ -21,7 +21,7 @@
 //! (§9.1 "All filters are linear, … and are therefore reversible").
 
 use oxideav_png::{
-    decode, encode, EncodeOptions, FilterStrategy, FilterType, Palette, PngImage, PngPixelFormat,
+    EncodeOptions, FilterStrategy, FilterType, Palette, PngImage, PngPixelFormat, decode, encode,
 };
 
 /// Walk a PNG file in front-to-back chunk order and pull out every

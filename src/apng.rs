@@ -390,49 +390,65 @@ mod tests {
     fn validate_accepts_frame_flush_with_canvas() {
         // A frame whose region exactly fills the canvas is in bounds:
         // x_offset + width == IHDR width, y_offset + height == IHDR height.
-        assert!(region_fctl(0, 0, 100, 60)
-            .validate_within_canvas(100, 60)
-            .is_ok());
+        assert!(
+            region_fctl(0, 0, 100, 60)
+                .validate_within_canvas(100, 60)
+                .is_ok()
+        );
         // A strictly-inside sub-region with non-zero offsets is fine too.
-        assert!(region_fctl(10, 20, 80, 30)
-            .validate_within_canvas(100, 60)
-            .is_ok());
+        assert!(
+            region_fctl(10, 20, 80, 30)
+                .validate_within_canvas(100, 60)
+                .is_ok()
+        );
     }
 
     #[test]
     fn validate_rejects_zero_extent() {
         // §11.3.6.1: "width and height … must be greater than zero."
-        assert!(region_fctl(0, 0, 0, 10)
-            .validate_within_canvas(100, 60)
-            .is_err());
-        assert!(region_fctl(0, 0, 10, 0)
-            .validate_within_canvas(100, 60)
-            .is_err());
+        assert!(
+            region_fctl(0, 0, 0, 10)
+                .validate_within_canvas(100, 60)
+                .is_err()
+        );
+        assert!(
+            region_fctl(0, 0, 10, 0)
+                .validate_within_canvas(100, 60)
+                .is_err()
+        );
     }
 
     #[test]
     fn validate_rejects_region_outside_canvas() {
         // x_offset + width must not exceed IHDR width.
-        assert!(region_fctl(50, 0, 60, 10)
-            .validate_within_canvas(100, 60)
-            .is_err());
+        assert!(
+            region_fctl(50, 0, 60, 10)
+                .validate_within_canvas(100, 60)
+                .is_err()
+        );
         // y_offset + height must not exceed IHDR height.
-        assert!(region_fctl(0, 40, 10, 30)
-            .validate_within_canvas(100, 60)
-            .is_err());
+        assert!(
+            region_fctl(0, 40, 10, 30)
+                .validate_within_canvas(100, 60)
+                .is_err()
+        );
         // Off-by-one over the right edge is rejected (101 > 100).
-        assert!(region_fctl(1, 0, 100, 10)
-            .validate_within_canvas(100, 60)
-            .is_err());
+        assert!(
+            region_fctl(1, 0, 100, 10)
+                .validate_within_canvas(100, 60)
+                .is_err()
+        );
     }
 
     #[test]
     fn validate_offset_plus_extent_cannot_wrap() {
         // u32 addition would wrap to a tiny value; the u64 sum keeps the
         // out-of-bounds region rejected rather than slipping past the gate.
-        assert!(region_fctl(u32::MAX, 0, 2, 1)
-            .validate_within_canvas(u32::MAX, 1)
-            .is_err());
+        assert!(
+            region_fctl(u32::MAX, 0, 2, 1)
+                .validate_within_canvas(u32::MAX, 1)
+                .is_err()
+        );
     }
 
     fn fc(seq: u32) -> SeqChunk {

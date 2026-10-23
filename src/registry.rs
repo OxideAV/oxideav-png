@@ -25,14 +25,14 @@ use oxideav_core::Decoder;
 use oxideav_core::Encoder;
 use oxideav_core::RuntimeContext;
 use oxideav_core::{
-    parse_options, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters,
-    CodecRegistry, ColorPrimaries, ColorSignal, ContainerRegistry, ExecutionContext, Frame,
-    MatrixCoefficients, MediaType, OptionField, OptionKind, OptionValue, Packet, PixelFormat,
-    Rational, TimeBase, TransferCharacteristics, VideoFrame, VideoPlane,
+    CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters, CodecRegistry,
+    ColorPrimaries, ColorSignal, ContainerRegistry, ExecutionContext, Frame, MatrixCoefficients,
+    MediaType, OptionField, OptionKind, OptionValue, Packet, PixelFormat, Rational, TimeBase,
+    TransferCharacteristics, VideoFrame, VideoPlane, parse_options,
 };
 
 use crate::decoder::CODEC_ID_STR;
-use crate::encoder::{encode_apng_threaded, encode_threaded, EncodeOptions};
+use crate::encoder::{EncodeOptions, encode_apng_threaded, encode_threaded};
 use crate::error::PngError;
 use crate::image::{ColorInfo, ColorRange, Palette, PngImage, PngPixelFormat};
 use crate::options::DecodeOptions;
@@ -74,7 +74,7 @@ fn png_pixel_format(pf: PixelFormat) -> Result<PngPixelFormat, PngError> {
         other => {
             return Err(PngError::unsupported(format!(
                 "PNG: pixel format {other:?} not supported"
-            )))
+            )));
         }
     })
 }
@@ -399,7 +399,7 @@ impl CodecOptionsStruct for EncodeOptions {
                         return Err(oxideav_core::Error::invalid(format!(
                             "PNG encoder: option `filter` got {other:?}; \
                              expected one of adaptive / none / sub / up / average / paeth / brute"
-                        )))
+                        )));
                     }
                 };
             }

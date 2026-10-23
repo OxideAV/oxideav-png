@@ -10,8 +10,8 @@
 //! malformed) is dropped rather than re-emitted.
 
 use oxideav_png::{
-    decode, encode, encode_apng, parse_apng, parse_metadata, EncodeOptions, PngImage,
-    PngPixelFormat, UnknownChunk,
+    EncodeOptions, PngImage, PngPixelFormat, UnknownChunk, decode, encode, encode_apng, parse_apng,
+    parse_metadata,
 };
 
 fn rgba_2x2() -> PngImage {

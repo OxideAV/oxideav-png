@@ -308,7 +308,9 @@ impl Palette {
     pub fn from_rgb(rgb: &[u8], alpha: Option<&[u8]>) -> Self {
         let alpha = alpha.unwrap_or(&[]);
         let entries = rgb
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .enumerate()
             .map(|(i, e)| [e[0], e[1], e[2], alpha.get(i).copied().unwrap_or(255)])
             .collect();
@@ -651,7 +653,7 @@ impl PngImage {
             match self.format {
                 PixelFormat::Gray8 => {
                     let key = key_gray.and_then(|k| u8::try_from(k).ok());
-                    for (&g, px) in row.iter().zip(dst.chunks_exact_mut(4)) {
+                    for (&g, px) in row.iter().zip(dst.as_chunks_mut::<4>().0) {
                         px[0] = g;
                         px[1] = g;
                         px[2] = g;
@@ -659,7 +661,12 @@ impl PngImage {
                     }
                 }
                 PixelFormat::Gray16Le => {
-                    for (s, px) in row.chunks_exact(2).zip(dst.chunks_exact_mut(4)) {
+                    for (s, px) in row
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .zip(dst.as_chunks_mut::<4>().0)
+                    {
                         let hi = s[1];
                         px[0] = hi;
                         px[1] = hi;
@@ -676,7 +683,12 @@ impl PngImage {
                             u8::try_from(b).ok()?,
                         ])
                     });
-                    for (s, px) in row.chunks_exact(3).zip(dst.chunks_exact_mut(4)) {
+                    for (s, px) in row
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .zip(dst.as_chunks_mut::<4>().0)
+                    {
                         px[0] = s[0];
                         px[1] = s[1];
                         px[2] = s[2];
@@ -688,7 +700,12 @@ impl PngImage {
                     }
                 }
                 PixelFormat::Rgb48Le => {
-                    for (s, px) in row.chunks_exact(6).zip(dst.chunks_exact_mut(4)) {
+                    for (s, px) in row
+                        .as_chunks::<6>()
+                        .0
+                        .iter()
+                        .zip(dst.as_chunks_mut::<4>().0)
+                    {
                         px[0] = s[1];
                         px[1] = s[3];
                         px[2] = s[5];
@@ -699,12 +716,17 @@ impl PngImage {
                     }
                 }
                 PixelFormat::Pal8 => {
-                    for (&idx, px) in row.iter().zip(dst.chunks_exact_mut(4)) {
+                    for (&idx, px) in row.iter().zip(dst.as_chunks_mut::<4>().0) {
                         px.copy_from_slice(&lut[idx as usize]);
                     }
                 }
                 PixelFormat::Ya8 => {
-                    for (s, px) in row.chunks_exact(2).zip(dst.chunks_exact_mut(4)) {
+                    for (s, px) in row
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .zip(dst.as_chunks_mut::<4>().0)
+                    {
                         px[0] = s[0];
                         px[1] = s[0];
                         px[2] = s[0];
@@ -715,7 +737,12 @@ impl PngImage {
                     dst.copy_from_slice(row);
                 }
                 PixelFormat::Rgba64Le => {
-                    for (s, px) in row.chunks_exact(8).zip(dst.chunks_exact_mut(4)) {
+                    for (s, px) in row
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .zip(dst.as_chunks_mut::<4>().0)
+                    {
                         px[0] = s[1];
                         px[1] = s[3];
                         px[2] = s[5];
@@ -757,7 +784,7 @@ impl PngImage {
                     let Some(row) = src.get(y * stride..y * stride + w) else {
                         break;
                     };
-                    for (&g, px) in row.iter().zip(out[y * w * 3..].chunks_exact_mut(3)) {
+                    for (&g, px) in row.iter().zip(out[y * w * 3..].as_chunks_mut::<3>().0) {
                         px[0] = g;
                         px[1] = g;
                         px[2] = g;
@@ -766,7 +793,12 @@ impl PngImage {
             }
             _ => {
                 let rgba = self.to_rgba8();
-                for (s, d) in rgba.chunks_exact(4).zip(out.chunks_exact_mut(3)) {
+                for (s, d) in rgba
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(out.as_chunks_mut::<3>().0)
+                {
                     d.copy_from_slice(&s[..3]);
                 }
             }

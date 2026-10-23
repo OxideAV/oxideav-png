@@ -29,7 +29,7 @@ fn frame_idat(w: u32, h: u32) -> Vec<u8> {
     let mut raw = Vec::new();
     for _ in 0..h {
         raw.push(0u8); // filter None
-        raw.extend(std::iter::repeat(128u8).take(row_bytes));
+        raw.extend(std::iter::repeat_n(128u8, row_bytes));
     }
     compcol::vec::compress_to_vec_with::<compcol::zlib::Zlib>(
         &raw,

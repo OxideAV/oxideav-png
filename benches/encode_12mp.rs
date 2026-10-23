@@ -45,7 +45,7 @@ use std::time::Instant;
 
 use oxideav_png::filter::{choose_filter_heuristic, filter_row};
 use oxideav_png::{
-    decode, encode, EncodeOptions, FilterStrategy, FilterType, PngImage, PngPixelFormat,
+    EncodeOptions, FilterStrategy, FilterType, PngImage, PngPixelFormat, decode, encode,
 };
 
 const WIDTH: u32 = 4032;
@@ -360,11 +360,11 @@ fn main() {
                             );
                         }
                         println!(
-                        "| {name} | {} | {} | {fname} | {threads} | {best_enc:.0} | {bytes} | {:.1}% | {best_dec:.0} |",
-                        if photo { photo_label } else { "flat" },
-                        level.map_or("default".to_string(), |l| l.to_string()),
-                        bytes as f64 * 100.0 / raw_len as f64
-                    );
+                            "| {name} | {} | {} | {fname} | {threads} | {best_enc:.0} | {bytes} | {:.1}% | {best_dec:.0} |",
+                            if photo { photo_label } else { "flat" },
+                            level.map_or("default".to_string(), |l| l.to_string()),
+                            bytes as f64 * 100.0 / raw_len as f64
+                        );
                     }
                 }
             }

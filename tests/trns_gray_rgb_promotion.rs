@@ -19,8 +19,9 @@
 //! is structurally a real PNG.
 
 use oxideav_png::{
-    chunk::{write_chunk, PNG_MAGIC},
-    decode_rgba8, encode, EncodeOptions, Palette, PngImage, PngPixelFormat,
+    EncodeOptions, Palette, PngImage, PngPixelFormat,
+    chunk::{PNG_MAGIC, write_chunk},
+    decode_rgba8, encode,
 };
 
 fn make(w: u32, h: u32, pf: PngPixelFormat, data: Vec<u8>) -> PngImage {
@@ -158,7 +159,7 @@ fn rgb24_trns_marks_matching_pixels_transparent() {
     let rgba = decode_rgba8(&spliced).expect("decode");
     let alphas: Vec<u8> = (0..4).map(|i| rgba.data[i * 4 + 3]).collect();
     assert_eq!(alphas, vec![255, 0, 255, 255]);
-    for (i, src) in raw.chunks_exact(3).enumerate() {
+    for (i, src) in raw.as_chunks::<3>().0.iter().enumerate() {
         assert_eq!(rgba.data[i * 4], src[0]);
         assert_eq!(rgba.data[i * 4 + 1], src[1]);
         assert_eq!(rgba.data[i * 4 + 2], src[2]);

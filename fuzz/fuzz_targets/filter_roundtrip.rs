@@ -47,7 +47,7 @@
 //! every realistic shape an in-the-wild PNG might present.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_png::filter::{filter_row, unfilter_row, FilterType};
+use oxideav_png::filter::{FilterType, filter_row, unfilter_row};
 
 /// `Ihdr::bpp_for_filter` returns at most 8 (16-bit RGBA = 2 * 4).
 /// Match that cap so the harness mirrors the decoder's actual reach.

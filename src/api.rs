@@ -5,10 +5,10 @@ use std::io::{Read, Write};
 
 use crate::chunk::PNG_MAGIC;
 use crate::decoder::{
-    check_palette_indices, decode_apng_info, decode_image, image_to_rgba_checked, parse_all_chunks,
-    parse_apng_chunks, Ihdr,
+    Ihdr, check_palette_indices, decode_apng_info, decode_image, image_to_rgba_checked,
+    parse_all_chunks, parse_apng_chunks,
 };
-use crate::encoder::{encode as encode_image, EncodeOptions};
+use crate::encoder::{EncodeOptions, encode as encode_image};
 use crate::error::{PngError as Error, Result};
 use crate::image::{Frame, ImageInfo, PngImage, RgbImage, RgbaImage};
 use crate::options::DecodeOptions;
@@ -51,11 +51,11 @@ pub fn info(bytes: &[u8]) -> Result<ImageInfo> {
     out.has_icc = side.has_icc;
     out.has_exif = side.has_exif;
     out.has_xmp = side.has_xmp;
-    if let Some(actl) = chunks.iter().find(|c| c.is_type(b"acTL")) {
-        if let Ok(a) = crate::apng::Actl::parse(actl.data) {
-            out.frames = a.num_frames.max(1);
-            out.num_plays = a.num_plays;
-        }
+    if let Some(actl) = chunks.iter().find(|c| c.is_type(b"acTL"))
+        && let Ok(a) = crate::apng::Actl::parse(actl.data)
+    {
+        out.frames = a.num_frames.max(1);
+        out.num_plays = a.num_plays;
     }
     Ok(out)
 }

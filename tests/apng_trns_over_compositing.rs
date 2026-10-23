@@ -249,7 +249,7 @@ fn grayscale16_over_skips_keyed_sample() {
     ihdr.push(0);
     let key = 0x1234u16;
     let trns = key.to_be_bytes().to_vec(); // ct0: 2-byte big-endian sample
-                                           // 16-bit gray frames: big-endian per sample on the wire.
+    // 16-bit gray frames: big-endian per sample on the wire.
     let gray16 = |g: u16| -> Vec<u8> {
         let mut raw = vec![0u8]; // filter None
         for _ in 0..w {

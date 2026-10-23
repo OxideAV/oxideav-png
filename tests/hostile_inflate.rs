@@ -15,8 +15,8 @@ use compcol::zlib::{EncoderConfig, Zlib};
 use oxideav_png::chunk::write_chunk;
 use oxideav_png::metadata::{Iccp, Itxt, Ztxt};
 use oxideav_png::{
-    decode, decode_apng, encode, encode_apng, parse_metadata, EncodeOptions, Ihdr, PngImage,
-    PngPixelFormat, MAX_INFLATED_METADATA_LEN,
+    EncodeOptions, Ihdr, MAX_INFLATED_METADATA_LEN, PngImage, PngPixelFormat, decode, decode_apng,
+    encode, encode_apng, parse_metadata,
 };
 
 /// Compress `data` into a zlib stream (level 1 — cheapest; these tests

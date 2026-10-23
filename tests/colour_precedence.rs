@@ -7,8 +7,8 @@
 //! shall be used").
 
 use oxideav_png::{
-    decode, encode, parse_metadata, Chrm, Cicp, ColourSource, EncodeOptions, Gama, Iccp, PngImage,
-    PngMetadata, PngPixelFormat, RenderingIntent, Srgb,
+    Chrm, Cicp, ColourSource, EncodeOptions, Gama, Iccp, PngImage, PngMetadata, PngPixelFormat,
+    RenderingIntent, Srgb, decode, encode, parse_metadata,
 };
 
 fn rgba_2x2() -> PngImage {

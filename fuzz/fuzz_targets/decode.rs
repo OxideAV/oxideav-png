@@ -32,8 +32,8 @@ use oxideav_png::depth::{
 };
 use oxideav_png::metadata::Sbit;
 use oxideav_png::{
-    decode, decode_all, decode_apng, decode_over_background, decode_rgb8, decode_rgba8,
-    decode_with, info, parse_apng, parse_metadata, probe, DecodeOptions,
+    DecodeOptions, decode, decode_all, decode_apng, decode_over_background, decode_rgb8,
+    decode_rgba8, decode_with, info, parse_apng, parse_metadata, probe,
 };
 
 fuzz_target!(|data: &[u8]| {

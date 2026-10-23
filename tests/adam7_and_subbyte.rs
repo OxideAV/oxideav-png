@@ -8,8 +8,8 @@
 // The framework path: needs `oxideav-core` (default-on `registry`).
 #![cfg(feature = "registry")]
 
-use oxideav_png::chunk::{write_chunk, PNG_MAGIC};
-use oxideav_png::decoder::{decode_png_to_frame, Ihdr};
+use oxideav_png::chunk::{PNG_MAGIC, write_chunk};
+use oxideav_png::decoder::{Ihdr, decode_png_to_frame};
 
 // ---- shared helpers -----------------------------------------------------
 

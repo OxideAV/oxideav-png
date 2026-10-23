@@ -107,7 +107,7 @@ pub fn to_scaled_linear8(srgb: u8) -> u32 {
 /// the EOTF.
 pub fn linearize_rgba(bitmap: &RgbaImage) -> Vec<u16> {
     let mut out = Vec::with_capacity(bitmap.data.len());
-    for px in bitmap.data.chunks_exact(4) {
+    for px in bitmap.data.as_chunks::<4>().0 {
         out.push(to_linear8(px[0]));
         out.push(to_linear8(px[1]));
         out.push(to_linear8(px[2]));
@@ -145,7 +145,7 @@ pub fn composite_over_background(bitmap: &mut RgbaImage, bg: [u8; 3]) {
         to_scaled_linear8(bg[1]),
         to_scaled_linear8(bg[2]),
     ];
-    for px in bitmap.data.chunks_exact_mut(4) {
+    for px in bitmap.data.as_chunks_mut::<4>().0 {
         let fa = px[3] as u32; // 0..=255
         let inv = 255 - fa;
         for c in 0..3 {

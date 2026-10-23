@@ -8,8 +8,8 @@ use oxideav_core::{
     CodecId, CodecParameters, ColorSignal, Frame, Packet, PixelFormat, TimeBase, VideoFrame,
 };
 use oxideav_png::{
-    decode, encode, make_decoder, make_encoder, ColorInfo, ColorRange, EncodeOptions, Palette,
-    PngImage, PngPixelFormat,
+    ColorInfo, ColorRange, EncodeOptions, Palette, PngImage, PngPixelFormat, decode, encode,
+    make_decoder, make_encoder,
 };
 
 #[test]

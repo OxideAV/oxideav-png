@@ -10,8 +10,8 @@
 //! the §13.15 background-resolution precedence plus the §13.16 blend.
 
 use oxideav_png::{
-    decode_over_background, encode, srgb_from_linear, srgb_to_scaled_linear8, Bkgd, EncodeOptions,
-    PngImage, PngMetadata, PngPixelFormat, RgbaImage, Trns, DEFAULT_BACKGROUND_GREY,
+    Bkgd, DEFAULT_BACKGROUND_GREY, EncodeOptions, PngImage, PngMetadata, PngPixelFormat, RgbaImage,
+    Trns, decode_over_background, encode, srgb_from_linear, srgb_to_scaled_linear8,
 };
 
 fn rgba_image(w: u32, h: u32, data: Vec<u8>) -> PngImage {
@@ -151,7 +151,7 @@ fn output_is_opaque_packed_rgba() {
     assert_eq!(out.width, 3);
     assert_eq!(out.height, 2);
     assert_eq!(out.data.len(), 3 * 2 * 4);
-    for px in out.data.chunks_exact(4) {
+    for px in out.data.as_chunks::<4>().0 {
         assert_eq!(px[3], 255, "every pixel opaque after compositing");
         // All-transparent over default grey ⇒ pure grey.
         assert_eq!([px[0], px[1], px[2]], DEFAULT_BACKGROUND_GREY);

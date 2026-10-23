@@ -1,8 +1,8 @@
 [package]
 name = "oxideav-png"
 version = "0.1.12"
-edition = "2021"
-rust-version = "1.80"
+edition = "2024"
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/OxideAV/oxideav-png"
 authors = ["Mark Karpeles"]
@@ -44,7 +44,7 @@ registry = ["dep:oxideav-core"]
 # libpng interop for the external roundtrip test (tests/external_roundtrip.rs).
 # Loaded via dlopen at test time — no `*-sys` crate, no libpng source pulled
 # into the workspace. The test skips silently when libpng isn't installed.
-libloading = "0.8"
+dlsym = "0.0.2"
 
 # Hostile-input tests (tests/hostile_inflate.rs) craft zlib bodies that
 # inflate past the crate's decompression bounds; they use the same

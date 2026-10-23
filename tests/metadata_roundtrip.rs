@@ -3,9 +3,9 @@
 //! position and the decoder reads them back byte-for-byte.
 
 use oxideav_png::{
-    decode, encode, parse_metadata, Bkgd, Chrm, Cicp, Clli, EncodeOptions, Exif, Gama, Hist, Iccp,
-    Itxt, Mdcv, Palette, Phys, PhysUnit, PngImage, PngMetadata, PngPixelFormat, RenderingIntent,
-    Sbit, Splt, SpltEntry, Srgb, Text, Time, Trns, Ztxt,
+    Bkgd, Chrm, Cicp, Clli, EncodeOptions, Exif, Gama, Hist, Iccp, Itxt, Mdcv, Palette, Phys,
+    PhysUnit, PngImage, PngMetadata, PngPixelFormat, RenderingIntent, Sbit, Splt, SpltEntry, Srgb,
+    Text, Time, Trns, Ztxt, decode, encode, parse_metadata,
 };
 
 fn rgba_2x2() -> PngImage {

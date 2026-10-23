@@ -40,8 +40,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_png::{
-    decode, decode_rgba8, encode, EncodeOptions, FilterStrategy, FilterType, Gama, Phys, PhysUnit,
-    PngImage, PngMetadata, PngPixelFormat, Text, Time,
+    EncodeOptions, FilterStrategy, FilterType, Gama, Phys, PhysUnit, PngImage, PngMetadata,
+    PngPixelFormat, Text, Time, decode, decode_rgba8, encode,
 };
 
 /// Per-dimension cap. Interlaced encode walks all seven Adam7 passes
@@ -293,7 +293,9 @@ fn solid_image(
         None
     };
 
-    PngImage::packed(width, height, format, stride, buf).expect("synthetic image geometry is valid").with_palette(palette)
+    PngImage::packed(width, height, format, stride, buf)
+        .expect("synthetic image geometry is valid")
+        .with_palette(palette)
 }
 
 /// A small, always-valid ancillary-metadata bundle. Exercises the

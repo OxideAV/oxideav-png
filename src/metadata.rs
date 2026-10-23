@@ -343,7 +343,7 @@ impl Sbit {
             other => {
                 return Err(Error::invalid(format!(
                     "PNG sBIT: colour type {other} has no defined layout"
-                )))
+                )));
             }
         };
         if data.len() != expected {
@@ -432,7 +432,7 @@ impl Phys {
             other => {
                 return Err(Error::invalid(format!(
                     "PNG pHYs: unknown unit specifier {other}"
-                )))
+                )));
             }
         };
         Ok(Self {
@@ -586,7 +586,7 @@ impl Bkgd {
             other => {
                 return Err(Error::invalid(format!(
                     "PNG bKGD: colour type {other} has no defined layout"
-                )))
+                )));
             }
         };
         if data.len() != expected {
@@ -897,7 +897,7 @@ impl Hist {
             )));
         }
         let mut frequencies = Vec::with_capacity(palette_entries);
-        for chunk in data.chunks_exact(2) {
+        for chunk in data.as_chunks::<2>().0 {
             frequencies.push(u16::from_be_bytes([chunk[0], chunk[1]]));
         }
         Ok(Self { frequencies })
@@ -1004,7 +1004,7 @@ impl RenderingIntent {
             other => {
                 return Err(Error::invalid(format!(
                     "PNG sRGB: rendering intent {other} not in 0..=3 (reserved)"
-                )))
+                )));
             }
         })
     }
@@ -1771,11 +1771,11 @@ impl Splt {
             other => {
                 return Err(Error::invalid(format!(
                     "PNG sPLT: sample depth {other} must be 8 or 16"
-                )))
+                )));
             }
         };
         let entry_region = &rest[1..];
-        if entry_region.len() % stride != 0 {
+        if !entry_region.len().is_multiple_of(stride) {
             return Err(Error::invalid(format!(
                 "PNG sPLT: entry region {} bytes not a multiple of {stride} (sample depth {sample_depth})",
                 entry_region.len()
@@ -2350,7 +2350,7 @@ impl Itxt {
             other => {
                 return Err(Error::invalid(format!(
                     "PNG iTXt: unknown compression flag {other} (must be 0 or 1)"
-                )))
+                )));
             }
         };
         // §11.3.3.4: "For uncompressed text, encoders shall set the
@@ -4334,7 +4334,7 @@ mod tests {
         assert_eq!(&raw[..name_bytes.len()], name_bytes);
         assert_eq!(raw[name_bytes.len()], 0);
         assert_eq!(raw[name_bytes.len() + 1], 0); // method = deflate
-                                                  // zlib magic byte (CMF = 0x78 for CM=8/CINFO=7).
+        // zlib magic byte (CMF = 0x78 for CM=8/CINFO=7).
         assert_eq!(raw[name_bytes.len() + 2], 0x78);
         let back = Iccp::parse(&raw).unwrap();
         assert_eq!(back, p);
@@ -4517,7 +4517,7 @@ mod tests {
         raw.push(0); // method
         raw.push(0); // NUL after lang
         raw.push(0); // NUL after translated kw
-                     // text: empty
+        // text: empty
         assert!(Itxt::parse(&raw).is_err());
     }
 
@@ -4633,7 +4633,7 @@ mod tests {
         raw.push(0xA9);
         raw.push(0); // NUL after lang
         raw.push(0); // NUL after translated kw
-                     // empty text
+        // empty text
         assert!(Itxt::parse(&raw).is_err());
     }
 

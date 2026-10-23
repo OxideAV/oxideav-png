@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use oxideav_png::{
-    decode, encode, EncodeOptions, FilterStrategy, FilterType, PngImage, PngPixelFormat,
+    EncodeOptions, FilterStrategy, FilterType, PngImage, PngPixelFormat, decode, encode,
 };
 
 fn have(bin: &str, probe: &str) -> bool {
@@ -60,7 +60,7 @@ fn synth(width: u32, height: u32, pf: PngPixelFormat) -> PngImage {
         }
     }
     if pf == PngPixelFormat::Rgba64Le {
-        for px in data.chunks_exact_mut(8) {
+        for px in data.as_chunks_mut::<8>().0 {
             px[6] = 0x40 + (px[0] >> 1);
             px[7] = 0xC0;
         }

@@ -153,11 +153,7 @@ impl GammaParams {
             return None;
         }
         let exp = self.user_exponent / denom;
-        if exp.is_finite() {
-            Some(exp)
-        } else {
-            None
-        }
+        if exp.is_finite() { Some(exp) } else { None }
     }
 
     /// Build the 256-entry 8-bit gamma-correction lookup table.
@@ -244,7 +240,7 @@ pub fn apply_to_rgba(bitmap: &mut RgbaImage, params: GammaParams) -> bool {
     let Some(lut) = params.build_lut() else {
         return false;
     };
-    for px in bitmap.data.chunks_exact_mut(4) {
+    for px in bitmap.data.as_chunks_mut::<4>().0 {
         px[0] = lut[px[0] as usize];
         px[1] = lut[px[1] as usize];
         px[2] = lut[px[2] as usize];
@@ -323,7 +319,7 @@ pub fn apply_to_png16(image: &mut PngImage, params: GammaParams) -> bool {
             break;
         }
         for pixel in row[..width * bpp].chunks_exact_mut(bpp) {
-            for sample in pixel[..colour_samples * 2].chunks_exact_mut(2) {
+            for sample in pixel[..colour_samples * 2].as_chunks_mut::<2>().0 {
                 let v = u16::from_le_bytes([sample[0], sample[1]]);
                 let corrected = lut[v as usize].to_le_bytes();
                 sample[0] = corrected[0];
@@ -383,7 +379,7 @@ pub fn apply_to_palette(palette: &mut [u8], plte_len: usize, params: GammaParams
     // plte_len and are §13.16-linear: never gamma-corrected.
     let rgb_bytes = plte_len.min(palette.len());
     let triples_end = rgb_bytes - (rgb_bytes % 3);
-    for entry in palette[..triples_end].chunks_exact_mut(3) {
+    for entry in palette[..triples_end].as_chunks_mut::<3>().0 {
         entry[0] = lut[entry[0] as usize];
         entry[1] = lut[entry[1] as usize];
         entry[2] = lut[entry[2] as usize];
@@ -494,9 +490,9 @@ mod tests {
             user_exponent: 1.0,
         };
         let mut bm = bitmap(&[[10, 128, 250, 7], [0, 255, 64, 200]]);
-        let alphas: Vec<u8> = bm.data.chunks_exact(4).map(|c| c[3]).collect();
+        let alphas: Vec<u8> = bm.data.as_chunks::<4>().0.iter().map(|c| c[3]).collect();
         assert!(apply_to_rgba(&mut bm, params));
-        let new_alphas: Vec<u8> = bm.data.chunks_exact(4).map(|c| c[3]).collect();
+        let new_alphas: Vec<u8> = bm.data.as_chunks::<4>().0.iter().map(|c| c[3]).collect();
         assert_eq!(alphas, new_alphas, "alpha bytes must survive verbatim");
     }
 
@@ -672,7 +668,9 @@ mod tests {
     fn samples_le(image: &PngImage) -> Vec<u16> {
         image
             .data()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect()
     }

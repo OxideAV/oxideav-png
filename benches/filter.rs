@@ -15,9 +15,9 @@
 //! Run with:
 //!     cargo bench -p oxideav-png --bench filter
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use oxideav_png::filter::{choose_filter_heuristic, filter_row, unfilter_row, FilterType};
+use oxideav_png::filter::{FilterType, choose_filter_heuristic, filter_row, unfilter_row};
 
 const FILTERS: [FilterType; 5] = [
     FilterType::None,

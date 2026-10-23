@@ -9,7 +9,7 @@
 #![cfg(feature = "registry")]
 
 use oxideav_core::{
-    parse_options, CodecId, CodecOptions, CodecOptionsStruct, CodecParameters, Error, PixelFormat,
+    CodecId, CodecOptions, CodecOptionsStruct, CodecParameters, Error, PixelFormat, parse_options,
 };
 use oxideav_png::EncodeOptions;
 

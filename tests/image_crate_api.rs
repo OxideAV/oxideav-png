@@ -10,10 +10,10 @@ use std::io::Cursor;
 use std::time::Duration;
 
 use oxideav_png::{
-    decode, decode_all, decode_all_with, decode_from, decode_rgb8, decode_rgba8, decode_with,
-    encode, encode_all, encode_apng, encode_rgb8, encode_rgba8, encode_to, info, probe, ColorInfo,
-    ColorRange, DecodeOptions, EncodeOptions, Error, Frame, Metadata, Palette, PixelFormat, Plane,
-    PngError, PngImage, PngMetadata, PngPixelFormat, Trns, XMP_KEYWORD,
+    ColorInfo, ColorRange, DecodeOptions, EncodeOptions, Error, Frame, Metadata, Palette,
+    PixelFormat, Plane, PngError, PngImage, PngMetadata, PngPixelFormat, Trns, XMP_KEYWORD, decode,
+    decode_all, decode_all_with, decode_from, decode_rgb8, decode_rgba8, decode_with, encode,
+    encode_all, encode_apng, encode_rgb8, encode_rgba8, encode_to, info, probe,
 };
 
 fn rgba_2x2() -> PngImage {
@@ -187,7 +187,9 @@ fn raw_paths_are_tightly_packed_rgb8_and_rgba8() {
         assert_eq!((a.width, a.height), (img.width(), img.height()));
         assert_eq!(a.stride(), img.width() as usize * 4);
         let rgb: Vec<u8> = rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect();
         let r = decode_rgb8(&bytes).unwrap();
@@ -519,8 +521,8 @@ fn image_constructors_and_accessors() {
 #[allow(deprecated)]
 fn pre_contract_wrappers_still_work_and_agree() {
     use oxideav_png::{
-        decode_png, decode_png_over_background, decode_png_to_rgba, encode_png_image,
-        encode_png_image_with_options, PngEncoderOptions, RgbaBitmap,
+        PngEncoderOptions, RgbaBitmap, decode_png, decode_png_over_background, decode_png_to_rgba,
+        encode_png_image, encode_png_image_with_options,
     };
     let img = PngImage::packed(2, 1, PixelFormat::Pal8, 2, vec![0, 1])
         .unwrap()

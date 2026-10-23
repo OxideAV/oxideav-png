@@ -12,7 +12,7 @@
 //! The 8-byte magic `\x89PNG\r\n\x1a\n` precedes the first chunk.
 
 use crate::error::{PngError as Error, Result};
-use crate::filter::{crc32, crc32_update, CRC32_INIT};
+use crate::filter::{CRC32_INIT, crc32, crc32_update};
 
 /// PNG file magic.
 pub const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];

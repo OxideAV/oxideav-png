@@ -24,10 +24,10 @@
 //! Run with:
 //!     cargo bench -p oxideav-png --bench roundtrip
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_png::{
-    decode, decode_apng, encode, encode_apng, EncodeOptions, PngImage, PngPixelFormat,
+    EncodeOptions, PngImage, PngPixelFormat, decode, decode_apng, encode, encode_apng,
 };
 
 fn xorshift_byte(state: &mut u32) -> u8 {
