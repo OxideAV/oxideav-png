@@ -79,7 +79,7 @@ oxideav_png::register(&mut ctx);                       // codec "png" + the PNG 
 # params.height = Some(img.height());
 # params.pixel_format = Some(oxideav_png::to_core_pixel_format(img.format()));
 let dec = oxideav_png::make_decoder(&params)?;         // / make_encoder
-let frame: oxideav_core::VideoFrame = img.into();      // From<PngImage>: plane + palette / colour-signal side-channels
+let frame: oxideav_core::VideoFrame = img.into();      // From<PngImage>: plane + palette / palette-alpha / colour-signal / blob records
 let back = oxideav_png::PngImage::from_video_frame(&frame, &params)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
@@ -87,6 +87,15 @@ let back = oxideav_png::PngImage::from_video_frame(&frame, &params)?;
 The trait-side `Decoder` / `Encoder` are thin adapters over the
 standalone functions (one implementation). `decode_png_to_frame` /
 `encode_single` remain as `VideoFrame`-flavoured helpers.
+
+Framework records map onto PNG chunks both ways: the `icc` / `exif` /
+`xmp` metadata blobs (a frame's record, else the stream's
+`CodecParameters::blobs`) are `iCCP` / `eXIf` / the
+`XML:com.adobe.xmp` `iTXt`, and a `Pal8` frame's palette-alpha record
+is `tRNS`. The encoder declares exactly those three kinds in
+`CodecCapabilities::embedded_blob_kinds`; other kinds are dropped. The
+decoder attaches the records to every frame and the demuxer to the
+stream.
 
 ## Supported layouts
 

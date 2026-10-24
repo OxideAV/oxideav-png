@@ -25,10 +25,11 @@ use oxideav_core::Decoder;
 use oxideav_core::Encoder;
 use oxideav_core::RuntimeContext;
 use oxideav_core::{
-    CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters, CodecRegistry,
-    ColorPrimaries, ColorSignal, ContainerRegistry, ExecutionContext, Frame, MatrixCoefficients,
-    MediaType, OptionField, OptionKind, OptionValue, Packet, PixelFormat, Rational, TimeBase,
-    TransferCharacteristics, VideoFrame, VideoPlane, parse_options,
+    BlobKind, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters,
+    CodecRegistry, ColorPrimaries, ColorSignal, ContainerRegistry, ExecutionContext, Frame,
+    MatrixCoefficients, MediaType, MetadataBlob, OptionField, OptionKind, OptionValue, Packet,
+    PixelFormat, Rational, TimeBase, TransferCharacteristics, VideoFrame, VideoPlane,
+    parse_options,
 };
 
 use crate::decoder::CODEC_ID_STR;
@@ -36,7 +37,7 @@ use crate::encoder::{
     EncodeOptions, FrameStream, StillLayout, encode_still, encode_view, still_to_apng,
 };
 use crate::error::PngError;
-use crate::image::{ColorInfo, ColorRange, ImageRef, Palette, PngImage, PngPixelFormat};
+use crate::image::{ColorInfo, ColorRange, ImageRef, Metadata, Palette, PngImage, PngPixelFormat};
 use crate::options::DecodeOptions;
 
 /// Convert a [`PngError`] into the framework-shared
@@ -154,15 +155,18 @@ fn palette_from_legacy_blob(blob: &[u8], indices: &[u8]) -> Option<Palette> {
 
 /// Convert a framework `VideoFrame` (single packed plane) into a
 /// [`PngImage`]. The palette, for `Pal8`, comes from the frame's
-/// palette side-channel when attached, else from the legacy `PLTE ||
-/// tRNS` `palette` blob; the frame's colour-signal side-channel, when
-/// attached, becomes `color`.
+/// palette (+ palette-alpha) side-channels when attached, else from the
+/// legacy `PLTE || tRNS` `palette` blob; the frame's colour-signal
+/// side-channel, when attached, becomes `color`; its `icc` / `exif` /
+/// `xmp` blob records (else `stream_blobs` of the same kind) become
+/// `metadata`.
 fn video_frame_to_png_image(
     frame: &VideoFrame,
     width: u32,
     height: u32,
     pix: PngPixelFormat,
     palette: &[u8],
+    stream_blobs: &[MetadataBlob],
 ) -> Result<PngImage, PngError> {
     let plane = frame
         .image_planes()
@@ -170,20 +174,27 @@ fn video_frame_to_png_image(
         .ok_or_else(|| PngError::invalid("PNG encoder: frame has no planes"))?;
     let mut img = PngImage::packed(width, height, pix, plane.stride, plane.data.clone())?;
     stamp_side_channels(&mut img, frame, palette);
+    if let Some(meta) = metadata_from_blobs(frame, stream_blobs) {
+        img.metadata = meta;
+    }
     Ok(img)
 }
 
 /// [`video_frame_to_png_image`] without the copy: the frame's first
 /// plane as the encoder reads it, borrowed, with the same side fields.
-/// The palette a `Pal8` frame gets is built into `palette`, which the
-/// view borrows.
+/// The palette a `Pal8` frame gets is built into `palette`, and the
+/// metadata its blob records (or `stream_blobs`) give into `metadata`;
+/// the view borrows both.
+#[allow(clippy::too_many_arguments)]
 fn video_frame_view<'a>(
     frame: &'a VideoFrame,
     width: u32,
     height: u32,
     pix: PngPixelFormat,
     legacy_palette: &[u8],
+    stream_blobs: &[MetadataBlob],
     palette: &'a mut Option<Palette>,
+    metadata: &'a mut Option<Metadata>,
 ) -> Result<ImageRef<'a>, PngError> {
     let plane = frame
         .image_planes()
@@ -197,7 +208,53 @@ fn video_frame_view<'a>(
     if let Some(color) = color {
         image.color = color;
     }
+    *metadata = metadata_from_blobs(frame, stream_blobs);
+    let metadata: &'a Option<Metadata> = metadata;
+    image.metadata = metadata.as_ref();
     Ok(image)
+}
+
+/// The image metadata a frame's blob records give: [`BlobKind::ICC`] →
+/// `icc` (`iCCP`), [`BlobKind::EXIF`] → `exif` (`eXIf`) and
+/// [`BlobKind::XMP`] → `xmp` (the `XML:com.adobe.xmp` `iTXt`), each
+/// from the frame's first record of that kind, else from the stream's
+/// (`CodecParameters::blobs`). Other kinds are not carried (PNG has no
+/// chunk for them). `None` when neither supplies any of the three.
+fn metadata_from_blobs(frame: &VideoFrame, stream_blobs: &[MetadataBlob]) -> Option<Metadata> {
+    let frame_blobs = frame.blobs();
+    let pick = |kind: &BlobKind| {
+        frame_blobs
+            .iter()
+            .chain(stream_blobs)
+            .find(|b| b.is(kind))
+            .map(|b| b.data.clone())
+    };
+    let (icc, exif, xmp) = (
+        pick(&BlobKind::ICC),
+        pick(&BlobKind::EXIF),
+        pick(&BlobKind::XMP),
+    );
+    if icc.is_none() && exif.is_none() && xmp.is_none() {
+        return None;
+    }
+    let mut meta = Metadata::new();
+    meta.icc = icc;
+    meta.exif = exif;
+    meta.xmp = xmp;
+    Some(meta)
+}
+
+/// The blob records an image's metadata gives, in `icc`, `exif`, `xmp`
+/// order: the inverse of [`metadata_from_blobs`].
+pub(crate) fn blobs_from_metadata(meta: &Metadata) -> Vec<MetadataBlob> {
+    [
+        (BlobKind::ICC, &meta.icc),
+        (BlobKind::EXIF, &meta.exif),
+        (BlobKind::XMP, &meta.xmp),
+    ]
+    .into_iter()
+    .filter_map(|(kind, data)| data.as_ref().map(|d| MetadataBlob::new(kind, d.clone())))
+    .collect()
 }
 
 /// The side fields a frame's side-channels give an image of layout
@@ -212,7 +269,7 @@ fn frame_side_fields(
 ) -> (Option<Palette>, Option<ColorInfo>) {
     let palette = if pix == PngPixelFormat::Pal8 {
         match frame.palette() {
-            Some(rgb) => Some(Palette::from_rgb(rgb, None)),
+            Some(rgb) => Some(Palette::from_rgb(rgb, frame.palette_alpha())),
             None => palette_from_legacy_blob(legacy_palette, indices),
         }
     } else {
@@ -269,7 +326,11 @@ fn png_image_into_video_frame(mut image: PngImage, pts: Option<i64>) -> VideoFra
 fn stamp_frame_side_channels(frame: &mut VideoFrame, image: &PngImage) {
     if let (PngPixelFormat::Pal8, Some(p)) = (image.format, &image.palette) {
         frame.set_palette(p.to_rgb());
+        if let Some(alpha) = p.alpha_tail() {
+            frame.set_palette_alpha(alpha);
+        }
     }
+    frame.set_blobs(blobs_from_metadata(&image.metadata));
     let c = image.color;
     if c.primaries != ColorInfo::UNSPECIFIED
         || c.transfer != ColorInfo::UNSPECIFIED
@@ -315,7 +376,7 @@ impl PngImage {
             .height
             .ok_or_else(|| PngError::invalid("PNG: missing height"))?;
         let pix = png_pixel_format(params.pixel_format.unwrap_or(PixelFormat::Rgba))?;
-        video_frame_to_png_image(frame, width, height, pix, &params.extradata)
+        video_frame_to_png_image(frame, width, height, pix, &params.extradata, params.blobs())
     }
 }
 
@@ -694,18 +755,20 @@ impl PngEncoder {
     /// Compress `frame` into the pending file, reading its plane in
     /// place. Frame 0 becomes a complete still PNG; every later frame is
     /// appended as the `fcTL` / `fdAT` pair an APNG carries it in (its
-    /// palette and colour are not read: the APNG takes them from frame
+    /// palette, colour and blob records are not read: the APNG takes them from frame
     /// 0, as [`crate::encode_apng`] does).
     fn compress_frame(&mut self, frame: &VideoFrame) -> Result<(), PngError> {
         let Some(file) = self.pending.as_mut() else {
-            let mut palette = None;
+            let (mut palette, mut metadata) = (None, None);
             let image = video_frame_view(
                 frame,
                 self.width,
                 self.height,
                 self.pix,
                 &self.palette,
+                self.output_params.blobs(),
                 &mut palette,
+                &mut metadata,
             )?;
             let (still, layout) = encode_still(&image, &self.opts, self.threads)?;
             // Derived once, from frame 0 with its palette, as
@@ -803,8 +866,17 @@ pub fn encode_single_with_options(
     opts: &EncodeOptions,
 ) -> oxideav_core::Result<Vec<u8>> {
     let pix = from_core_pixel_format(pix)?;
-    let mut frame_palette = None;
-    let image = video_frame_view(frame, width, height, pix, palette, &mut frame_palette)?;
+    let (mut frame_palette, mut metadata) = (None, None);
+    let image = video_frame_view(
+        frame,
+        width,
+        height,
+        pix,
+        palette,
+        &[],
+        &mut frame_palette,
+        &mut metadata,
+    )?;
     Ok(encode_view(&image, opts, opts.threads.max(1))?)
 }
 
@@ -823,7 +895,11 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             PixelFormat::Pal8,
             PixelFormat::Rgb48Le,
             PixelFormat::Rgba64Le,
-        ]);
+        ])
+        // `iCCP`, `eXIf` and the `XML:com.adobe.xmp` `iTXt` (W3C PNG3
+        // §11.3.2.4 / §11.3.4.5 / §11.3.3.4); every other kind has no
+        // PNG chunk and is dropped.
+        .with_embedded_blob_kinds(vec![BlobKind::ICC, BlobKind::EXIF, BlobKind::XMP]);
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_STR))
             .capabilities(caps)

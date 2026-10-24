@@ -140,6 +140,10 @@ fn open_demuxer(
     params.height = Some(ihdr.height);
     params.pixel_format = Some(to_core_pixel_format(ihdr.output_pixel_format()?));
     params.extradata = extradata;
+    // The file's ICC profile / Exif / XMP as stream-level blob records
+    // (the decoder attaches the same records to every frame).
+    let side = crate::sideinfo::extract(&chunks, false, true)?;
+    params.blobs = crate::registry::blobs_from_metadata(&side.metadata);
 
     let time_base = if has_actl {
         apng_time_base(&chunks)?

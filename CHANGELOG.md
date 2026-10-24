@@ -30,6 +30,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `encode` writes for the same plane, rejects what `PngImage::packed`
   rejects, and rejects a `Pal8` plane without a palette.
 
+- The registry path carries the framework's metadata-blob and
+  palette-alpha records. `icc` / `exif` / `xmp` blobs on a frame (else
+  of the same kind on the stream's `CodecParameters::blobs`) become
+  `iCCP` / `eXIf` / the `XML:com.adobe.xmp` `iTXt` through
+  `encode_single`, the framework `Encoder` and
+  `PngImage::from_video_frame`; a `Pal8` frame's palette-alpha record
+  becomes `tRNS` (it was dropped, so a translucent palette encoded
+  opaque). The decoder attaches the file's ICC / Exif / XMP as blob
+  records and the `tRNS` alpha as the palette-alpha record to every
+  frame (`From<PngImage> for VideoFrame` too), and the demuxer puts the
+  blobs on the stream's `CodecParameters`. The codec's capabilities
+  declare `embedded_blob_kinds = [icc, exif, xmp]`. Frames without
+  records encode to the same bytes as before.
+
 ### Changed
 
 - edition 2024, MSRV 1.95; tests / fuzz harness load their black-box reference (libpng) through dlsym instead of libloading
