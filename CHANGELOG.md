@@ -44,6 +44,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   declare `embedded_blob_kinds = [icc, exif, xmp]`. Frames without
   records encode to the same bytes as before.
 
+- The `loop_count` encoder option (u32, `0` = forever) sets the
+  `acTL` `num_plays` of the APNG the framework `Encoder` writes; it was
+  always 0.
+- The PNG muxer writes the `acTL` `num_plays` (W3C PNG3 §11.3.6.1) from
+  the stream's `loop_count` option, else from a `("loop_count", n)`
+  pair given to `Muxer::set_metadata` (the pair the demuxer reports;
+  `carries_metadata_key("loop_count")` is true). It was hard-coded to
+  0, and a whole APNG packet from the encoder was written with the
+  encoder's value whatever the stream said; the muxer now rewrites that
+  packet's `acTL` too.
+
 ### Changed
 
 - edition 2024, MSRV 1.95; tests / fuzz harness load their black-box reference (libpng) through dlsym instead of libloading
@@ -128,6 +139,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for the same image without the two chunks. An `iCCP` chunk with a
   valid profile name and compression method still outranks `sRGB` and
   `cHRM` in the colour precedence (W3C PNG3 §4.3).
+
+### Fixed
+
+- APNG frames decoded through the registry are the whole canvas as
+  displayed. The demuxer handed each frame out as a still of its own
+  `fcTL` size and dropped its offset, `dispose_op` and `blend_op`, so
+  the decoder returned 48x36 / 16x16 sub-pictures for a 64x64
+  animation (the oxideav-image gateway drew them at +0+0 over the
+  previous canvas: `APNG_BLEND_OP_SOURCE` frames appeared to keep the
+  old canvas under their transparent pixels). Frame packets now carry
+  their `fcTL`, and the decoder renders them onto the canvas named by
+  the stream's extradata IHDR with the same code as `decode_apng`. On
+  ImageMagick's `-dispose Background` moving-square APNG every frame
+  now matches `ffmpeg -f framemd5` (frames 2-4 were wrong).
+- `APNG_BLEND_OP_OVER` takes the canvas pixel's alpha into account:
+  αo = αs + αd(1 − αs), Co = (Cs·αs + Cd·αd·(1 − αs)) / αo, rounded to
+  nearest (§11.3.6.2 → §13.16). The canvas alpha was ignored, so a
+  translucent pixel drawn over transparency came out darkened
+  ((255,0,0,128) over transparent gave (128,0,0,128)). The first frame
+  after a clear is copied, as SOURCE ("functionally equivalent").
+- `APNG_DISPOSE_OP_BACKGROUND` and the initial canvas on palette and
+  tRNS-keyed gray / RGB animations are transparent: they clear to the
+  first palette entry with alpha 0, or to the keyed sample, instead of
+  palette index 0 / black.
+- The muxer keeps each demuxed frame's region offset, `dispose_op` and
+  `blend_op` (it rewrote every frame to 0, 0 / NONE / SOURCE), uses the
+  stream's `width x height` as the canvas, writes a default image
+  outside the animation when the first frame does not cover the canvas,
+  and rejects frames whose colour type, bit depth or interlace differ.
 
 ## [0.1.12](https://github.com/OxideAV/oxideav-png/compare/v0.1.11...v0.1.12) - 2026-10-05
 

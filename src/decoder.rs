@@ -2032,57 +2032,304 @@ impl TransparencyKey {
     }
 }
 
-/// Composite the parsed APNG `info` into per-frame canvases.
-pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
-    let canvas_w = info.ihdr.width;
-    let canvas_h = info.ihdr.height;
-    let canvas_fmt = info.ihdr.output_pixel_format()?;
-    let bpp = canvas_fmt.bytes_per_pixel();
-    let stride_canvas = canvas_w as usize * bpp;
-    // Transparency key for OVER on alpha-less canvas formats (types 0/2/3 with
-    // a tRNS chunk). Frame-invariant, so derive it once.
-    let trns_key = TransparencyKey::derive(
-        &info.ihdr,
-        canvas_fmt,
-        info.trns.as_deref(),
-        info.plte.as_deref().map(|p| p.len()).unwrap_or(0),
-    );
+impl TransparencyKey {
+    /// One canvas-format pixel that reads as "fully transparent black"
+    /// (W3C PNG3 §11.3.6.2 `APNG_DISPOSE_OP_BACKGROUND`, and the §4.9.3
+    /// output-buffer state at the start of each play). Formats with an
+    /// alpha channel clear to all-zero bytes. An alpha-less canvas can
+    /// only express transparency through its `tRNS` key: the first
+    /// palette index whose alpha is 0, or the keyed gray / RGB sample.
+    /// Without one the format cannot represent transparency at all and
+    /// the closest it has — all-zero (black, palette index 0) — stands
+    /// in.
+    fn clear_pixel(&self, bpp: usize) -> Vec<u8> {
+        match self {
+            Self::None => vec![0; bpp],
+            Self::Palette(alpha) => {
+                vec![alpha.iter().position(|&a| a == 0).unwrap_or(0) as u8]
+            }
+            Self::Gray8(v) => vec![*v],
+            Self::Gray16(v) => v.to_vec(),
+            Self::Rgb24(v) => v.to_vec(),
+            Self::Rgb48(v) => v.to_vec(),
+        }
+    }
+}
 
-    let mut canvas = vec![0u8; stride_canvas * canvas_h as usize];
-    // For Disposal::Previous we snapshot the pre-draw state before writing
-    // the new frame.
-    let mut prev_snapshot: Option<Vec<u8>> = None;
-    let mut out_frames: Vec<ApngFrameImage> = Vec::new();
+/// The APNG output buffer (W3C PNG3 §4.9.3) and the frame-by-frame
+/// rendering rules of §11.3.6.2 `fcTL`: each frame is drawn into its
+/// `x_offset, y_offset, width × height` region by `blend_op`, the
+/// buffer is read out as that frame's picture, then the region is
+/// disposed of by `dispose_op` before the next frame is drawn.
+///
+/// The standalone [`decode_apng_info`] and the registry decoder (fed
+/// one frame per packet by the container) both render through this,
+/// so the two paths produce the same pictures.
+#[derive(Clone, Debug)]
+pub(crate) struct ApngCanvas {
+    width: u32,
+    height: u32,
+    format: PngPixelFormat,
+    bpp: usize,
+    stride: usize,
+    trns_key: TransparencyKey,
+    /// One pixel of "fully transparent black" in the canvas format.
+    clear: Vec<u8>,
+    buffer: Vec<u8>,
+    /// Frames drawn since the buffer was last cleared.
+    drawn: usize,
+}
 
-    for (frame_index, frame) in info.frames.iter().enumerate() {
-        // W3C PNG3 §11.3.6.1: the frame region (non-zero width/height,
-        // x_offset + width ≤ canvas width, y_offset + height ≤ canvas height)
-        // "may not fall outside of the default image". Reject a hostile fcTL
-        // here rather than relying on the blit/clear clip to silently drop the
-        // out-of-canvas pixels.
-        frame.fctl.validate_within_canvas(canvas_w, canvas_h)?;
+impl ApngCanvas {
+    /// A cleared `canvas.width × canvas.height` output buffer in the
+    /// layout every frame of the stream decodes to (each frame inherits
+    /// the IHDR colour type and bit depth, §11.3.6.3; `PLTE` / `tRNS`
+    /// give the transparency key of the alpha-less formats).
+    pub(crate) fn new(canvas: &Ihdr, plte: Option<&[u8]>, trns: Option<&[u8]>) -> Result<Self> {
+        let format = canvas.output_pixel_format()?;
+        let bpp = format.bytes_per_pixel();
+        let stride = (canvas.width as usize)
+            .checked_mul(bpp)
+            .ok_or_else(|| Error::invalid("APNG: canvas row size overflows"))?;
+        let len = stride
+            .checked_mul(canvas.height as usize)
+            .ok_or_else(|| Error::invalid("APNG: canvas size overflows"))?;
+        let trns_key =
+            TransparencyKey::derive(canvas, format, trns, plte.map(|p| p.len()).unwrap_or(0));
+        let clear = trns_key.clear_pixel(bpp);
+        let mut buffer = vec![0u8; len];
+        fill_pixels(&mut buffer, &clear);
+        Ok(Self {
+            width: canvas.width,
+            height: canvas.height,
+            format,
+            bpp,
+            stride,
+            trns_key,
+            clear,
+            buffer,
+            drawn: 0,
+        })
+    }
 
-        // W3C PNG3 §11.3.5.1: "If the first fcTL chunk uses a dispose_op of
+    /// Canvas pixel layout.
+    pub(crate) fn format(&self) -> PngPixelFormat {
+        self.format
+    }
+
+    /// Draw `frame` (decoded at its `fctl.width × fctl.height`, in the
+    /// canvas layout) into the buffer and return the buffer as shown
+    /// for this frame; the frame's region is then disposed of so the
+    /// buffer is ready for the next one.
+    pub(crate) fn render(&mut self, fctl: &Fctl, frame: &PngImage) -> Result<Vec<u8>> {
+        // §11.3.6.2: the region "may not fall outside of the default
+        // image" — rejected rather than clipped.
+        fctl.validate_within_canvas(self.width, self.height)?;
+        if frame.format() != self.format
+            || frame.width() != fctl.width
+            || frame.height() != fctl.height
+        {
+            return Err(Error::invalid(format!(
+                "APNG: frame is {}x{} {:?}, its fcTL region is {}x{} on a {:?} canvas",
+                frame.width(),
+                frame.height(),
+                frame.format(),
+                fctl.width,
+                fctl.height,
+                self.format
+            )));
+        }
+        // "If the first fcTL chunk uses a dispose_op of
         // APNG_DISPOSE_OP_PREVIOUS it should be treated as
-        // APNG_DISPOSE_OP_BACKGROUND." The output buffer is conceptually
-        // cleared before the first frame, so there is no prior state to
-        // revert to; normalise it to a region clear.
-        let effective_dispose = if frame_index == 0 && frame.fctl.dispose_op == Disposal::Previous {
+        // APNG_DISPOSE_OP_BACKGROUND."
+        let dispose = if self.drawn == 0 && fctl.dispose_op == Disposal::Previous {
             Disposal::Background
         } else {
-            frame.fctl.dispose_op
+            fctl.dispose_op
         };
+        let (x, y) = (fctl.x_offset as usize, fctl.y_offset as usize);
+        let (w, h) = (fctl.width as usize, fctl.height as usize);
+        let run = w * self.bpp;
+        // PREVIOUS reverts the region to "the previous contents": keep
+        // the region as it was before this frame was drawn.
+        let saved: Option<Vec<u8>> = (dispose == Disposal::Previous).then(|| {
+            let mut v = Vec::with_capacity(run * h);
+            for row in y..y + h {
+                let at = row * self.stride + x * self.bpp;
+                v.extend_from_slice(&self.buffer[at..at + run]);
+            }
+            v
+        });
 
-        // Build a synthetic IHDR-like block for the sub-frame dimensions.
-        // Same colour_type / bit_depth / compression / filter / interlace.
+        // "for the first frame, the two blend modes are functionally
+        // equivalent due to the clearing of the output buffer": OVER onto
+        // the cleared buffer differs from SOURCE only in the colour
+        // stored under fully transparent pixels, so the first frame
+        // drawn after a clear is copied, colour of its transparent
+        // pixels included.
+        let blend = if self.drawn == 0 {
+            Blend::Source
+        } else {
+            fctl.blend_op
+        };
+        let src_stride = frame.stride();
+        let src = frame.data();
+        for row in 0..h {
+            let s = &src[row * src_stride..row * src_stride + run];
+            let at = (y + row) * self.stride + x * self.bpp;
+            let d = &mut self.buffer[at..at + run];
+            match blend {
+                // "all color components of the frame, including alpha,
+                // overwrite the current contents of the frame's output
+                // buffer region."
+                Blend::Source => d.copy_from_slice(s),
+                Blend::Over => blend_over_row(d, s, self.format, &self.trns_key),
+            }
+        }
+        let shown = self.buffer.clone();
+
+        match dispose {
+            // "the contents of the output buffer are left as is."
+            Disposal::None => {}
+            // "the frame's region of the output buffer is to be cleared
+            // to fully transparent black."
+            Disposal::Background => {
+                for row in y..y + h {
+                    let at = row * self.stride + x * self.bpp;
+                    fill_pixels(&mut self.buffer[at..at + run], &self.clear);
+                }
+            }
+            // "the frame's region of the output buffer is to be reverted
+            // to the previous contents."
+            Disposal::Previous => {
+                if let Some(saved) = saved {
+                    for (i, row) in (y..y + h).enumerate() {
+                        let at = row * self.stride + x * self.bpp;
+                        self.buffer[at..at + run].copy_from_slice(&saved[i * run..(i + 1) * run]);
+                    }
+                }
+            }
+        }
+        self.drawn += 1;
+        Ok(shown)
+    }
+}
+
+/// Fill `buf` with repeats of the one-pixel pattern `px`.
+fn fill_pixels(buf: &mut [u8], px: &[u8]) {
+    if px.iter().all(|&b| b == px[0]) {
+        buf.fill(px[0]);
+    } else {
+        for chunk in buf.chunks_exact_mut(px.len()) {
+            chunk.copy_from_slice(px);
+        }
+    }
+}
+
+/// Non-premultiplied `src OVER dst` of one sample set at alpha scale
+/// `max` (255 or 65535), rounded to nearest:
+///
+/// ```text
+/// αo = αs + αd · (1 − αs)
+/// Co = (Cs · αs + Cd · αd · (1 − αs)) / αo        (αo > 0; else 0)
+/// ```
+///
+/// This is the "simple OVER operation" `APNG_BLEND_OP_OVER` refers to
+/// (W3C PNG3 §11.3.6.2 → §13.16 `output = alpha * foreground + (1 -
+/// alpha) * background`), carried through for an output buffer whose
+/// own pixels may be translucent: over an opaque buffer pixel (αd = 1)
+/// it is exactly the §13.16 equation, over a fully transparent one
+/// (αd = 0) the frame pixel is copied unchanged, and αs = 0 / αs = 1
+/// leave the buffer / copy the frame — the §13.16 special cases.
+/// Samples are blended as stored (gamma-encoded): frame and buffer
+/// share one sample depth and one gamma, the §13.16 variation that
+/// needs no gamma round trip.
+fn over_samples(src: &[u64], dst: &mut [u64], max: u64) {
+    let n = src.len() - 1;
+    let a_s = src[n];
+    if a_s == max {
+        dst.copy_from_slice(src);
+        return;
+    }
+    if a_s == 0 {
+        return;
+    }
+    let a_d = dst[n];
+    // Everything at scale max²: αo·max² = αs·max + αd·(max − αs).
+    let a_o2 = a_s * max + a_d * (max - a_s);
+    for c in 0..n {
+        let num = src[c] * a_s * max + dst[c] * a_d * (max - a_s);
+        dst[c] = (2 * num + a_o2) / (2 * a_o2);
+    }
+    dst[n] = (2 * a_o2 + max) / (2 * max);
+}
+
+/// `APNG_BLEND_OP_OVER` of one frame row `src` onto the buffer row
+/// `dst`, both in the canvas layout `format`.
+fn blend_over_row(dst: &mut [u8], src: &[u8], format: PngPixelFormat, key: &TransparencyKey) {
+    match format {
+        PngPixelFormat::Rgba | PngPixelFormat::Ya8 => {
+            let ch = if format == PngPixelFormat::Rgba { 4 } else { 2 };
+            let (mut s, mut d) = ([0u64; 4], [0u64; 4]);
+            for (dp, sp) in dst.chunks_exact_mut(ch).zip(src.chunks_exact(ch)) {
+                for i in 0..ch {
+                    s[i] = u64::from(sp[i]);
+                    d[i] = u64::from(dp[i]);
+                }
+                over_samples(&s[..ch], &mut d[..ch], 255);
+                for i in 0..ch {
+                    dp[i] = d[i] as u8;
+                }
+            }
+        }
+        PngPixelFormat::Rgba64Le => {
+            let (mut s, mut d) = ([0u64; 4], [0u64; 4]);
+            for (dp, sp) in dst
+                .as_chunks_mut::<8>()
+                .0
+                .iter_mut()
+                .zip(src.as_chunks::<8>().0)
+            {
+                for i in 0..4 {
+                    s[i] = u64::from(u16::from_le_bytes([sp[2 * i], sp[2 * i + 1]]));
+                    d[i] = u64::from(u16::from_le_bytes([dp[2 * i], dp[2 * i + 1]]));
+                }
+                over_samples(&s, &mut d, 65535);
+                for i in 0..4 {
+                    dp[2 * i..2 * i + 2].copy_from_slice(&(d[i] as u16).to_le_bytes());
+                }
+            }
+        }
+        // Alpha-less canvas (palette / gray / RGB): every frame pixel is
+        // either the tRNS key — fully transparent, the buffer stays —
+        // or fully opaque and replaces it. No partial blend is
+        // representable in a format without alpha.
+        _ => {
+            let bpp = format.bytes_per_pixel();
+            for (dp, sp) in dst.chunks_exact_mut(bpp).zip(src.chunks_exact(bpp)) {
+                if !key.is_transparent(sp) {
+                    dp.copy_from_slice(sp);
+                }
+            }
+        }
+    }
+}
+
+/// Composite the parsed APNG `info` into per-frame canvases.
+pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
+    let mut canvas = ApngCanvas::new(&info.ihdr, info.plte.as_deref(), info.trns.as_deref())?;
+    let mut out_frames: Vec<ApngFrameImage> = Vec::new();
+
+    for frame in &info.frames {
+        frame
+            .fctl
+            .validate_within_canvas(info.ihdr.width, info.ihdr.height)?;
+        // Each frame decodes at its fcTL size with every other IHDR
+        // property inherited (§11.3.6.3).
         let sub_ihdr = Ihdr {
             width: frame.fctl.width,
             height: frame.fctl.height,
-            bit_depth: info.ihdr.bit_depth,
-            colour_type: info.ihdr.colour_type,
-            compression: info.ihdr.compression,
-            filter: info.ihdr.filter,
-            interlace: info.ihdr.interlace,
+            ..info.ihdr
         };
         // Same bomb defence as the still-image IDAT path: the fcTL
         // dimensions imply the exact filtered-stream size, so cap the
@@ -2096,35 +2343,13 @@ pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
             info.plte.as_deref(),
             info.trns.as_deref(),
         )?;
-
-        // Disposal: Previous → snapshot the region pre-draw.
-        if effective_dispose == Disposal::Previous {
-            prev_snapshot = Some(canvas.clone());
-        }
-
-        // Blend the sub_frame into the canvas.
-        blit_sub_into_canvas(
-            &mut canvas,
-            stride_canvas,
-            bpp,
-            canvas_w as usize,
-            canvas_h as usize,
-            &sub_frame,
-            sub_ihdr.width as usize,
-            sub_ihdr.height as usize,
-            canvas_fmt,
-            frame.fctl.x_offset as usize,
-            frame.fctl.y_offset as usize,
-            frame.fctl.blend_op,
-            &trns_key,
-        );
-
+        let shown = canvas.render(&frame.fctl, &sub_frame)?;
         let img = PngImage::packed(
-            canvas_w,
-            canvas_h,
-            canvas_fmt,
-            stride_canvas,
-            canvas.clone(),
+            info.ihdr.width,
+            info.ihdr.height,
+            canvas.format(),
+            canvas.stride,
+            shown,
         )?
         .with_palette(sub_frame.palette.clone())
         .with_transparency(sub_frame.transparency.clone())
@@ -2132,198 +2357,13 @@ pub fn decode_apng_info(info: &ApngInfo) -> Result<ApngImage> {
         .with_metadata(info.metadata.clone());
         let delay = frame.fctl.delay_centiseconds().max(1);
         out_frames.push(ApngFrameImage::new(img, delay).with_delay(frame.fctl.delay_duration()));
-
-        // Apply disposal *after* emitting.
-        match effective_dispose {
-            Disposal::None => {}
-            Disposal::Background => {
-                // Clear the sub-region to zeros.
-                clear_region(
-                    &mut canvas,
-                    stride_canvas,
-                    bpp,
-                    canvas_w as usize,
-                    canvas_h as usize,
-                    frame.fctl.x_offset as usize,
-                    frame.fctl.y_offset as usize,
-                    frame.fctl.width as usize,
-                    frame.fctl.height as usize,
-                );
-            }
-            Disposal::Previous => {
-                if let Some(snap) = prev_snapshot.take() {
-                    canvas = snap;
-                }
-            }
-        }
     }
 
     Ok(ApngImage {
-        width: canvas_w,
-        height: canvas_h,
-        pixel_format: canvas_fmt,
+        width: info.ihdr.width,
+        height: info.ihdr.height,
+        pixel_format: canvas.format(),
         frames: out_frames,
         num_plays: info.actl.num_plays,
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn blit_sub_into_canvas(
-    canvas: &mut [u8],
-    stride_canvas: usize,
-    bpp: usize,
-    canvas_w: usize,
-    canvas_h: usize,
-    sub: &PngImage,
-    sub_w: usize,
-    sub_h: usize,
-    sub_fmt: PngPixelFormat,
-    x_off: usize,
-    y_off: usize,
-    blend: Blend,
-    trns_key: &TransparencyKey,
-) {
-    let sub_stride = sub.stride();
-    if blend == Blend::Source {
-        // SOURCE replaces the destination region outright (W3C PNG3
-        // §11.3.6.2 "all color components of the frame, including alpha,
-        // overwrite the current contents") — each clipped frame row is
-        // one contiguous memcpy instead of a per-pixel copy loop.
-        let row_cap = (canvas_w - x_off.min(canvas_w)).min(sub_w);
-        if row_cap == 0 {
-            // Fully clipped horizontally (x_off ≥ canvas width): nothing
-            // visible, and `x_off * bpp` may lie past the row end — match
-            // the per-pixel path's behaviour of touching nothing.
-            return;
-        }
-        for sy in 0..sub_h {
-            let dy = y_off + sy;
-            if dy >= canvas_h {
-                break;
-            }
-            let src = &sub.data()[sy * sub_stride..sy * sub_stride + row_cap * bpp];
-            let dst_start = dy * stride_canvas + x_off * bpp;
-            canvas[dst_start..dst_start + row_cap * bpp].copy_from_slice(src);
-        }
-        return;
-    }
-    for sy in 0..sub_h {
-        let dy = y_off + sy;
-        if dy >= canvas_h {
-            break;
-        }
-        let row_cap = (canvas_w - x_off.min(canvas_w)).min(sub_w);
-        for sx in 0..row_cap {
-            let dx = x_off + sx;
-            let src = &sub.data()[sy * sub_stride + sx * bpp..sy * sub_stride + (sx + 1) * bpp];
-            let dst_start = dy * stride_canvas + dx * bpp;
-            let dst = &mut canvas[dst_start..dst_start + bpp];
-            match blend {
-                Blend::Source => {
-                    dst.copy_from_slice(src);
-                }
-                Blend::Over => {
-                    // Only meaningful for formats with alpha. For formats
-                    // without alpha we fall back to Source.
-                    if bpp == 4 {
-                        // 8-bit RGBA alpha compositing.
-                        let a = src[3] as u32;
-                        if a == 255 {
-                            dst.copy_from_slice(src);
-                        } else if a == 0 {
-                            // Leave canvas alone.
-                        } else {
-                            let inv = 255 - a;
-                            for c in 0..3 {
-                                let fg = src[c] as u32 * a;
-                                let bg = dst[c] as u32 * inv;
-                                dst[c] = ((fg + bg + 127) / 255) as u8;
-                            }
-                            // Alpha over: a_out = a_src + a_dst * (1 - a_src)
-                            let a_dst = dst[3] as u32;
-                            dst[3] = (a + ((a_dst * inv + 127) / 255)) as u8;
-                        }
-                    } else if bpp == 2 && matches!(sub_fmt, PngPixelFormat::Ya8) {
-                        let a = src[1] as u32;
-                        if a == 255 {
-                            dst.copy_from_slice(src);
-                        } else if a != 0 {
-                            let inv = 255 - a;
-                            let fg = src[0] as u32 * a;
-                            let bg = dst[0] as u32 * inv;
-                            dst[0] = ((fg + bg + 127) / 255) as u8;
-                            let a_dst = dst[1] as u32;
-                            dst[1] = (a + ((a_dst * inv + 127) / 255)) as u8;
-                        }
-                    } else if bpp == 8 && matches!(sub_fmt, PngPixelFormat::Rgba64Le) {
-                        // 16-bit RGBA (or expanded Ya16 → RGBA64) OVER. Samples
-                        // are little-endian per channel: pairs at byte offsets
-                        // 0/2/4 are colour, 6 is alpha. W3C PNG3 §13.16
-                        // "Alpha Channel Processing" describes the non-
-                        // premultiplied OVER referenced by APNG_BLEND_OP_OVER;
-                        // arithmetic is the same shape as the 8-bit path scaled
-                        // to a 65535 denominator.
-                        let a = u16::from_le_bytes([src[6], src[7]]) as u64;
-                        if a == 65535 {
-                            dst.copy_from_slice(src);
-                        } else if a != 0 {
-                            let inv = 65535 - a;
-                            for c in 0..3 {
-                                let off = c * 2;
-                                let fg = u16::from_le_bytes([src[off], src[off + 1]]) as u64;
-                                let bg = u16::from_le_bytes([dst[off], dst[off + 1]]) as u64;
-                                let v = ((fg * a + bg * inv + 32767) / 65535) as u16;
-                                let b = v.to_le_bytes();
-                                dst[off] = b[0];
-                                dst[off + 1] = b[1];
-                            }
-                            let a_dst = u16::from_le_bytes([dst[6], dst[7]]) as u64;
-                            let a_out = (a + (a_dst * inv + 32767) / 65535) as u16;
-                            let ab = a_out.to_le_bytes();
-                            dst[6] = ab[0];
-                            dst[7] = ab[1];
-                        }
-                    } else if trns_key.is_transparent(src) {
-                        // Alpha-less canvas (palette / gray / RGB) under OVER:
-                        // a tRNS-keyed transparent source pixel leaves the
-                        // canvas untouched; everything else is fully opaque and
-                        // overwrites. (No representable partial blend in a
-                        // format that carries no alpha.)
-                    } else {
-                        dst.copy_from_slice(src);
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn clear_region(
-    canvas: &mut [u8],
-    stride_canvas: usize,
-    bpp: usize,
-    canvas_w: usize,
-    canvas_h: usize,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-) {
-    // An APNG `fcTL` carries an attacker-controlled `x_offset`/`y_offset`
-    // (and width/height) that the spec says must lie within the canvas but
-    // a malformed stream need not honour. Clamp the start column to the
-    // canvas before turning it into a byte offset — otherwise `x` past
-    // `canvas_w` produces a `row_start` beyond the buffer and the
-    // (even empty) slice index panics. With `x >= canvas_w` the visible
-    // width collapses to zero, so there is nothing to clear.
-    if x >= canvas_w {
-        return;
-    }
-    let visible_w = w.min(canvas_w - x);
-    for dy in y..(y + h).min(canvas_h) {
-        let row_start = dy * stride_canvas + x * bpp;
-        let row_end = row_start + visible_w * bpp;
-        canvas[row_start..row_end].fill(0);
-    }
 }

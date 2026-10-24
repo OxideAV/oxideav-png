@@ -6,7 +6,18 @@
 //! image + all metadata chunks for the static frames, and for animated
 //! frames we synthesise a PNG that replaces the file's default image with
 //! that animation frame's pixel data (so a downstream decoder can decode
-//! each packet independently).
+//! each packet independently). Each frame packet is a still of the
+//! frame's own `fcTL` size and carries that `fcTL` chunk (region offset,
+//! delay, `dispose_op`, `blend_op`): the registry decoder renders it onto
+//! the animation canvas (the IHDR at the head of the stream's extradata)
+//! and hands out the whole canvas as displayed, and the muxer writes the
+//! frame back at its offset with its ops.
+//!
+//! Loop count: the demuxer reports the `acTL` `num_plays` as the
+//! `("loop_count", n)` metadata pair; the muxer writes `num_plays` from
+//! the stream's `loop_count` option, else from a `loop_count` pair handed
+//! to `Muxer::set_metadata` (W3C PNG3 §11.3.6.1: the number of plays,
+//! `0` = indefinitely).
 //!
 //! Timing: an `fcTL` delay is the rational `delay_num / delay_den`
 //! seconds (W3C PNG3 §11.3.6.1; `delay_den = 0` means 100). The demuxer
@@ -395,8 +406,9 @@ fn build_apng_packets(
 /// Build a standalone PNG file for a single animation frame. The file-level
 /// IHDR says `width x height` but the frame is actually `fctl.width x
 /// fctl.height` — we rewrite IHDR to the frame-local size so the decoder
-/// treats it as a plain static PNG with the right bounds. Offsets into the
-/// canvas are preserved in the packet metadata via pts.
+/// treats it as a plain static PNG with the right bounds. The frame's
+/// `fcTL` (offset, dispose / blend ops) is carried as a chunk of the
+/// packet.
 fn build_still_png_packet(
     ihdr_bytes: &[u8],
     plte: Option<&[u8]>,
@@ -415,6 +427,12 @@ fn build_still_png_packet(
     let mut out = Vec::with_capacity(64 + frame_idat.len());
     out.extend_from_slice(&PNG_MAGIC);
     write_chunk(&mut out, b"IHDR", &patched_ihdr);
+    // The frame's `fcTL` rides along verbatim: its region, dispose_op
+    // and blend_op are what the registry decoder renders the frame onto
+    // the animation canvas with (W3C PNG3 §11.3.6.2), and what the muxer
+    // writes back. Without an `acTL` a PNG decoder reads the packet as a
+    // still and skips the chunk.
+    write_chunk(&mut out, b"fcTL", &fctl.to_bytes());
     if let Some(p) = plte {
         write_chunk(&mut out, b"PLTE", p);
     }
@@ -484,21 +502,57 @@ fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<Box<
             s.params.codec_id
         )));
     }
+    let loop_count = match s.params.options.get("loop_count") {
+        Some(v) => Some(parse_loop_count(v)?),
+        None => None,
+    };
     Ok(Box::new(PngMuxer {
         output,
         stream: s.clone(),
         frames: Vec::new(),
         header_written: false,
         trailer_written: false,
+        loop_count,
+        metadata_loop_count: None,
     }))
 }
 
+/// A `loop_count` value: the APNG `num_plays` (W3C PNG3 §11.3.6.1:
+/// the number of times the animation plays, `0` = indefinitely).
+fn parse_loop_count(v: &str) -> Result<u32> {
+    v.trim().parse::<u32>().map_err(|_| {
+        Error::invalid(format!(
+            "PNG muxer: loop_count got {v:?}; expected the number of plays \
+             0..=4294967295 (0 = loop forever)"
+        ))
+    })
+}
+
+/// PNG / APNG muxer.
+///
+/// One packet that is a whole PNG or APNG file is written as it is;
+/// frame packets (the demuxer's: stills carrying their `fcTL`) and
+/// several stills are assembled into one APNG. The `acTL` `num_plays`
+/// is the stream's `loop_count` option, else a `("loop_count", n)` pair
+/// handed to [`Muxer::set_metadata`] (the key [`Demuxer::metadata`]
+/// reports), else the packet's own (`0`, loop forever, for an assembled
+/// animation).
 struct PngMuxer {
     output: Box<dyn WriteSeek>,
     stream: StreamInfo,
     frames: Vec<Packet>,
     header_written: bool,
     trailer_written: bool,
+    /// The stream parameters' `loop_count` option.
+    loop_count: Option<u32>,
+    /// `loop_count` from [`Muxer::set_metadata`].
+    metadata_loop_count: Option<u32>,
+}
+
+impl PngMuxer {
+    fn num_plays(&self) -> Option<u32> {
+        self.loop_count.or(self.metadata_loop_count)
+    }
 }
 
 impl Muxer for PngMuxer {
@@ -523,35 +577,128 @@ impl Muxer for PngMuxer {
         if self.trailer_written {
             return Ok(());
         }
-        // If exactly one packet → write it verbatim (it's already a full PNG).
-        // If multiple packets → re-synthesise an APNG from them.
-        if self.frames.len() == 1 {
-            self.output.write_all(&self.frames[0].data)?;
-        } else if self.frames.len() > 1 {
-            // For multi-packet input, just write the first frame. Full
-            // recombination into an APNG requires re-parsing and splicing
-            // IDATs and is left for a follow-up — the encoder itself
-            // produces a full APNG when multiple frames are sent, so this
-            // path is exercised mostly by the "demux-then-remux" flow
-            // which we handle by concatenating back via a helper.
-            let merged = merge_still_packets_to_apng(&self.frames, &self.stream)?;
+        if self.frames.is_empty() {
+            return Err(Error::invalid("PNG muxer: no packets written"));
+        }
+        // Several packets, or the demuxer's one frame packet (a still
+        // carrying an `fcTL` and no `acTL`), are frames to assemble.
+        let frame_packets = self.frames.len() > 1 || {
+            let chunks = parse_all_chunks(&self.frames[0].data)?;
+            chunks.iter().any(|c| c.is_type(b"fcTL")) && !chunks.iter().any(|c| c.is_type(b"acTL"))
+        };
+        if frame_packets {
+            let merged = merge_still_packets_to_apng(&self.frames, &self.stream, self.num_plays())?;
             self.output.write_all(&merged)?;
         } else {
-            return Err(Error::invalid("PNG muxer: no packets written"));
+            // One packet: already a whole PNG / APNG file.
+            let file = match self.num_plays() {
+                Some(plays) => with_num_plays(&self.frames[0].data, plays)?,
+                None => self.frames[0].data.clone(),
+            };
+            self.output.write_all(&file)?;
         }
         self.output.flush()?;
         self.trailer_written = true;
         Ok(())
     }
+
+    /// Stores `loop_count` (the APNG `acTL` `num_plays`); PNG has no
+    /// field for any other pair this hook carries.
+    fn set_metadata(&mut self, metadata: &[(String, String)]) -> Result<()> {
+        self.metadata_loop_count = None;
+        for (k, v) in metadata {
+            if k == "loop_count" {
+                self.metadata_loop_count = Some(parse_loop_count(v)?);
+            }
+        }
+        Ok(())
+    }
+
+    fn carries_metadata_key(&self, key: &str) -> bool {
+        key == "loop_count"
+    }
 }
 
-/// Take N standalone-PNG packets produced by the demuxer's APNG split and
-/// re-assemble them into a single APNG file. Extracts IDATs, rewrites them
-/// as fdATs for frames 1..N, and inserts matching fcTL chunks between them.
-/// Each frame's delay is its packet `duration` in the packet's `time_base`
-/// (the stream's when the packet carries none), written as the
-/// `delay_num / delay_den` fraction of that tick (see [`fctl_delay`]).
-fn merge_still_packets_to_apng(packets: &[Packet], stream: &StreamInfo) -> Result<Vec<u8>> {
+/// `file` with its `acTL` `num_plays` set to `plays` (and that chunk's
+/// CRC recomputed); a still (no `acTL`) has no loop count and comes
+/// back unchanged.
+fn with_num_plays(file: &[u8], plays: u32) -> Result<Vec<u8>> {
+    let mut out = file.to_vec();
+    let mut pos = PNG_MAGIC.len();
+    while pos + 12 <= out.len() {
+        let len = u32::from_be_bytes([out[pos], out[pos + 1], out[pos + 2], out[pos + 3]]) as usize;
+        let end = pos
+            .checked_add(12 + len)
+            .filter(|&e| e <= out.len())
+            .ok_or_else(|| Error::invalid("PNG muxer: truncated chunk in packet"))?;
+        if &out[pos + 4..pos + 8] == b"acTL" && len == 8 {
+            let mut data = [0u8; 8];
+            data.copy_from_slice(&out[pos + 8..pos + 16]);
+            data[4..8].copy_from_slice(&plays.to_be_bytes());
+            let mut chunk = Vec::with_capacity(20);
+            write_chunk(&mut chunk, b"acTL", &data);
+            out.splice(pos..end, chunk);
+            break;
+        }
+        pos = end;
+    }
+    Ok(out)
+}
+
+/// The zlib stream of a `canvas`-sized image whose samples are all zero
+/// (fully transparent black for the alpha formats): the hidden default
+/// image an APNG needs when its first frame does not cover the whole
+/// canvas (the default image's `fcTL` must be the IHDR size at 0, 0,
+/// W3C PNG3 §11.3.6.2, and a default image without an `fcTL` "is not
+/// part of the animation", §4.9.1).
+fn zero_image_idat(canvas: &Ihdr) -> Result<Vec<u8>> {
+    let channels: usize = match canvas.colour_type {
+        0 | 3 => 1,
+        2 => 3,
+        4 => 2,
+        _ => 4,
+    };
+    let bits = channels * canvas.bit_depth as usize;
+    let row = |w: usize| 1 + (w * bits).div_ceil(8);
+    let (w, h) = (canvas.width as usize, canvas.height as usize);
+    let len = if canvas.interlace == 1 {
+        (0..7)
+            .map(|p| {
+                let (pw, ph) = crate::decoder::adam7_pass_dims(w, h, p);
+                if pw == 0 || ph == 0 { 0 } else { ph * row(pw) }
+            })
+            .sum()
+    } else {
+        h * row(w)
+    };
+    // Every filter byte 0 (None) and every sample 0.
+    let raw = vec![0u8; len];
+    Ok(crate::zstream::compress_bytes_to_vec(
+        &raw,
+        raw.len().max(1),
+        9,
+        1,
+    )?)
+}
+
+/// Take N standalone-PNG packets produced by the demuxer's APNG split (or
+/// N stills) and assemble them into a single APNG file: the first
+/// frame's `IDAT` becomes the default image when its region is the whole
+/// canvas, the others' become `fdAT`s, each behind its `fcTL`. A packet
+/// carrying an `fcTL` (the demuxer's frame packets) keeps its frame
+/// region offset, `dispose_op` and `blend_op`; a plain still is a frame
+/// at 0, 0 with `APNG_DISPOSE_OP_NONE` / `APNG_BLEND_OP_SOURCE`. The
+/// canvas is the stream's `width × height` (the first packet's size
+/// when the stream has none). Each frame's delay is its packet
+/// `duration` in the packet's `time_base` (the stream's when the packet
+/// carries none), written as the `delay_num / delay_den` fraction of
+/// that tick (see [`fctl_delay`]); `num_plays` is `plays` (`0` when
+/// `None`).
+fn merge_still_packets_to_apng(
+    packets: &[Packet],
+    stream: &StreamInfo,
+    plays: Option<u32>,
+) -> Result<Vec<u8>> {
     use crate::apng::{Actl, Blend, Disposal, Fctl};
 
     if packets.is_empty() {
@@ -565,6 +712,7 @@ fn merge_still_packets_to_apng(packets: &[Packet], stream: &StreamInfo) -> Resul
         trns: Option<Vec<u8>>,
         idat: Vec<u8>,
         delay: (u16, u16),
+        fctl: Option<Fctl>,
     }
     let mut stills: Vec<ParsedStill> = Vec::new();
     for p in packets {
@@ -584,6 +732,10 @@ fn merge_still_packets_to_apng(packets: &[Packet], stream: &StreamInfo) -> Resul
             .iter()
             .find(|c| c.is_type(b"tRNS"))
             .map(|c| c.data.to_vec());
+        let fctl = match chunks.iter().find(|c| c.is_type(b"fcTL")) {
+            Some(c) => Some(Fctl::parse(c.data)?),
+            None => None,
+        };
         let mut idat = Vec::new();
         for c in &chunks {
             if c.is_type(b"IDAT") {
@@ -601,19 +753,68 @@ fn merge_still_packets_to_apng(packets: &[Packet], stream: &StreamInfo) -> Resul
             trns,
             idat,
             delay: fctl_delay(p.duration.unwrap_or(1), tb),
+            fctl,
         });
     }
 
-    // Canvas size from first still.
-    let canvas_ihdr = stills[0].ihdr;
+    // The canvas: the stream geometry, else the first frame's; every
+    // frame shares its colour type, bit depth and interlace (each frame
+    // "utilizes the same bit depth, color type, compression method,
+    // filter method, interlace method, and palette (if any) as the
+    // static image", §11.3.6.3).
+    let first = stills[0].ihdr;
+    let (cw, ch) = match (stream.params.width, stream.params.height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
+        _ => (first.width, first.height),
+    };
+    let canvas_ihdr = Ihdr {
+        width: cw,
+        height: ch,
+        ..first
+    };
+    for (i, s) in stills.iter().enumerate() {
+        if (s.ihdr.colour_type, s.ihdr.bit_depth, s.ihdr.interlace)
+            != (first.colour_type, first.bit_depth, first.interlace)
+        {
+            return Err(Error::invalid(format!(
+                "PNG muxer: frame {i} is colour type {} / {}-bit / interlace {}, \
+                 frame 0 is {} / {}-bit / {}; APNG frames share one layout",
+                s.ihdr.colour_type,
+                s.ihdr.bit_depth,
+                s.ihdr.interlace,
+                first.colour_type,
+                first.bit_depth,
+                first.interlace
+            )));
+        }
+    }
     // Pull PLTE/tRNS from first still if present.
     let plte = stills[0].plte.clone();
     let trns = stills[0].trns.clone();
 
-    let actl = Actl {
-        num_frames: stills.len() as u32,
-        num_plays: 0,
-    };
+    let fctls: Vec<Fctl> = stills
+        .iter()
+        .map(|s| {
+            let (x, y, dispose, blend) = match &s.fctl {
+                Some(f) => (f.x_offset, f.y_offset, f.dispose_op, f.blend_op),
+                None => (0, 0, Disposal::None, Blend::Source),
+            };
+            let f = Fctl::new(0, s.ihdr.width, s.ihdr.height)
+                .with_offset(x, y)
+                .with_delay(s.delay.0, s.delay.1)
+                .with_dispose_op(dispose)
+                .with_blend_op(blend);
+            f.validate_within_canvas(cw, ch)?;
+            Ok(f)
+        })
+        .collect::<Result<_>>()?;
+    // The first frame is the default image when it covers the canvas.
+    let first_is_default = fctls[0].x_offset == 0
+        && fctls[0].y_offset == 0
+        && fctls[0].width == cw
+        && fctls[0].height == ch;
+
+    let actl = Actl::new(stills.len() as u32, plays.unwrap_or(0));
 
     let mut out = Vec::new();
     out.extend_from_slice(&PNG_MAGIC);
@@ -625,23 +826,17 @@ fn merge_still_packets_to_apng(packets: &[Packet], stream: &StreamInfo) -> Resul
     if let Some(t) = trns.as_deref() {
         write_chunk(&mut out, b"tRNS", t);
     }
+    if !first_is_default {
+        write_chunk(&mut out, b"IDAT", &zero_image_idat(&canvas_ihdr)?);
+    }
 
     let mut seq: u32 = 0;
-    for (i, s) in stills.iter().enumerate() {
-        let fctl = Fctl {
-            sequence_number: seq,
-            width: s.ihdr.width,
-            height: s.ihdr.height,
-            x_offset: 0,
-            y_offset: 0,
-            delay_num: s.delay.0,
-            delay_den: s.delay.1,
-            dispose_op: Disposal::None,
-            blend_op: Blend::Source,
-        };
+    for (i, (s, f)) in stills.iter().zip(&fctls).enumerate() {
+        let mut fctl = *f;
+        fctl.sequence_number = seq;
         write_chunk(&mut out, b"fcTL", &fctl.to_bytes());
         seq += 1;
-        if i == 0 {
+        if i == 0 && first_is_default {
             write_chunk(&mut out, b"IDAT", &s.idat);
         } else {
             let payload = crate::apng::build_fdat(seq, &s.idat);

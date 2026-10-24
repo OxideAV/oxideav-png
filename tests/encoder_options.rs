@@ -18,11 +18,13 @@ use oxideav_png::EncodeOptions;
 /// 8 = no-op for those sources), `filter` (string;
 /// `adaptive` / `none` / `sub` / `up` / `average` / `paeth`, default
 /// `adaptive` per W3C PNG3 §12.7), and `compression_level` (u32;
-/// 0 = encoder default `DEFAULT_COMPRESSION_LEVEL`, 1..=9 = explicit DEFLATE level).
+/// 0 = encoder default `DEFAULT_COMPRESSION_LEVEL`, 1..=9 = explicit DEFLATE level)
+/// with its `level` / `compression` aliases, and `loop_count` (u32; the
+/// APNG `acTL` num_plays, 0 = forever).
 #[test]
 fn schema_advertises_interlace_bit_depth_and_filter() {
     let schema = <EncodeOptions as CodecOptionsStruct>::SCHEMA;
-    assert_eq!(schema.len(), 6);
+    assert_eq!(schema.len(), 7);
     assert_eq!(schema[0].name, "interlace");
     assert_eq!(schema[1].name, "bit_depth");
     assert_eq!(schema[2].name, "filter");
@@ -32,6 +34,8 @@ fn schema_advertises_interlace_bit_depth_and_filter() {
     // (`oxideav convert --opt level=…`) reaches the PNG encoder.
     assert_eq!(schema[4].name, "level");
     assert_eq!(schema[5].name, "compression");
+    // The APNG `acTL` num_plays, under the framework-wide name.
+    assert_eq!(schema[6].name, "loop_count");
 }
 
 /// `level` and `compression` are pure aliases: they land in the same

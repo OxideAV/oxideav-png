@@ -447,6 +447,14 @@ impl CodecOptionsStruct for EncodeOptions {
             help: "Alias of `compression_level`: DEFLATE level 1..=9, \
                    0 = encoder default.",
         },
+        OptionField {
+            name: "loop_count",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(0),
+            help: "APNG `acTL` num_plays: how many times the animation \
+                   plays, 0 (the default) = indefinitely (W3C PNG3 \
+                   §11.3.6.1). Ignored for a still.",
+        },
     ];
     fn apply(&mut self, key: &str, v: &OptionValue) -> oxideav_core::Result<()> {
         use crate::filter::{FilterStrategy, FilterType};
@@ -492,6 +500,7 @@ impl CodecOptionsStruct for EncodeOptions {
                     }
                 };
             }
+            "loop_count" => self.num_plays = v.as_u32()?,
             _ => unreachable!("guarded by SCHEMA"),
         }
         Ok(())
@@ -504,20 +513,92 @@ impl CodecOptionsStruct for EncodeOptions {
 /// registry and called by the framework when a `png` packet stream
 /// needs decoding.
 pub fn make_decoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn Decoder>> {
+    // The animation canvas: the IHDR the container put first in the
+    // extradata (its width × height is the canvas, §11.3.6.2), else the
+    // stream geometry.
+    let canvas_size = params
+        .extradata
+        .get(..13)
+        .and_then(|b| crate::decoder::Ihdr::parse(b).ok())
+        .map(|h| (h.width, h.height))
+        .or(params.width.zip(params.height));
     Ok(Box::new(PngDecoder {
         codec_id: params.codec_id.clone(),
         pending: None,
         eof: false,
+        canvas_size,
+        canvas: None,
     }))
 }
 
 /// PNG `Decoder` trait impl: each `send_packet` carries one full PNG
 /// file (or APNG animation frame) and the matching `receive_frame`
 /// returns the decoded `VideoFrame`.
+///
+/// An animation frame packet (the container's: a still of the frame's
+/// own size carrying its `fcTL`) is rendered onto the animation canvas
+/// by the frame's region, `blend_op` and the previous frame's
+/// `dispose_op` (W3C PNG3 §11.3.6.2), so every frame comes out as the
+/// whole canvas as displayed — the pictures [`crate::decode_apng`]
+/// returns. The canvas starts cleared at the frame whose `fcTL` carries
+/// sequence number 0 (the first frame of a file, §4.9.2) and after
+/// `flush`.
 pub struct PngDecoder {
     codec_id: CodecId,
     pending: Option<Packet>,
     eof: bool,
+    /// Canvas `width × height` from the stream parameters.
+    canvas_size: Option<(u32, u32)>,
+    /// The output buffer of the animation being decoded.
+    canvas: Option<crate::decoder::ApngCanvas>,
+}
+
+impl PngDecoder {
+    /// Decode one packet: a still, or an animation frame rendered onto
+    /// the canvas.
+    fn decode_packet(&mut self, pkt: &Packet) -> Result<VideoFrame, PngError> {
+        let chunks = crate::decoder::parse_all_chunks(&pkt.data)?;
+        let fctl = match chunks.iter().find(|c| c.is_type(b"fcTL")) {
+            Some(c) if !chunks.iter().any(|c| c.is_type(b"acTL")) => {
+                Some(crate::apng::Fctl::parse(c.data)?)
+            }
+            _ => None,
+        };
+        let image = crate::decoder::decode_png_chunks(&chunks, &DecodeOptions::default())?;
+        let Some(fctl) = fctl else {
+            return Ok(png_image_into_video_frame(image, pkt.pts));
+        };
+        let ihdr = crate::decoder::Ihdr::parse(
+            chunks
+                .iter()
+                .find(|c| c.is_type(b"IHDR"))
+                .ok_or_else(|| PngError::invalid("PNG: missing IHDR"))?
+                .data,
+        )?;
+        let (width, height) = self.canvas_size.unwrap_or((
+            fctl.x_offset.saturating_add(fctl.width),
+            fctl.y_offset.saturating_add(fctl.height),
+        ));
+        if fctl.sequence_number == 0 || self.canvas.is_none() {
+            let canvas_ihdr = crate::decoder::Ihdr {
+                width,
+                height,
+                ..ihdr
+            };
+            let plte = chunks.iter().find(|c| c.is_type(b"PLTE")).map(|c| c.data);
+            let trns = chunks.iter().find(|c| c.is_type(b"tRNS")).map(|c| c.data);
+            self.canvas = Some(crate::decoder::ApngCanvas::new(&canvas_ihdr, plte, trns)?);
+        }
+        let canvas = self.canvas.as_mut().expect("canvas built above");
+        let shown = canvas.render(&fctl, &image)?;
+        let stride = shown.len() / height.max(1) as usize;
+        let mut whole = PngImage::packed(width, height, canvas.format(), stride, shown)?;
+        whole.color = image.color;
+        whole.metadata = image.metadata;
+        whole.palette = image.palette;
+        whole.transparency = image.transparency;
+        Ok(png_image_into_video_frame(whole, pkt.pts))
+    }
 }
 
 impl Decoder for PngDecoder {
@@ -543,12 +624,12 @@ impl Decoder for PngDecoder {
                 Err(oxideav_core::Error::NeedMore)
             };
         };
-        let vf = decode_png_to_frame(&pkt.data, pkt.pts)?;
-        Ok(Frame::Video(vf))
+        Ok(Frame::Video(self.decode_packet(&pkt)?))
     }
 
     fn flush(&mut self) -> oxideav_core::Result<()> {
         self.eof = true;
+        self.canvas = None;
         Ok(())
     }
 }
@@ -847,7 +928,7 @@ impl PngEncoder {
                 &file.layout,
                 &file.later_frames,
                 file.frames,
-                0,
+                self.opts.num_plays,
                 delay_cs(self.frame_rate),
                 100,
             )
