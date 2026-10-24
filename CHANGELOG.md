@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.13](https://github.com/OxideAV/oxideav-png/compare/v0.1.12...v0.1.13) - 2026-10-24
+
+### Fixed
+
+- fixup for #26: edition 2024 — explicit unsafe blocks in the counting allocator, rustfmt import order
+- fixup for #25: rustfmt import order (edition 2024)
+- fixup for #23: rustfmt import order (edition 2024)
+- fixup for #22: clippy 1.95 collapsible_if (let chains in chunk_set), rustfmt import order
+- fixup for #21: rustfmt import order (edition 2024)
+- fixup for #20: clippy 1.95 is_none_or, rustfmt import order
+- fixup for #19: edition 2024 — explicit unsafe blocks in the counting allocator, rustfmt import order
+- fixup for #18: rustfmt (edition 2024 import order) + CHANGELOG entry
+
+### Other
+
+- PngEncoder stays UnwindSafe / RefUnwindSafe (hold the failed file's error as plain data)
+- registry path carries metadata-blob and palette-alpha records
+- add DecodeOptions::inflate_metadata, to decode without inflating metadata
+- the framework Encoder compresses frames in place
+- encode_single reads the frame's plane in place
+- stream encode_to in three runs instead of the whole file
+- write metadata payloads straight into the output
+- add encode_into, which appends to a caller's buffer
+- add encode_plane, which encodes a borrowed plane in any layout
+- read images through a borrowed view; encode_rgb8 / rgba8 copy nothing
+- pin the encoder's output bytes at v0.1.12
+- hardware-engine crates load OS APIs through dlsym, not libloading
+- edition 2024, MSRV 1.95
+
 ### Added
 
 - `tests/encode_output_pinned.rs` pins the length and FNV-1a 64 hash of
