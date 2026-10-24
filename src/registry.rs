@@ -74,6 +74,7 @@ fn png_pixel_format(pf: PixelFormat) -> Result<PngPixelFormat, PngError> {
         PixelFormat::Ya8 => PngPixelFormat::Ya8,
         PixelFormat::Rgba => PngPixelFormat::Rgba,
         PixelFormat::Rgba64Le => PngPixelFormat::Rgba64Le,
+        PixelFormat::Ya16Le => PngPixelFormat::Ya16Le,
         other => {
             return Err(PngError::unsupported(format!(
                 "PNG: pixel format {other:?} not supported"
@@ -93,6 +94,7 @@ pub fn to_core_pixel_format(pf: PngPixelFormat) -> PixelFormat {
         PngPixelFormat::Ya8 => PixelFormat::Ya8,
         PngPixelFormat::Rgba => PixelFormat::Rgba,
         PngPixelFormat::Rgba64Le => PixelFormat::Rgba64Le,
+        PngPixelFormat::Ya16Le => PixelFormat::Ya16Le,
     }
 }
 

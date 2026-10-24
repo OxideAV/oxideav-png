@@ -61,7 +61,7 @@
 //! | 0 greyscale | 16 | `Gray16Le` |
 //! | 2 truecolour | 8 / 16 | `Rgb24` / `Rgb48Le` |
 //! | 3 indexed | 1 / 2 / 4 / 8 | `Pal8` (one index byte per pixel) + [`Palette`] |
-//! | 4 grey + alpha | 8 / 16 | `Ya8` / `Rgba64Le` (grey replicated — no 16-bit grey+alpha layout) |
+//! | 4 grey + alpha | 8 / 16 | `Ya8` / `Rgba64Le` (grey replicated; `Ya16Le` is accepted for encode) |
 //! | 6 truecolour + alpha | 8 / 16 | `Rgba` / `Rgba64Le` |
 //!
 //! All five row filters, Adam7 interlacing, split `IDAT` runs, `tRNS`

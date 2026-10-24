@@ -55,6 +55,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   encoder's value whatever the stream said; the muxer now rewrites that
   packet's `acTL` too.
 
+- `PngPixelFormat::Ya16Le` (16-bit gray + alpha, little-endian per
+  sample, 4 bytes per pixel) encodes as colour type 4 at bit depth 16
+  — the file ImageMagick / libpng write for such images — instead of
+  having to be widened to 16-bit RGBA (colour type 6, a third more raw
+  bytes). It maps to `oxideav_core::PixelFormat::Ya16Le` on the
+  registry path. Decoding still widens colour type 4 / 16-bit to
+  `Rgba64Le` (#28, part 1).
+
 ### Changed
 
 - edition 2024, MSRV 1.95; tests / fuzz harness load their black-box reference (libpng) through dlsym instead of libloading

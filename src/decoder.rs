@@ -1337,6 +1337,9 @@ fn build_png_image(
             }
         }
         PngPixelFormat::Ya8 => (w * 2, raw),
+        // Never an output layout (colour type 4 / 16-bit widens to
+        // Rgba64Le above); kept for completeness.
+        PngPixelFormat::Ya16Le => (w * 4, swap16_in_place(raw)),
     };
 
     let mut img = PngImage::packed(ihdr.width, ihdr.height, pf, stride, data)?;

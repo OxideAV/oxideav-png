@@ -49,7 +49,7 @@ if oxideav_png::probe(&bytes) {
 | `encode_into` | `fn(&PngImage, &EncodeOptions, &mut Vec<u8>) -> Result<(), Error>` - appends to the caller's buffer (PNG-specific) |
 | `encode_plane` | `fn(w, h, PixelFormat, stride, &[u8], Option<&Palette>, &EncodeOptions) -> Result<Vec<u8>, Error>` - a borrowed plane in any layout, read in place; `Pal8` needs the palette (PNG-specific) |
 | `PngImage` | `{ width, height, format: PixelFormat, planes: Vec<Plane>, color: ColorInfo, metadata: Metadata, palette: Option<Palette>, transparency: Option<Trns> }` with `new` / `packed` / `from_rgb8` / `from_rgba8` (each `Result`, rejecting geometry / length mismatches with `InvalidData`), `width()` / `height()` / `format()` / `stride()`, `as_bytes()` / `into_raw()`, `to_rgb8()` / `to_rgba8()` |
-| `PixelFormat` | `= PngPixelFormat`: `Gray8`, `Gray16Le`, `Rgb24`, `Rgb48Le`, `Pal8`, `Ya8`, `Rgba`, `Rgba64Le` (names mirror `oxideav_core::PixelFormat`) |
+| `PixelFormat` | `= PngPixelFormat`: `Gray8`, `Gray16Le`, `Rgb24`, `Rgb48Le`, `Pal8`, `Ya8`, `Rgba`, `Rgba64Le`, `Ya16Le` (encode only; names mirror `oxideav_core::PixelFormat`) |
 | `Error` | `= PngError`: `InvalidData`, `Unsupported`, `LimitExceeded`, `Io`, `Eof`, `NeedMore`, `Other` |
 
 `to_rgba8` is an exact integer kernel per layout: grey replicated,
@@ -107,7 +107,7 @@ Decode — IHDR colour type / bit depth → native `PixelFormat`:
 | 0 greyscale | 16 | `Gray16Le` | |
 | 2 truecolour | 8 / 16 | `Rgb24` / `Rgb48Le` | `tRNS` key on `PngImage::transparency` |
 | 3 indexed | 1 / 2 / 4 / 8 | `Pal8` | one index byte per pixel; `PLTE` + `tRNS` → `Palette` (RGBA entries) |
-| 4 grey + alpha | 8 / 16 | `Ya8` / `Rgba64Le` | 16-bit grey replicated (no `Ya16` layout) |
+| 4 grey + alpha | 8 / 16 | `Ya8` / `Rgba64Le` | 16-bit grey replicated on decode; `Ya16Le` encodes to it |
 | 6 truecolour + alpha | 8 / 16 | `Rgba` / `Rgba64Le` | |
 
 All five row filters, Adam7, split `IDAT` runs, APNG (every dispose /
@@ -122,6 +122,7 @@ Encode — `PngImage::format` → IHDR:
 | `Rgb24` / `Rgb48Le` | 2 / 8 / 16 | |
 | `Pal8` | 3 / 8, or 1 / 2 / 4 with `bit_depth` | `PLTE` from every `Palette` entry, `tRNS` up to the last non-opaque one |
 | `Ya8` | 4 / 8 | |
+| `Ya16Le` | 4 / 16 | |
 | `Rgba` / `Rgba64Le` | 6 / 8 / 16 | |
 
 Any layout may be Adam7 interlaced. APNG: `encode_all(&[Frame],
@@ -285,7 +286,7 @@ bombs, §13.3); inflated metadata bodies are capped at
 ### Encode support
 
 - 8-bit: `Rgba`, `Rgb24`, `Gray8`, `Pal8`, `Ya8`
-- 16-bit: `Rgb48Le`, `Rgba64Le`, `Gray16Le`
+- 16-bit: `Rgb48Le`, `Rgba64Le`, `Gray16Le`, `Ya16Le`
 - Sub-byte (1, 2, 4-bit) for colour type 0 (grayscale) and colour type 3
   (indexed), opt-in via `EncodeOptions::bit_depth` — accepted on
   `Gray8` / `Pal8` sources only, mirroring the RFC 2083 §11.2.2

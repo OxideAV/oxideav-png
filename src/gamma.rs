@@ -298,6 +298,7 @@ pub fn apply_to_png16(image: &mut PngImage, params: GammaParams) -> bool {
         PngPixelFormat::Gray16Le => 1usize,
         PngPixelFormat::Rgb48Le => 3,
         PngPixelFormat::Rgba64Le => 3,
+        PngPixelFormat::Ya16Le => 1,
         // 8-bit / palette / sub-16-bit formats are not this path's job.
         PngPixelFormat::Gray8
         | PngPixelFormat::Rgb24

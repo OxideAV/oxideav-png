@@ -256,6 +256,7 @@ fn sbit_channel_bits(format: PngPixelFormat, sbit: Option<Sbit>) -> [u8; 4] {
         (PngPixelFormat::Gray16Le, Sbit::GrayscaleAlpha(g, _)) => [g, 16, 16, 16],
         (PngPixelFormat::Rgb48Le, Sbit::Rgb(r, g, b)) => [r, g, b, 16],
         (PngPixelFormat::Rgba64Le, Sbit::Rgba(r, g, b, a)) => [r, g, b, a],
+        (PngPixelFormat::Ya16Le, Sbit::GrayscaleAlpha(g, a)) => [g, a, 16, 16],
         // Variant doesn't match the format: no recovery, plain rescale.
         _ => default,
     }
@@ -267,6 +268,7 @@ fn rescale_16bit_to_8bit_inner(image: &PngImage, sbit: Option<Sbit>) -> PngImage
         PngPixelFormat::Gray16Le => (PngPixelFormat::Gray8, 1usize, false),
         PngPixelFormat::Rgb48Le => (PngPixelFormat::Rgb24, 3, false),
         PngPixelFormat::Rgba64Le => (PngPixelFormat::Rgba, 3, true),
+        PngPixelFormat::Ya16Le => (PngPixelFormat::Ya8, 1, true),
         // Already 8-bit: identity clone.
         PngPixelFormat::Gray8
         | PngPixelFormat::Rgb24

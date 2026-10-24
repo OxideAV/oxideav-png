@@ -46,6 +46,11 @@ pub enum PngPixelFormat {
     Rgba,
     /// 16-bit RGBA, little-endian per channel, 8 bytes per pixel.
     Rgba64Le,
+    /// 16-bit grayscale + alpha, little-endian per sample, 4 bytes per
+    /// pixel (gray then alpha). Encodes as colour type 4 at bit depth
+    /// 16; the decoder still widens colour type 4 / 16-bit to
+    /// [`Self::Rgba64Le`].
+    Ya16Le,
 }
 
 /// The contract name for [`PngPixelFormat`].
@@ -58,7 +63,7 @@ impl PngPixelFormat {
             Self::Gray8 | Self::Pal8 => 1,
             Self::Gray16Le | Self::Ya8 => 2,
             Self::Rgb24 => 3,
-            Self::Rgba => 4,
+            Self::Rgba | Self::Ya16Le => 4,
             Self::Rgb48Le => 6,
             Self::Rgba64Le => 8,
         }
@@ -69,14 +74,14 @@ impl PngPixelFormat {
     /// transparency are not part of the layout; see
     /// [`PngImage::has_alpha`].
     pub fn has_alpha(self) -> bool {
-        matches!(self, Self::Ya8 | Self::Rgba | Self::Rgba64Le)
+        matches!(self, Self::Ya8 | Self::Rgba | Self::Rgba64Le | Self::Ya16Le)
     }
 
     /// Bits per sample of the layout (8 or 16).
     pub fn bits_per_sample(self) -> u8 {
         match self {
             Self::Gray8 | Self::Pal8 | Self::Ya8 | Self::Rgb24 | Self::Rgba => 8,
-            Self::Gray16Le | Self::Rgb48Le | Self::Rgba64Le => 16,
+            Self::Gray16Le | Self::Rgb48Le | Self::Rgba64Le | Self::Ya16Le => 16,
         }
     }
 }
@@ -599,6 +604,7 @@ impl PngImage {
     /// | `Ya8`      | `(g,g,g,a)`                                            |
     /// | `Rgba`     | copy                                                   |
     /// | `Rgba64Le` | high byte per channel                                  |
+    /// | `Ya16Le`   | `(g,g,g,a)`, high byte per sample                      |
     ///
     /// 16-bit samples reduce by dropping the low-order byte, which W3C
     /// PNG3 §13.12 permits for display; the §13.12 linear rescale is
@@ -739,6 +745,19 @@ impl PngImage {
                         px[1] = s[3];
                         px[2] = s[5];
                         px[3] = s[7];
+                    }
+                }
+                PixelFormat::Ya16Le => {
+                    for (s, px) in row
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(dst.as_chunks_mut::<4>().0)
+                    {
+                        px[0] = s[1];
+                        px[1] = s[1];
+                        px[2] = s[1];
+                        px[3] = s[3];
                     }
                 }
             }

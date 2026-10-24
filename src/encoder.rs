@@ -557,7 +557,10 @@ fn chunk_set<'a>(image: &ImageRef<'a>, opts: &'a EncodeOptions) -> Result<ChunkS
             // lose and is written as the RGB identity matrix 0.
             let luma_only = matches!(
                 image.format,
-                PngPixelFormat::Gray8 | PngPixelFormat::Gray16Le | PngPixelFormat::Ya8
+                PngPixelFormat::Gray8
+                    | PngPixelFormat::Gray16Le
+                    | PngPixelFormat::Ya8
+                    | PngPixelFormat::Ya16Le
             );
             if !luma_only
                 && c.matrix != ColorInfo::MATRIX_IDENTITY
@@ -962,6 +965,7 @@ fn ihdr_and_row_bytes(image: &ImageRef<'_>, opts: &EncodeOptions) -> Result<Ihdr
         PngPixelFormat::Ya8 => (8, 4, 2),
         PngPixelFormat::Rgba => (8, 6, 4),
         PngPixelFormat::Rgba64Le => (16, 6, 4),
+        PngPixelFormat::Ya16Le => (16, 4, 2),
     };
     let bit_depth = resolve_bit_depth(base_bit_depth, colour_type, opts)?;
     // For sub-byte (bit_depth < 8) Gray / indexed, the row's wire bytes
@@ -1055,7 +1059,10 @@ fn flatten_and_normalise_pixels(
         // 16-bit formats: source is LE per sample; PNG needs BE
         // (RFC 2083 §2.1). Paired-byte lockstep walk per row — no
         // per-sample index arithmetic.
-        PngPixelFormat::Gray16Le | PngPixelFormat::Rgb48Le | PngPixelFormat::Rgba64Le => {
+        PngPixelFormat::Gray16Le
+        | PngPixelFormat::Rgb48Le
+        | PngPixelFormat::Rgba64Le
+        | PngPixelFormat::Ya16Le => {
             for y in 0..h {
                 let src = &image.data()[y * stride..y * stride + row_bytes];
                 let dst = &mut out[y * row_bytes..(y + 1) * row_bytes];
