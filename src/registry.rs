@@ -629,7 +629,7 @@ pub struct PngEncoder {
     pending: Option<PendingFile>,
     /// The error that failed the file being built; `flush` (or, after
     /// one, `receive_packet`) returns it and starts a new file.
-    failed: Option<PngError>,
+    failed: Option<HeldError>,
     pending_out: VecDeque<Packet>,
     frame_rate: Option<Rational>,
     /// Raw palette + optional trns carried on `extradata`. Only used when
@@ -662,7 +662,7 @@ impl Encoder for PngEncoder {
                 }
                 self.compress_frame(v).map_err(|e| {
                     self.pending = None;
-                    self.failed = Some(copy_error(&e));
+                    self.failed = Some(HeldError::of(&e));
                     e.into()
                 })
             }
@@ -678,7 +678,7 @@ impl Encoder for PngEncoder {
         }
         if self.eof {
             if let Some(e) = self.failed.take() {
-                return Err(e.into());
+                return Err(e.into_error().into());
             }
             // Produce output now if we haven't already.
             self.finalize();
@@ -693,7 +693,7 @@ impl Encoder for PngEncoder {
     fn flush(&mut self) -> oxideav_core::Result<()> {
         self.eof = true;
         if let Some(e) = self.failed.take() {
-            return Err(e.into());
+            return Err(e.into_error().into());
         }
         if self.pending_out.is_empty() {
             self.finalize();
@@ -736,18 +736,46 @@ fn delay_cs(frame_rate: Option<Rational>) -> u16 {
     }
 }
 
-/// A second [`PngError`] equal to `e`, to report one error twice (from
-/// `send_frame` and from `flush`). An I/O error keeps its kind and
-/// message; the encoder writes to memory, so it raises none.
-fn copy_error(e: &PngError) -> PngError {
-    match e {
-        PngError::InvalidData(s) => PngError::InvalidData(s.clone()),
-        PngError::Unsupported(s) => PngError::Unsupported(s.clone()),
-        PngError::LimitExceeded(s) => PngError::LimitExceeded(s.clone()),
-        PngError::Io(io) => PngError::Io(std::io::Error::new(io.kind(), io.to_string())),
-        PngError::Eof => PngError::Eof,
-        PngError::NeedMore => PngError::NeedMore,
-        PngError::Other(s) => PngError::Other(s.clone()),
+/// A [`PngError`] the encoder holds to report it a second time (from
+/// `send_frame`, then from `flush`), kept as plain data: an I/O error
+/// is held as its kind and message, because `std::io::Error` is neither
+/// `UnwindSafe` nor `RefUnwindSafe` and [`PngEncoder`] is both. The
+/// encoder writes to memory, so it raises no I/O error itself.
+#[derive(Debug)]
+enum HeldError {
+    InvalidData(String),
+    Unsupported(String),
+    LimitExceeded(String),
+    Io(std::io::ErrorKind, String),
+    Eof,
+    NeedMore,
+    Other(String),
+}
+
+impl HeldError {
+    fn of(e: &PngError) -> Self {
+        match e {
+            PngError::InvalidData(s) => Self::InvalidData(s.clone()),
+            PngError::Unsupported(s) => Self::Unsupported(s.clone()),
+            PngError::LimitExceeded(s) => Self::LimitExceeded(s.clone()),
+            PngError::Io(io) => Self::Io(io.kind(), io.to_string()),
+            PngError::Eof => Self::Eof,
+            PngError::NeedMore => Self::NeedMore,
+            PngError::Other(s) => Self::Other(s.clone()),
+        }
+    }
+
+    /// The held error again, equal to the one first reported.
+    fn into_error(self) -> PngError {
+        match self {
+            Self::InvalidData(s) => PngError::InvalidData(s),
+            Self::Unsupported(s) => PngError::Unsupported(s),
+            Self::LimitExceeded(s) => PngError::LimitExceeded(s),
+            Self::Io(kind, msg) => PngError::Io(std::io::Error::new(kind, msg)),
+            Self::Eof => PngError::Eof,
+            Self::NeedMore => PngError::NeedMore,
+            Self::Other(s) => PngError::Other(s),
+        }
     }
 }
 

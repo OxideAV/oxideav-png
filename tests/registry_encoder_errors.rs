@@ -237,3 +237,13 @@ fn a_failure_after_flush_is_reported_by_receive_packet() {
         ])
     );
 }
+
+/// Holding a failed file's error does not cost the encoder its auto
+/// traits: it stays `Send` and unwind-safe, as in 0.1.12 (an
+/// `std::io::Error` field would make it neither `UnwindSafe` nor
+/// `RefUnwindSafe`).
+#[test]
+fn the_encoder_keeps_its_auto_traits() {
+    fn assert_traits<T: Send + std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+    assert_traits::<oxideav_png::PngEncoder>();
+}

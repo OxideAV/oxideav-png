@@ -110,6 +110,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as before. When a file has more than one fault, the error reported
   is the first one the encoder meets in frame order, which can differ
   from the one 0.1.12 reported.
+  The held error is kept as plain data (an I/O error as its kind and
+  message), so `PngEncoder` stays `UnwindSafe` / `RefUnwindSafe` as in
+  0.1.12.
 - `DecodeOptions::inflate_metadata` / `with_inflate_metadata(bool)`
   (default `true`, today's behaviour). With `false`, `decode_with` and
   `decode_all_with` inflate no metadata body: the `iCCP` profile and a
