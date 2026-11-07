@@ -25,6 +25,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ImageMagick-written file with its chunk sequence unchanged
   (`tests/chunk_order.rs`, two ImageMagick fixtures).
 
+### Changed
+
+- **Output layout change (#28):** colour type 4 at bit depth 16
+  (16-bit gray + alpha) now decodes to the native two-sample
+  `PngPixelFormat::Ya16Le` (`oxideav_core::PixelFormat::Ya16Le` on the
+  registry path) — little-endian gray then alpha, 4 bytes per pixel —
+  instead of being widened to `Rgba64Le` with the gray replicated. This
+  holds for `decode` / `decode_with` / `decode_from`, Adam7 files,
+  `info`, `decode_all`, `decode_apng` (the animation canvas is
+  `Ya16Le`, OVER blends both samples at 16-bit precision), the registry
+  decoder, `decode_png_to_frame` and the container's stream
+  `pixel_format`. The 8-bit conversions (`decode_rgba8`,
+  `decode_over_background`, `to_rgba8`) are unchanged. Callers that
+  matched on `Rgba64Le` for these files must handle `Ya16Le`; an
+  encode → decode round trip of a `Ya16Le` image is now the identity.
+  Every other colour type / depth decodes as before.
+
 ### Fixed
 
 - A palette image whose `tRNS` comes both from the palette alpha and

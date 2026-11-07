@@ -65,6 +65,12 @@ fn synth(width: u32, height: u32, pf: PngPixelFormat) -> PngImage {
             px[7] = 0xC0;
         }
     }
+    if pf == PngPixelFormat::Ya16Le {
+        for px in data.as_chunks_mut::<4>().0 {
+            px[2] = 0x40 + (px[0] >> 1);
+            px[3] = 0xC0;
+        }
+    }
     PngImage::packed(width, height, pf, row_bytes, data).unwrap()
 }
 
@@ -80,6 +86,7 @@ fn magick_spec(pf: PngPixelFormat) -> Option<(&'static str, Vec<&'static str>)> 
         PngPixelFormat::Gray16Le => ("gray:-", vec!["-depth", "16", "-endian", "LSB"]),
         PngPixelFormat::Rgb48Le => ("rgb:-", vec!["-depth", "16", "-endian", "LSB"]),
         PngPixelFormat::Rgba64Le => ("rgba:-", vec!["-depth", "16", "-endian", "LSB"]),
+        PngPixelFormat::Ya16Le => ("graya:-", vec!["-depth", "16", "-endian", "LSB"]),
         _ => return None,
     })
 }
@@ -178,6 +185,7 @@ fn every_option_combination_reads_back_in_black_box_readers() {
         PngPixelFormat::Gray16Le,
         PngPixelFormat::Rgb48Le,
         PngPixelFormat::Rgba64Le,
+        PngPixelFormat::Ya16Le,
     ];
     let filters = [
         ("adaptive", FilterStrategy::Adaptive),

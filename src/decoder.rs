@@ -22,7 +22,7 @@
 //! - colour type 3 / 1-2-4-bit → `Pal8` (one index byte per pixel after unpacking)
 //! - colour type 3 / 8-bit  → `Pal8` (palette embedded into extradata)
 //! - colour type 4 / 8-bit  → `Ya8` (gray + alpha)
-//! - colour type 4 / 16-bit → `Rgba64Le` (PNG has no native Ya16 — we expand)
+//! - colour type 4 / 16-bit → `Ya16Le` (gray + alpha, little-endian samples)
 //! - colour type 6 / 8-bit  → `Rgba`
 //! - colour type 6 / 16-bit → `Rgba64Le`
 //!
@@ -324,7 +324,7 @@ impl Ihdr {
             // pixel) during decode.
             (3, 1) | (3, 2) | (3, 4) | (3, 8) => PngPixelFormat::Pal8,
             (4, 8) => PngPixelFormat::Ya8,
-            (4, 16) => PngPixelFormat::Rgba64Le,
+            (4, 16) => PngPixelFormat::Ya16Le,
             (6, 8) => PngPixelFormat::Rgba,
             (6, 16) => PngPixelFormat::Rgba64Le,
             (ct, bd) => {
@@ -338,7 +338,7 @@ impl Ihdr {
     /// Size in bytes of the decoded plane [`crate::decode`] would
     /// allocate for this header: `width × height × bytes_per_pixel` of
     /// [`Self::output_pixel_format`] (the widest buffer the decode
-    /// holds — the ct 4 / 16-bit `Rgba64Le` widening included).
+    /// holds).
     pub fn decoded_plane_bytes(&self) -> Result<u64> {
         let bpp = self.output_pixel_format()?.bytes_per_pixel() as u64;
         Ok(u64::from(self.width) * u64::from(self.height) * bpp)
@@ -1351,15 +1351,13 @@ pub fn decode_over_background(buf: &[u8], override_bg: Option<[u8; 3]>) -> Resul
 
 /// Pack the raw decoded byte plane into a [`PngImage`] with the IHDR's
 /// output pixel format. For 16-bit formats this swaps PNG's BE samples
-/// to little-endian; for colour type 4 / 16-bit it expands `(gray,
-/// alpha)` into `(gray, gray, gray, alpha)` because we have no native
-/// Ya16 pixel format.
+/// to little-endian (colour type 4 / 16-bit stays two samples per pixel,
+/// `Ya16Le`).
 ///
 /// Takes the raw plane by value: the 8-bit formats pass the buffer
 /// through untouched and the 16-bit endian swap happens in place, so
 /// the decode pipeline hands one allocation from reconstruction to the
 /// returned [`PngImage`] instead of re-copying the whole plane here.
-/// Only the ct=4/16-bit `(G16, A16) → RGBA64` widening allocates.
 fn build_png_image(
     ihdr: &Ihdr,
     raw: Vec<u8>,
@@ -1368,7 +1366,6 @@ fn build_png_image(
 ) -> Result<PngImage> {
     let pf = ihdr.output_pixel_format()?;
     let w = ihdr.width as usize;
-    let h = ihdr.height as usize;
 
     let (stride, data) = match pf {
         PngPixelFormat::Gray8 => (w, raw),
@@ -1381,36 +1378,8 @@ fn build_png_image(
         PngPixelFormat::Rgb24 => (w * 3, raw),
         PngPixelFormat::Rgba => (w * 4, raw),
         PngPixelFormat::Rgb48Le => (w * 6, swap16_in_place(raw)),
-        PngPixelFormat::Rgba64Le => {
-            // Two cases: genuinely RGBA 16 (ct=6, bd=16) or gray+alpha 16 (ct=4, bd=16).
-            if ihdr.colour_type == 6 {
-                (w * 8, swap16_in_place(raw))
-            } else {
-                // colour type 4 + 16 bit → (G16, A16) in BE per sample.
-                // Expand to (G,G,G,A) LE.
-                let mut out = vec![0u8; w * h * 8];
-                for (src, dst) in raw
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .zip(out.as_chunks_mut::<8>().0)
-                {
-                    let (g_hi, g_lo, a_hi, a_lo) = (src[0], src[1], src[2], src[3]);
-                    dst[0] = g_lo;
-                    dst[1] = g_hi;
-                    dst[2] = g_lo;
-                    dst[3] = g_hi;
-                    dst[4] = g_lo;
-                    dst[5] = g_hi;
-                    dst[6] = a_lo;
-                    dst[7] = a_hi;
-                }
-                (w * 8, out)
-            }
-        }
+        PngPixelFormat::Rgba64Le => (w * 8, swap16_in_place(raw)),
         PngPixelFormat::Ya8 => (w * 2, raw),
-        // Never an output layout (colour type 4 / 16-bit widens to
-        // Rgba64Le above); kept for completeness.
         PngPixelFormat::Ya16Le => (w * 4, swap16_in_place(raw)),
     };
 
@@ -2357,20 +2326,20 @@ fn blend_over_row(dst: &mut [u8], src: &[u8], format: PngPixelFormat, key: &Tran
                 }
             }
         }
-        PngPixelFormat::Rgba64Le => {
+        PngPixelFormat::Rgba64Le | PngPixelFormat::Ya16Le => {
+            let ch = if format == PngPixelFormat::Rgba64Le {
+                4
+            } else {
+                2
+            };
             let (mut s, mut d) = ([0u64; 4], [0u64; 4]);
-            for (dp, sp) in dst
-                .as_chunks_mut::<8>()
-                .0
-                .iter_mut()
-                .zip(src.as_chunks::<8>().0)
-            {
-                for i in 0..4 {
+            for (dp, sp) in dst.chunks_exact_mut(2 * ch).zip(src.chunks_exact(2 * ch)) {
+                for i in 0..ch {
                     s[i] = u64::from(u16::from_le_bytes([sp[2 * i], sp[2 * i + 1]]));
                     d[i] = u64::from(u16::from_le_bytes([dp[2 * i], dp[2 * i + 1]]));
                 }
-                over_samples(&s, &mut d, 65535);
-                for i in 0..4 {
+                over_samples(&s[..ch], &mut d[..ch], 65535);
+                for i in 0..ch {
                     dp[2 * i..2 * i + 2].copy_from_slice(&(d[i] as u16).to_le_bytes());
                 }
             }

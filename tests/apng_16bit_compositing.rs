@@ -5,8 +5,7 @@
 //! per W3C PNG 3rd Edition §11.3.5 (frame control) and §13.16 ("Alpha Channel
 //! Processing", the non-premultiplied OVER referenced by
 //! `APNG_BLEND_OP_OVER`). 16-bit RGBA (colour type 6, bit depth 16) and 16-bit
-//! gray+alpha (colour type 4, bit depth 16 — expanded to RGBA64 internally)
-//! both store little-endian per-channel samples on the composited canvas; this
+//! gray+alpha (colour type 4, bit depth 16 — a `Ya16Le` canvas) both store little-endian per-channel samples on the composited canvas; this
 //! test pins the OVER arithmetic at 16-bit precision.
 
 use oxideav_png::chunk::write_chunk;
@@ -213,8 +212,8 @@ fn rgba16_over_fully_transparent_leaves_canvas() {
 
 #[test]
 fn gray_alpha16_over_composites() {
-    // Colour type 4 / bit depth 16 (gray + alpha) is expanded to RGBA64
-    // internally; OVER must still blend at 16-bit precision. Frame 0 = opaque
+    // Colour type 4 / bit depth 16 (gray + alpha) composites on a
+    // two-sample `Ya16Le` canvas; OVER blends at 16-bit precision. Frame 0 = opaque
     // gray 0x4000, frame 1 = gray 0xC000 at half alpha OVER.
     let w = 1u32;
     let h = 1u32;
@@ -255,8 +254,10 @@ fn gray_alpha16_over_composites() {
     let anim = decode_apng(&png).expect("decode");
     let inv = 65535u64 - alpha as u64;
     let exp = ((0xC000u64 * alpha as u64 + 0x4000u64 * inv + 32767) / 65535) as u16;
-    // Gray is replicated across R/G/B; all three must equal the blended gray.
-    assert_eq!(sample(&anim.frames[1], 1, 0, 0, 0), exp);
-    assert_eq!(sample(&anim.frames[1], 1, 0, 0, 1), exp);
-    assert_eq!(sample(&anim.frames[1], 1, 0, 0, 2), exp);
+    assert_eq!(anim.pixel_format, PngPixelFormat::Ya16Le);
+    let px = &anim.frames[1].image.planes[0].data;
+    assert_eq!(px.len(), 4, "one Ya16Le pixel: gray then alpha");
+    assert_eq!(u16::from_le_bytes([px[0], px[1]]), exp);
+    // αo = αs + αd·(1 − αs) over an opaque buffer pixel = 0xFFFF.
+    assert_eq!(u16::from_le_bytes([px[2], px[3]]), 0xFFFF);
 }

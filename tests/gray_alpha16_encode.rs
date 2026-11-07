@@ -30,18 +30,19 @@ fn ya16_writes_colour_type_4_depth_16() {
     // IHDR: bit depth 16, colour type 4.
     assert_eq!(&file[12..16], b"IHDR");
     assert_eq!((file[24], file[25]), (16, 4));
-    // The decoder widens colour type 4 / 16-bit to Rgba64Le (gray
-    // replicated): every sample survives exactly.
+    // The decoder returns the same native Ya16Le layout: the encode →
+    // decode round trip is the identity on the plane bytes.
     let back = oxideav_png::decode(&file).unwrap();
-    assert_eq!(back.format, PngPixelFormat::Rgba64Le);
+    assert_eq!(back.format, PngPixelFormat::Ya16Le);
+    assert_eq!(back.as_bytes().unwrap(), img.as_bytes().unwrap());
     let d = back.as_bytes().unwrap();
     for (i, [g, a]) in px.iter().enumerate() {
-        let s = |c: usize| u16::from_le_bytes([d[i * 8 + 2 * c], d[i * 8 + 2 * c + 1]]);
-        assert_eq!([s(0), s(1), s(2), s(3)], [*g, *g, *g, *a], "pixel {i}");
+        let s = |c: usize| u16::from_le_bytes([d[i * 4 + 2 * c], d[i * 4 + 2 * c + 1]]);
+        assert_eq!([s(0), s(1)], [*g, *a], "pixel {i}");
     }
-    // A quarter smaller raw stream than the RGBA64 detour it replaces.
-    let wide = oxideav_png::encode(&back, &EncodeOptions::default()).unwrap();
-    assert_eq!((wide[24], wide[25]), (16, 6));
+    // Re-encoding the decoded image stays colour type 4 / 16-bit.
+    let again = oxideav_png::encode(&back, &EncodeOptions::default()).unwrap();
+    assert_eq!((again[24], again[25]), (16, 4));
 }
 
 #[test]

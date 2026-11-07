@@ -47,9 +47,8 @@ pub enum PngPixelFormat {
     /// 16-bit RGBA, little-endian per channel, 8 bytes per pixel.
     Rgba64Le,
     /// 16-bit grayscale + alpha, little-endian per sample, 4 bytes per
-    /// pixel (gray then alpha). Encodes as colour type 4 at bit depth
-    /// 16; the decoder still widens colour type 4 / 16-bit to
-    /// [`Self::Rgba64Le`].
+    /// pixel (gray then alpha). The layout colour type 4 at bit depth
+    /// 16 decodes to and encodes from.
     Ya16Le,
 }
 
