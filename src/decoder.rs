@@ -32,6 +32,7 @@
 use crate::error::{PngError as Error, Result};
 use crate::image::{ApngFrameImage, ApngImage, Palette, PngImage, PngPixelFormat, RgbaImage};
 use crate::options::DecodeOptions;
+use crate::order::{ChunkOrder, ChunkSlot};
 
 // Backward-compat re-exports: existing callers reach for
 // `oxideav_png::decoder::make_decoder` and
@@ -874,6 +875,77 @@ pub fn parse_metadata(buf: &[u8]) -> Result<PngMetadata> {
         }
     }
     Ok(out)
+}
+
+/// The order of the chunks in `buf` that the encoder can write, as a
+/// [`ChunkOrder`] for [`crate::EncodeOptions::chunk_order`] (#28).
+///
+/// Paired with [`parse_metadata`] (whose `Vec`s hold the multi-instance
+/// chunks in file order) it re-creates the file's chunk layout on
+/// encode: each multi-instance chunk (`sPLT`, `tEXt`, `zTXt`, `iTXt`,
+/// an unrecognised ancillary type) is one [`ChunkSlot::instance`] slot
+/// numbered in file order, each single-instance chunk a whole-type slot
+/// (a repeat is left out), `PLTE` / `tRNS` keep their slots, and the
+/// `IDAT` run (with an APNG's frame chunks) is one `IDAT` slot. `IHDR`,
+/// `IEND`, `acTL`, `fcTL` and `fdAT` are not listed, nor is an
+/// unrecognised chunk whose name is not four letters (which
+/// [`parse_metadata`] drops). An unrecognised critical chunk is an
+/// error, as in [`parse_metadata`] (W3C PNG3 §14.2).
+///
+/// [`ChunkSlot::instance`]: crate::ChunkSlot::instance
+pub fn parse_chunk_order(buf: &[u8]) -> Result<ChunkOrder> {
+    let chunks = parse_all_chunks(buf)?;
+    let mut order = ChunkOrder::new();
+    let mut counts: Vec<([u8; 4], usize)> = Vec::new();
+    let mut seen_idat = false;
+    for c in &chunks {
+        let t = c.chunk_type;
+        match &t {
+            b"IHDR" | b"IEND" | b"acTL" | b"fcTL" | b"fdAT" => continue,
+            b"IDAT" => {
+                if !seen_idat {
+                    seen_idat = true;
+                    order.push(ChunkSlot::new(t));
+                }
+                continue;
+            }
+            _ => {}
+        }
+        let multi = match &t {
+            b"sPLT" | b"tEXt" | b"zTXt" | b"iTXt" => true,
+            b"PLTE" | b"tRNS" | b"sBIT" | b"pHYs" | b"tIME" | b"bKGD" | b"hIST" | b"eXIf"
+            | b"sRGB" | b"cICP" | b"iCCP" | b"gAMA" | b"cHRM" | b"mDCV" | b"cLLI" => false,
+            _ => {
+                let ty = crate::chunk::ChunkType::new(t);
+                if ty.is_critical() {
+                    return Err(Error::invalid(format!(
+                        "PNG: unrecognised critical chunk {:?} (W3C PNG3 §14.2)",
+                        ty.as_str()
+                    )));
+                }
+                if !ty.is_well_formed_name() {
+                    continue;
+                }
+                true
+            }
+        };
+        let n = match counts.iter_mut().find(|(ct, _)| *ct == t) {
+            Some((_, n)) => {
+                *n += 1;
+                *n - 1
+            }
+            None => {
+                counts.push((t, 1));
+                0
+            }
+        };
+        if multi {
+            order.push(ChunkSlot::instance(t, n));
+        } else if n == 0 {
+            order.push(ChunkSlot::new(t));
+        }
+    }
+    Ok(order)
 }
 
 /// Decode a single non-animated PNG file (or the "default image" of an

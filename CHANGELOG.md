@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `EncodeOptions::chunk_order` / `with_chunk_order` (#28): a
+  `ChunkOrder` (a list of `ChunkSlot`s — a chunk type, optionally one
+  instance of a multi-instance type, with `PLTE` / `tRNS` / `IDAT` as
+  markers) places the ancillary chunks in the caller's order, text and
+  `tIME` after `IDAT` included, for the still and APNG encoders. The
+  order is checked against W3C PNG3 §5.6 Table 7 (and §14.2 for unknown
+  chunks) before anything is written. Slots for absent chunks are
+  skipped; unlisted chunks keep a default place. `None` or an empty
+  order writes the same bytes as before. Text form
+  `"iCCP,cHRM,IDAT,tEXt#1"` via `FromStr` / `Display`, also the
+  registry option `chunk_order`.
+- `parse_chunk_order(&[u8])` (#28) reads a file's chunk order as a
+  `ChunkOrder`; with `decode` and `parse_metadata` it re-encodes an
+  ImageMagick-written file with its chunk sequence unchanged
+  (`tests/chunk_order.rs`, two ImageMagick fixtures).
+
+### Fixed
+
+- A palette image whose `tRNS` comes both from the palette alpha and
+  from `metadata.trns` with the same payload (a decoded file re-encoded
+  with its parsed metadata) writes one `tRNS` instead of failing;
+  different payloads are still an error (#28).
+- The encoder no longer adds a `cICP` / `sRGB` derived from
+  `PngImage::color` when the options metadata already has a `cHRM` or
+  `iCCP` (a decoded file's `color` derived from its `cHRM` added a
+  `cICP` on re-encode) (#28).
+
 ## [0.1.13](https://github.com/OxideAV/oxideav-png/compare/v0.1.12...v0.1.13) - 2026-10-24
 
 ### Fixed

@@ -159,7 +159,40 @@ would inflate; the `iCCP` chunk still governs the colour.
 heuristic, fixed, or brute), `interlace`, `bit_depth` (1 / 2 / 4 for
 `Gray8` / `Pal8`), `threads` (DEFLATE workers; bytes never depend on
 it), `metadata: Option<PngMetadata>` (every ancillary chunk, wins over
-the image-derived chunk).
+the image-derived chunk), `chunk_order: Option<ChunkOrder>` (where the
+chunks go, below).
+
+### Chunk order
+
+By default the ancillary chunks go in one fixed order that satisfies
+W3C PNG3 §5.6 Table 7 (colour chunks, `PLTE`, `tRNS`, `bKGD`, `hIST`,
+`pHYs`, `tIME`, `eXIf`, `sPLT`, `tEXt`, `zTXt`, `iTXt`, unknown
+chunks, `IDAT`). `EncodeOptions::chunk_order` takes a `ChunkOrder` — a
+list of `ChunkSlot`s, each a chunk type plus, for the multi-instance
+types, optionally one instance — and writes the chunks in that order,
+with `PLTE` / `tRNS` / `IDAT` as position markers. Text chunks and
+`tIME` may follow `IDAT`. Slots for chunks the encode does not write
+are skipped; unlisted chunks keep a default place. An order that breaks
+Table 7 (a colour chunk after `PLTE`, `bKGD` before it, `pHYs` after
+`IDAT`, an unknown chunk moved across `IDAT`) is an encode error.
+`parse_chunk_order(&bytes)` reads a file's order in the same form, so
+`decode` + `parse_metadata` + `parse_chunk_order` re-encodes a file
+with its chunk sequence intact. The text form is
+`"iCCP,cHRM,bKGD,pHYs,tIME,zTXt,tEXt,IDAT,tEXt#3"` (`FromStr` /
+`Display`; the registry option `chunk_order` takes it).
+
+```rust
+use oxideav_png::{encode, ChunkOrder, EncodeOptions, PngImage, PngMetadata, Text, Time};
+
+let image = PngImage::from_rgb8(1, 1, vec![0, 0, 0])?;
+let meta = PngMetadata::default()
+    .with_time(Time::new(2026, 11, 8, 12, 0, 0))
+    .with_texts(vec![Text::new("Comment".into(), "hi".into())]);
+let order: ChunkOrder = "IDAT,tIME,tEXt".parse()?;
+let png = encode(&image, &EncodeOptions::new().with_metadata(meta).with_chunk_order(order))?;
+// IHDR, IDAT, tIME, tEXt, IEND
+# Ok::<(), oxideav_png::PngError>(())
+```
 
 ## Metadata and colour
 

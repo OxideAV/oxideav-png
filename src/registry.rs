@@ -457,11 +457,34 @@ impl CodecOptionsStruct for EncodeOptions {
                    plays, 0 (the default) = indefinitely (W3C PNG3 \
                    §11.3.6.1). Ignored for a still.",
         },
+        OptionField {
+            name: "chunk_order",
+            kind: OptionKind::String,
+            default: OptionValue::String(String::new()),
+            help: "Ancillary chunk order (#28): comma-separated chunk \
+                   types, `#n` for the n-th instance of a multi-instance \
+                   type, `PLTE` / `tRNS` / `IDAT` as markers, e.g. \
+                   `iCCP,cHRM,bKGD,pHYs,tIME,zTXt,tEXt,IDAT`. Unlisted \
+                   chunks keep a default place; an order breaking W3C PNG3 \
+                   §5.6 Table 7 is an encode error. Empty (the default) = \
+                   the encoder's own order.",
+        },
     ];
     fn apply(&mut self, key: &str, v: &OptionValue) -> oxideav_core::Result<()> {
         use crate::filter::{FilterStrategy, FilterType};
         match key {
             "interlace" => self.interlace = v.as_bool()?,
+            "chunk_order" => {
+                let raw = v.as_str()?;
+                self.chunk_order = if raw.trim().is_empty() {
+                    None
+                } else {
+                    Some(
+                        raw.parse::<crate::ChunkOrder>()
+                            .map_err(oxideav_core::Error::from)?,
+                    )
+                };
+            }
             "bit_depth" => {
                 let raw = v.as_u32()?;
                 // `0` is the sentinel for "leave it at the source's native

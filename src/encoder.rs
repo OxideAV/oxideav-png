@@ -23,6 +23,7 @@
 use crate::error::{PngError as Error, Result};
 use crate::image::{ImageRef, PngImage, PngPixelFormat};
 use crate::metadata::{Chrm, Cicp, Gama, PngMetadata, Srgb, Trns};
+use crate::order::ChunkOrder;
 
 // Backward-compat re-export: existing callers reach for
 // `oxideav_png::encoder::make_encoder` to construct a framework-side
@@ -94,6 +95,8 @@ pub struct EncodeOptions {
     ///
     /// `None` (or an empty `splt` / `texts` / `ztxts` / `itxts` `Vec`)
     /// skips the chunk entirely.
+    ///
+    /// That is the default order; [`Self::chunk_order`] rearranges it.
     pub metadata: Option<PngMetadata>,
     /// Sub-byte bit depth for the on-wire IHDR. Only valid for
     /// `Gray8` (colour type 0) and `Pal8` (colour type 3) sources;
@@ -181,6 +184,16 @@ pub struct EncodeOptions {
     /// [`crate::encode_all`]: `0` (the default) plays forever. Ignored
     /// by the single-image encoders.
     pub num_plays: u32,
+    /// Where the ancillary chunks go (#28). `None` (the default) writes
+    /// them in the order listed under [`Self::metadata`]; a
+    /// [`ChunkOrder`] places them, and `PLTE` / `tRNS` / `IDAT`, in the
+    /// order it lists, e.g. to match another encoder's file byte for
+    /// byte or to keep a decoded file's layout
+    /// ([`crate::parse_chunk_order`]). Unlisted chunks keep a default
+    /// place; text chunks and `tIME` may go after `IDAT`. An order that
+    /// breaks W3C PNG3 §5.6 Table 7 is an encode error. Applies to the
+    /// still and APNG encoders alike.
+    pub chunk_order: Option<ChunkOrder>,
 }
 
 /// The pre-contract name of [`EncodeOptions`].
@@ -241,6 +254,13 @@ impl EncodeOptions {
     /// APNG loop count for [`crate::encode_all`] (`0` = forever).
     pub fn with_num_plays(mut self, num_plays: u32) -> Self {
         self.num_plays = num_plays;
+        self
+    }
+
+    /// Set (or clear with `None`) the chunk order, see
+    /// [`Self::chunk_order`].
+    pub fn with_chunk_order(mut self, chunk_order: impl Into<Option<ChunkOrder>>) -> Self {
+        self.chunk_order = chunk_order.into();
         self
     }
 }
@@ -407,6 +427,8 @@ pub(crate) fn write_png(
     let chunks = chunk_set(image, opts)?;
     let trns_bytes = resolve_trns_bytes(&ihdr, trns_bytes.as_deref(), chunks.trns)?;
     let level = resolve_compression_level(opts)?;
+    let (plte, trns) = (plte_bytes.as_deref(), trns_bytes.as_deref());
+    let layout = Layout::new(&chunks, plte, trns, opts)?;
 
     // Reserve for the headers plus a typical photographic IDAT (about a
     // third of the raw plane); the reservation is virtual until touched,
@@ -420,18 +442,12 @@ pub(crate) fn write_png(
     out.extend_from_slice(&PNG_MAGIC);
     write_chunk(out, b"IHDR", &ihdr.to_bytes());
     cut(Cut::AfterIhdr, out)?;
-    // sBIT must precede PLTE + IDAT (RFC 2083 §4.3 / §4.2.6).
-    write_metadata_before_plte(out, &chunks)?;
-    if let Some(p) = plte_bytes.as_deref() {
-        write_chunk(out, b"PLTE", p);
-    }
-    if let Some(t) = trns_bytes.as_deref() {
-        write_chunk(out, b"tRNS", t);
-    }
-    // pHYs + tIME go between PLTE/tRNS and IDAT (pHYs MUST be before
-    // IDAT per RFC 2083 §4.2.5; tIME has no ordering constraint but we
-    // bucket it here for determinism). sPLT also rides here.
-    write_metadata_before_idat(out, &chunks)?;
+    // The ancillary chunks and PLTE / tRNS before the pixel stream, in
+    // the default or the caller's order (W3C PNG3 §5.6 Table 7); the
+    // ones after it are rendered now so a payload error surfaces before
+    // the pixel stream is written.
+    write_items(out, &chunks, &layout.pre, plte, trns)?;
+    let post = layout.render_post(&chunks, plte, trns)?;
     cut(Cut::BeforeIdat, out)?;
     // The pixel stream is filtered row by row and deflated straight
     // into the IDAT chunk — no filtered-image intermediate, no
@@ -448,7 +464,7 @@ pub(crate) fn write_png(
         threads,
     )?;
     cut(Cut::AfterIdat, out)?;
-    write_metadata_after_idat(out, &chunks);
+    out.extend_from_slice(&post);
     write_chunk(out, b"IEND", &[]);
     cut(Cut::End, out)
 }
@@ -486,7 +502,8 @@ struct ChunkSet<'a> {
 /// * `metadata.exif` → `eXIf`;
 /// * `metadata.xmp` → an uncompressed `iTXt` keyed
 ///   [`crate::XMP_KEYWORD`] (the packet must be UTF-8);
-/// * `color` — exactly [`ColorInfo::srgb`](crate::ColorInfo::srgb) →
+/// * `color`, unless the options carry `sRGB`, `cICP`, `cHRM` or
+///   `iCCP` — exactly [`ColorInfo::srgb`](crate::ColorInfo::srgb) →
 ///   `sRGB` (perceptual intent) unless an ICC profile is present
 ///   (W3C PNG3 §11.3.2.3: at most one profile); otherwise, whenever a
 ///   code point is specified or the range is limited → `cICP` with
@@ -540,7 +557,11 @@ fn chunk_set<'a>(image: &ImageRef<'a>, opts: &'a EncodeOptions) -> Result<ChunkS
         })?);
     }
     let (mut srgb, mut cicp) = (meta.srgb, meta.cicp);
-    if srgb.is_none() && cicp.is_none() {
+    // Options metadata that already describes the colour space (a cHRM
+    // or an ICC profile, e.g. the records of a decoded file whose
+    // `color` was derived from them) is not overridden by a chunk
+    // synthesised from `color` (#28).
+    if srgb.is_none() && cicp.is_none() && meta.chrm.is_none() && meta.iccp.is_none() {
         let c = image.color;
         if c == ColorInfo::srgb() {
             if iccp.is_none() {
@@ -666,31 +687,16 @@ fn write_pixel_stream(
     chunk.finish()
 }
 
-/// Emit the metadata chunks the PNG spec places "before PLTE and IDAT":
-/// `cICP` (W3C PNG3 §11.3.2.6), `iCCP` (§11.3.2.3), `sBIT` (RFC 2083
-/// §4.3), `sRGB` (W3C PNG3 §5.6 Table 1), the `gAMA` / `cHRM`
-/// colour-management pair (RFC 2083 §4.2.2 / §4.2.3), and the HDR
-/// supplemental colour-volume pair `mDCV` (§11.3.2.7) / `cLLI`
-/// (§11.3.2.8). The colour chunks are emitted in §4.3 "Color Chunk
-/// Priority" order (cICP `1` > iCCP `2` > sRGB `3` > cHRM/gAMA `4`),
-/// with `sBIT` slotted after the highest-precedence pair for
-/// deterministic output. `gAMA` precedes `cHRM` so the simpler scalar
-/// gamma leads the chromaticity block. `mDCV` and `cLLI` trail the
-/// §4.3-ranked chunks because they describe the *mastering display*
-/// rather than the colour space itself — a viewer that walks the file
-/// in order picks up the basic colour signal before the supplemental
-/// HDR tone-mapping hints.
-fn write_metadata_before_plte(out: &mut Vec<u8>, chunks: &ChunkSet<'_>) -> Result<()> {
-    let meta = chunks.meta;
-    // W3C PNG3 §11.3.2.5 Table 17: an encoder writing the sRGB chunk
-    // that also writes gAMA / cHRM companion chunks (recommended "for
-    // compatibility with decoders that do not use the sRGB chunk") may
-    // use ONLY the sRGB-equivalent values — "Only the following values
-    // shall be used": gAMA 45455, cHRM = sRGB primaries + D65 white
-    // point. Emitting an sRGB chunk alongside a *contradicting*
-    // gAMA / cHRM would hand sRGB-unaware decoders a different colour
-    // space than sRGB-aware ones, so a mismatch is an encode error
-    // ahead of the wire rather than a silently nonconformant stream.
+/// W3C PNG3 §11.3.2.5 Table 17: an encoder writing the sRGB chunk that
+/// also writes gAMA / cHRM companion chunks (recommended "for
+/// compatibility with decoders that do not use the sRGB chunk") may use
+/// ONLY the sRGB-equivalent values — "Only the following values shall be
+/// used": gAMA 45455, cHRM = sRGB primaries + D65 white point. Emitting
+/// an sRGB chunk alongside a *contradicting* gAMA / cHRM would hand
+/// sRGB-unaware decoders a different colour space than sRGB-aware ones,
+/// so a mismatch is an encode error ahead of the wire rather than a
+/// silently nonconformant stream.
+fn check_srgb_companions(chunks: &ChunkSet<'_>) -> Result<()> {
     if chunks.srgb.is_some() {
         if let Some(gama) = &chunks.gama
             && *gama != Gama::SRGB
@@ -701,7 +707,7 @@ fn write_metadata_before_plte(out: &mut Vec<u8>, chunks: &ChunkSet<'_>) -> Resul
                 gama.gamma_times_100000
             )));
         }
-        if let Some(chrm) = &meta.chrm
+        if let Some(chrm) = &chunks.meta.chrm
             && *chrm != Chrm::SRGB
         {
             return Err(Error::invalid(
@@ -711,130 +717,346 @@ fn write_metadata_before_plte(out: &mut Vec<u8>, chunks: &ChunkSet<'_>) -> Resul
             ));
         }
     }
-    if let Some(cicp) = &chunks.cicp {
-        write_chunk(out, b"cICP", &cicp.to_bytes());
-    }
-    if let Some((name, profile)) = chunks.iccp {
-        write_chunk_streamed(out, b"iCCP", |sink| {
-            crate::metadata::write_iccp_payload(name, profile, sink)
-        })?;
-    }
-    if let Some(sbit) = &meta.sbit {
-        write_chunk(out, b"sBIT", &sbit.to_bytes());
-    }
-    if let Some(srgb) = &chunks.srgb {
-        write_chunk(out, b"sRGB", &srgb.to_bytes());
-    }
-    if let Some(gama) = &chunks.gama {
-        write_chunk(out, b"gAMA", &gama.to_bytes());
-    }
-    if let Some(chrm) = &meta.chrm {
-        write_chunk(out, b"cHRM", &chrm.to_bytes());
-    }
-    // mDCV + cLLI (W3C PNG3 §11.3.2.7 / §11.3.2.8) are HDR-side
-    // supplemental colour-volume metadata. The §4.3 colour-priority
-    // table does not enumerate them (they pair with cICP for
-    // tone-mapping reads rather than picking a colour-space). §5.6
-    // Table 1 only constrains them to "Before PLTE and IDAT"; we emit
-    // them after the §4.3-ranked chunks so the basic colour-space
-    // signal leads the file and HDR-display-volume metadata trails.
-    if let Some(mdcv) = &meta.mdcv {
-        write_chunk(out, b"mDCV", &mdcv.to_bytes());
-    }
-    if let Some(clli) = &meta.clli {
-        write_chunk(out, b"cLLI", &clli.to_bytes());
-    }
     Ok(())
 }
 
-/// Emit `bKGD`, `hIST`, `pHYs`, `tIME`, `eXIf`, `sPLT` — all go between
-/// any `PLTE`/`tRNS` pair and the `IDAT` stream. `bKGD` + `hIST` are
-/// emitted first per W3C PNG3 §5.6 ("After PLTE; before IDAT"); `eXIf`
-/// and `sPLT` are "Before IDAT" (§5.6 Table 7) with no PLTE
-/// relationship, so they trail this bucket. `sPLT` is the one chunk
-/// permitting multiple instances; each entry of the `splt` `Vec` is
-/// emitted in order. Returns an error if any `sPLT` payload is invalid
-/// (bad palette name / sample depth, or an 8-bit sample > 255).
-fn write_metadata_before_idat(out: &mut Vec<u8>, chunks: &ChunkSet<'_>) -> Result<()> {
+/// One chunk an encode writes around the pixel stream (or the stream
+/// itself, [`Item::Idat`]). The index fields address the `Vec`s of
+/// [`ChunkSet::meta`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Item {
+    Cicp,
+    Iccp,
+    Sbit,
+    Srgb,
+    Gama,
+    Chrm,
+    Mdcv,
+    Clli,
+    Plte,
+    Trns,
+    Bkgd,
+    Hist,
+    Phys,
+    Time,
+    Exif,
+    Splt(usize),
+    Text(usize),
+    Ztxt(usize),
+    Itxt(usize),
+    /// The image's XMP packet, as an uncompressed `iTXt`.
+    Xmp,
+    Unknown(usize),
+    Idat,
+}
+
+/// The chunks one encode writes, split at the pixel stream: `pre` before
+/// it, `post` between it and `IEND`.
+struct Layout {
+    pre: Vec<Item>,
+    post: Vec<Item>,
+}
+
+/// The chunk layout of an encode: every chunk `chunks` (plus the
+/// `PLTE` / `tRNS` pair when present) implies, in the default order
+/// below or arranged by `order` (see [`ChunkOrder`]), checked against
+/// W3C PNG3 §5.6 Table 7.
+///
+/// The default order: the colour chunks "before PLTE and IDAT" in §4.3
+/// "Color Chunk Priority" order (`cICP` `1` > `iCCP` `2` > `sRGB` `3` >
+/// `cHRM`/`gAMA` `4`) with `sBIT` after the highest-precedence pair,
+/// `gAMA` before `cHRM`, then the HDR supplemental colour-volume pair
+/// `mDCV` (§11.3.2.7) / `cLLI` (§11.3.2.8), which describe the
+/// mastering display rather than the colour space; `PLTE`, `tRNS`;
+/// `bKGD` and `hIST` ("After PLTE; before IDAT"); `pHYs`, `tIME`,
+/// `eXIf`, the `sPLT`s; the text chunks — `tEXt`, `zTXt`, `iTXt`, then
+/// the image's XMP `iTXt`, so plain text precedes compressed and
+/// international text; the unrecognised chunks captured before `IDAT`,
+/// in file order; `IDAT`; and the unrecognised chunks captured after it
+/// (§14.2 keeps each on its side).
+fn chunk_layout(
+    chunks: &ChunkSet<'_>,
+    has_plte: bool,
+    has_trns: bool,
+    order: Option<&ChunkOrder>,
+) -> Result<Layout> {
+    use crate::order::{Entry, Placement};
+
+    check_srgb_companions(chunks)?;
     let meta = chunks.meta;
-    if let Some(bkgd) = &meta.bkgd {
-        write_chunk(out, b"bKGD", &bkgd.to_bytes());
+    let mut entries: Vec<Entry<Item>> = Vec::new();
+    let mut add = |key: Item, chunk_type: &[u8; 4], instance: usize, placement: Placement| {
+        entries.push(Entry {
+            key,
+            chunk_type: *chunk_type,
+            instance,
+            placement,
+        })
+    };
+    use Placement::{AfterPlte, Anywhere, BeforeIdat, BeforePlte};
+    if chunks.cicp.is_some() {
+        add(Item::Cicp, b"cICP", 0, BeforePlte);
     }
-    if let Some(hist) = &meta.hist {
-        write_chunk(out, b"hIST", &hist.to_bytes());
+    if chunks.iccp.is_some() {
+        add(Item::Iccp, b"iCCP", 0, BeforePlte);
     }
-    if let Some(phys) = &meta.phys {
-        write_chunk(out, b"pHYs", &phys.to_bytes());
+    if meta.sbit.is_some() {
+        add(Item::Sbit, b"sBIT", 0, BeforePlte);
     }
-    if let Some(time) = &meta.time {
-        write_chunk(out, b"tIME", &time.to_bytes());
+    if chunks.srgb.is_some() {
+        add(Item::Srgb, b"sRGB", 0, BeforePlte);
     }
-    if let Some(exif) = chunks.exif {
-        write_chunk_streamed(out, b"eXIf", |sink| {
-            sink(exif);
-            Ok(())
-        })?;
+    if chunks.gama.is_some() {
+        add(Item::Gama, b"gAMA", 0, BeforePlte);
     }
-    for splt in &meta.splt {
-        write_chunk(out, b"sPLT", &splt.to_bytes()?);
+    if meta.chrm.is_some() {
+        add(Item::Chrm, b"cHRM", 0, BeforePlte);
     }
-    // `tEXt` (RFC 2083 §4.2.7) sits in the same "Before IDAT, no
-    // ordering constraint" bucket as `sPLT` per Table 1's "Multiple OK?
-    // Yes" / "Ordering constraints: None" row. Emitted after `sPLT` so
-    // the more structured chunks (palette, transparency, timing,
-    // suggested-palette) precede free-form textual annotations.
-    for text in &meta.texts {
-        write_chunk_streamed(out, b"tEXt", |sink| text.write_payload(sink))?;
+    if meta.mdcv.is_some() {
+        add(Item::Mdcv, b"mDCV", 0, BeforePlte);
     }
-    // `zTXt` (RFC 2083 §4.2.10) shares the "Before IDAT, no ordering
-    // constraint" bucket with `tEXt`; "Any number of zTXt and tEXt
-    // chunks can appear in the same file" (§4.2.10 ¶6). Emitted after
-    // `tEXt` so the cheap-to-display plain-text chunks precede the
-    // compressed bulk-text payloads — a reader streaming the file gets
-    // the human-readable annotations first.
-    for ztxt in &meta.ztxts {
-        write_chunk_streamed(out, b"zTXt", |sink| ztxt.write_payload(sink))?;
+    if meta.clli.is_some() {
+        add(Item::Clli, b"cLLI", 0, BeforePlte);
     }
-    // `iTXt` (W3C PNG3 §11.3.3.4) shares the same "Before IDAT, no
-    // ordering constraint" bucket as `tEXt` and `zTXt`. Emitted after
-    // `zTXt` so the Latin-1 chunks (cheap to decode for callers that
-    // only need byte-exact metadata) lead the internationalised UTF-8
-    // chunks in the stream.
-    for itxt in &meta.itxts {
-        write_chunk_streamed(out, b"iTXt", |sink| itxt.write_payload(sink))?;
+    if has_plte {
+        add(Item::Plte, b"PLTE", 0, Placement::Plte);
     }
-    // The image's XMP packet follows the options' iTXt chunks.
-    if let Some(xmp) = chunks.xmp {
-        write_chunk_streamed(out, b"iTXt", |sink| {
-            crate::metadata::write_itxt_payload(
-                crate::sideinfo::XMP_KEYWORD,
-                false,
-                "",
-                "",
-                xmp,
-                sink,
-            )
-        })?;
+    if has_trns {
+        add(Item::Trns, b"tRNS", 0, AfterPlte);
     }
-    // Unrecognised ancillary chunks captured on decode that lived
-    // *before* the first `IDAT` are replayed here, after the recognised
-    // before-IDAT chunks. §14.2 places no ordering constraint between two
-    // ancillary chunks beyond the before/after-IDAT side, so file order
-    // (as captured) is preserved.
-    for u in meta.unknowns.iter().filter(|u| !u.after_idat) {
-        write_chunk(out, &u.chunk_type, &u.data);
+    if meta.bkgd.is_some() {
+        add(Item::Bkgd, b"bKGD", 0, AfterPlte);
     }
-    Ok(())
+    if meta.hist.is_some() {
+        add(Item::Hist, b"hIST", 0, AfterPlte);
+    }
+    if meta.phys.is_some() {
+        add(Item::Phys, b"pHYs", 0, BeforeIdat);
+    }
+    if meta.time.is_some() {
+        add(Item::Time, b"tIME", 0, Anywhere);
+    }
+    if chunks.exif.is_some() {
+        add(Item::Exif, b"eXIf", 0, BeforeIdat);
+    }
+    for i in 0..meta.splt.len() {
+        add(Item::Splt(i), b"sPLT", i, BeforeIdat);
+    }
+    for i in 0..meta.texts.len() {
+        add(Item::Text(i), b"tEXt", i, Anywhere);
+    }
+    for i in 0..meta.ztxts.len() {
+        add(Item::Ztxt(i), b"zTXt", i, Anywhere);
+    }
+    for i in 0..meta.itxts.len() {
+        add(Item::Itxt(i), b"iTXt", i, Anywhere);
+    }
+    if chunks.xmp.is_some() {
+        add(Item::Xmp, b"iTXt", meta.itxts.len(), Anywhere);
+    }
+    // Unknown chunks: before-IDAT ones here, after-IDAT ones after the
+    // IDAT entry; each counted among the unknowns of its own type.
+    let rank = |i: usize| {
+        let t = meta.unknowns[i].chunk_type;
+        meta.unknowns[..i]
+            .iter()
+            .filter(|u| u.chunk_type == t)
+            .count()
+    };
+    for (i, u) in meta.unknowns.iter().enumerate() {
+        if !u.after_idat {
+            add(
+                Item::Unknown(i),
+                &u.chunk_type,
+                rank(i),
+                Placement::Side(false),
+            );
+        }
+    }
+    add(Item::Idat, b"IDAT", 0, Placement::Idat);
+    for (i, u) in meta.unknowns.iter().enumerate() {
+        if u.after_idat {
+            add(
+                Item::Unknown(i),
+                &u.chunk_type,
+                rank(i),
+                Placement::Side(true),
+            );
+        }
+    }
+
+    let arranged = match order {
+        Some(order) if !order.is_empty() => crate::order::arrange(&entries, order)?,
+        _ => entries,
+    };
+    let split = arranged
+        .iter()
+        .position(|e| e.key == Item::Idat)
+        .expect("the layout always holds IDAT");
+    Ok(Layout {
+        pre: arranged[..split].iter().map(|e| e.key).collect(),
+        post: arranged[split + 1..].iter().map(|e| e.key).collect(),
+    })
 }
 
-/// Re-emit unrecognised ancillary chunks (W3C PNG3 §14.2) that were
-/// captured *after* the `IDAT` run on decode. Emitted between the last
-/// `IDAT` / `fdAT` and `IEND`, preserving the before/after-IDAT side the
-/// §14.2 round-trip pins; a no-op when no such chunks were captured.
-fn write_metadata_after_idat(out: &mut Vec<u8>, chunks: &ChunkSet<'_>) {
-    for u in chunks.meta.unknowns.iter().filter(|u| u.after_idat) {
-        write_chunk(out, &u.chunk_type, &u.data);
+impl Layout {
+    /// The layout of an encode whose `PLTE` / `tRNS` payloads are
+    /// `plte` / `trns`, under `opts.chunk_order`.
+    fn new(
+        chunks: &ChunkSet<'_>,
+        plte: Option<&[u8]>,
+        trns: Option<&[u8]>,
+        opts: &EncodeOptions,
+    ) -> Result<Self> {
+        chunk_layout(
+            chunks,
+            plte.is_some(),
+            trns.is_some(),
+            opts.chunk_order.as_ref(),
+        )
     }
+
+    /// The chunks after the pixel stream, written into a buffer of their
+    /// own so a payload error surfaces before the pixel stream is
+    /// written.
+    fn render_post(
+        &self,
+        chunks: &ChunkSet<'_>,
+        plte: Option<&[u8]>,
+        trns: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
+        let mut post = Vec::new();
+        write_items(&mut post, chunks, &self.post, plte, trns)?;
+        Ok(post)
+    }
+}
+
+/// Write `items` (none of them [`Item::Idat`]) in order. Returns an error
+/// if a payload is invalid (a bad keyword or text string, an `sPLT` with
+/// a bad name / sample depth or an 8-bit sample > 255, a non-UTF-8 XMP
+/// packet, an oversized chunk).
+fn write_items(
+    out: &mut Vec<u8>,
+    chunks: &ChunkSet<'_>,
+    items: &[Item],
+    plte: Option<&[u8]>,
+    trns: Option<&[u8]>,
+) -> Result<()> {
+    let meta = chunks.meta;
+    for item in items {
+        match *item {
+            Item::Cicp => {
+                if let Some(cicp) = &chunks.cicp {
+                    write_chunk(out, b"cICP", &cicp.to_bytes());
+                }
+            }
+            Item::Iccp => {
+                if let Some((name, profile)) = chunks.iccp {
+                    write_chunk_streamed(out, b"iCCP", |sink| {
+                        crate::metadata::write_iccp_payload(name, profile, sink)
+                    })?;
+                }
+            }
+            Item::Sbit => {
+                if let Some(sbit) = &meta.sbit {
+                    write_chunk(out, b"sBIT", &sbit.to_bytes());
+                }
+            }
+            Item::Srgb => {
+                if let Some(srgb) = &chunks.srgb {
+                    write_chunk(out, b"sRGB", &srgb.to_bytes());
+                }
+            }
+            Item::Gama => {
+                if let Some(gama) = &chunks.gama {
+                    write_chunk(out, b"gAMA", &gama.to_bytes());
+                }
+            }
+            Item::Chrm => {
+                if let Some(chrm) = &meta.chrm {
+                    write_chunk(out, b"cHRM", &chrm.to_bytes());
+                }
+            }
+            Item::Mdcv => {
+                if let Some(mdcv) = &meta.mdcv {
+                    write_chunk(out, b"mDCV", &mdcv.to_bytes());
+                }
+            }
+            Item::Clli => {
+                if let Some(clli) = &meta.clli {
+                    write_chunk(out, b"cLLI", &clli.to_bytes());
+                }
+            }
+            Item::Plte => {
+                if let Some(p) = plte {
+                    write_chunk(out, b"PLTE", p);
+                }
+            }
+            Item::Trns => {
+                if let Some(t) = trns {
+                    write_chunk(out, b"tRNS", t);
+                }
+            }
+            Item::Bkgd => {
+                if let Some(bkgd) = &meta.bkgd {
+                    write_chunk(out, b"bKGD", &bkgd.to_bytes());
+                }
+            }
+            Item::Hist => {
+                if let Some(hist) = &meta.hist {
+                    write_chunk(out, b"hIST", &hist.to_bytes());
+                }
+            }
+            Item::Phys => {
+                if let Some(phys) = &meta.phys {
+                    write_chunk(out, b"pHYs", &phys.to_bytes());
+                }
+            }
+            Item::Time => {
+                if let Some(time) = &meta.time {
+                    write_chunk(out, b"tIME", &time.to_bytes());
+                }
+            }
+            Item::Exif => {
+                if let Some(exif) = chunks.exif {
+                    write_chunk_streamed(out, b"eXIf", |sink| {
+                        sink(exif);
+                        Ok(())
+                    })?;
+                }
+            }
+            Item::Splt(i) => write_chunk(out, b"sPLT", &meta.splt[i].to_bytes()?),
+            Item::Text(i) => {
+                write_chunk_streamed(out, b"tEXt", |sink| meta.texts[i].write_payload(sink))?
+            }
+            Item::Ztxt(i) => {
+                write_chunk_streamed(out, b"zTXt", |sink| meta.ztxts[i].write_payload(sink))?
+            }
+            Item::Itxt(i) => {
+                write_chunk_streamed(out, b"iTXt", |sink| meta.itxts[i].write_payload(sink))?
+            }
+            Item::Xmp => {
+                if let Some(xmp) = chunks.xmp {
+                    write_chunk_streamed(out, b"iTXt", |sink| {
+                        crate::metadata::write_itxt_payload(
+                            crate::sideinfo::XMP_KEYWORD,
+                            false,
+                            "",
+                            "",
+                            xmp,
+                            sink,
+                        )
+                    })?;
+                }
+            }
+            Item::Unknown(i) => {
+                let u = &meta.unknowns[i];
+                write_chunk(out, &u.chunk_type, &u.data);
+            }
+            Item::Idat => {}
+        }
+    }
+    Ok(())
 }
 
 /// Pick the on-wire `tRNS` payload bytes given the IHDR + the two
@@ -846,8 +1068,9 @@ fn write_metadata_after_idat(out: &mut Vec<u8>, chunks: &ChunkSet<'_>) {
 ///
 /// * Both sources `None` → no chunk on the wire.
 /// * Exactly one source `Some` → that source's bytes.
-/// * Both sources `Some` → encode error (the caller asked for two
-///   `tRNS` chunks on the same file).
+/// * Both sources `Some` with the same payload → that payload, once.
+/// * Both sources `Some` with different payloads → encode error (the
+///   caller asked for two `tRNS` chunks on the same file).
 ///
 /// When `metadata.trns` is used, the variant must match the IHDR colour
 /// type — a `Trns::Rgb` paired with a grayscale IHDR would put a
@@ -902,6 +1125,9 @@ fn resolve_trns_bytes(
             }
             Ok(Some(t.to_bytes()))
         }
+        // The same payload from both sources (a decoded palette image
+        // re-encoded with its parsed metadata) is one chunk.
+        (Some(p), Some(t)) if t.to_bytes() == p => Ok(Some(p.to_vec())),
         (Some(_), Some(_)) => Err(Error::invalid(
             "PNG encoder: both image.palette tail and metadata.trns supply a tRNS \
              chunk — only one source is allowed per file (W3C PNG3 §5.6 Table 1 \
@@ -1713,17 +1939,12 @@ pub fn encode_apng_threaded(
     out.extend_from_slice(&PNG_MAGIC);
     write_chunk(&mut out, b"IHDR", &ihdr.to_bytes());
     write_chunk(&mut out, b"acTL", &actl.to_bytes());
-    // sBIT precedes PLTE + IDAT per RFC 2083 §4.3.
-    write_metadata_before_plte(&mut out, &chunks)?;
-    if let Some(p) = plte.as_deref() {
-        write_chunk(&mut out, b"PLTE", p);
-    }
-    if let Some(t) = trns.as_deref() {
-        write_chunk(&mut out, b"tRNS", t);
-    }
-    // pHYs / tIME / sPLT precede IDAT (and APNG's fcTL/fdAT stream that
-    // bracket subsequent frames).
-    write_metadata_before_idat(&mut out, &chunks)?;
+    // The chunks before the animation's pixel stream (the first fcTL and
+    // IDAT, then the fcTL / fdAT pairs) and after it.
+    let (plte, trns) = (plte.as_deref(), trns.as_deref());
+    let layout = Layout::new(&chunks, plte, trns, opts)?;
+    write_items(&mut out, &chunks, &layout.pre, plte, trns)?;
+    let post = layout.render_post(&chunks, plte, trns)?;
 
     // Same four filter sites as the standalone encoder (RFC 2083
     // §A.8 sub-image-per-pass rule for the interlaced forms),
@@ -1761,7 +1982,7 @@ pub fn encode_apng_threaded(
         seq += 2;
     }
 
-    write_metadata_after_idat(&mut out, &chunks);
+    out.extend_from_slice(&post);
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
 }
@@ -2308,14 +2529,10 @@ fn encode_apng_regions(
     out.extend_from_slice(&PNG_MAGIC);
     write_chunk(&mut out, b"IHDR", &ihdr.to_bytes());
     write_chunk(&mut out, b"acTL", &actl.to_bytes());
-    write_metadata_before_plte(&mut out, &chunks)?;
-    if let Some(p) = plte.as_deref() {
-        write_chunk(&mut out, b"PLTE", p);
-    }
-    if let Some(t) = trns.as_deref() {
-        write_chunk(&mut out, b"tRNS", t);
-    }
-    write_metadata_before_idat(&mut out, &chunks)?;
+    let (plte, trns) = (plte.as_deref(), trns.as_deref());
+    let layout = Layout::new(&chunks, plte, trns, opts)?;
+    write_items(&mut out, &chunks, &layout.pre, plte, trns)?;
+    let post = layout.render_post(&chunks, plte, trns)?;
 
     // Compress one frame's sub-region pixels straight into an IDAT /
     // fdAT chunk using the frame's own dimensions (the fcTL extent) as
@@ -2375,7 +2592,7 @@ fn encode_apng_regions(
         }
     }
 
-    write_metadata_after_idat(&mut out, &chunks);
+    out.extend_from_slice(&post);
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
 }

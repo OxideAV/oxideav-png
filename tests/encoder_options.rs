@@ -20,11 +20,12 @@ use oxideav_png::EncodeOptions;
 /// `adaptive` per W3C PNG3 §12.7), and `compression_level` (u32;
 /// 0 = encoder default `DEFAULT_COMPRESSION_LEVEL`, 1..=9 = explicit DEFLATE level)
 /// with its `level` / `compression` aliases, and `loop_count` (u32; the
-/// APNG `acTL` num_plays, 0 = forever).
+/// APNG `acTL` num_plays, 0 = forever), and `chunk_order` (string; the
+/// ancillary chunk order, empty = the encoder's own, #28).
 #[test]
 fn schema_advertises_interlace_bit_depth_and_filter() {
     let schema = <EncodeOptions as CodecOptionsStruct>::SCHEMA;
-    assert_eq!(schema.len(), 7);
+    assert_eq!(schema.len(), 8);
     assert_eq!(schema[0].name, "interlace");
     assert_eq!(schema[1].name, "bit_depth");
     assert_eq!(schema[2].name, "filter");
@@ -36,6 +37,7 @@ fn schema_advertises_interlace_bit_depth_and_filter() {
     assert_eq!(schema[5].name, "compression");
     // The APNG `acTL` num_plays, under the framework-wide name.
     assert_eq!(schema[6].name, "loop_count");
+    assert_eq!(schema[7].name, "chunk_order");
 }
 
 /// `level` and `compression` are pure aliases: they land in the same
@@ -281,4 +283,28 @@ fn make_encoder_accepts_interlace_true() {
     params.pixel_format = Some(PixelFormat::Rgba);
     params.options = CodecOptions::new().set("interlace", "true");
     assert!(oxideav_png::encoder::make_encoder(&params).is_ok());
+}
+
+/// `chunk_order` parses the comma-separated text form into
+/// `EncodeOptions::chunk_order`; empty means the encoder's own order and
+/// a malformed type is rejected at parse time (#28).
+#[test]
+fn chunk_order_option_parses() {
+    use oxideav_png::{ChunkOrder, ChunkSlot};
+    let opts = CodecOptions::new().set("chunk_order", "iCCP, cHRM,IDAT,tEXt#1");
+    let parsed = parse_options::<EncodeOptions>(&opts).expect("parse");
+    let expected = ChunkOrder::from_types([*b"iCCP", *b"cHRM", *b"IDAT"])
+        .with(ChunkSlot::instance(*b"tEXt", 1));
+    assert_eq!(parsed.chunk_order, Some(expected));
+
+    let opts = CodecOptions::new().set("chunk_order", "");
+    let parsed = parse_options::<EncodeOptions>(&opts).expect("parse");
+    assert_eq!(parsed.chunk_order, None);
+
+    let opts = CodecOptions::new().set("chunk_order", "gAMA,tEX");
+    let err = parse_options::<EncodeOptions>(&opts).unwrap_err();
+    assert!(
+        matches!(err, Error::InvalidData(ref s) if s.contains("tEX")),
+        "got {err:?}"
+    );
 }

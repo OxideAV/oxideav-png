@@ -156,6 +156,7 @@ pub mod gamma;
 pub mod image;
 pub mod metadata;
 mod options;
+mod order;
 #[cfg(feature = "registry")]
 pub mod registry;
 mod sideinfo;
@@ -187,6 +188,7 @@ pub use image::{
     PngPixelFormat, RgbImage, RgbaImage,
 };
 pub use options::DecodeOptions;
+pub use order::{ChunkOrder, ChunkSlot};
 pub use sideinfo::XMP_KEYWORD;
 
 // ---- PNG-specific depth (the contract is a floor, not a ceiling) ----------
@@ -196,7 +198,7 @@ pub use chunk::{ChunkType, ColourType};
 pub use decoder::CODEC_ID_STR;
 pub use decoder::{
     ApngInfo, DEFAULT_BACKGROUND_GREY, Ihdr, decode_apng, decode_apng_info, parse_apng,
-    parse_metadata,
+    parse_chunk_order, parse_metadata,
 };
 pub use depth::{
     max_sample, recover_sbit, rescale_16bit_to_8bit, rescale_16bit_to_8bit_via_sbit,
