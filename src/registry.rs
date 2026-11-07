@@ -1029,6 +1029,9 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             PixelFormat::Pal8,
             PixelFormat::Rgb48Le,
             PixelFormat::Rgba64Le,
+            PixelFormat::Gray16Le,
+            PixelFormat::Ya8,
+            PixelFormat::Ya16Le,
         ])
         // `iCCP`, `eXIf` and the `XML:com.adobe.xmp` `iTXt` (W3C PNG3
         // §11.3.2.4 / §11.3.4.5 / §11.3.3.4); every other kind has no

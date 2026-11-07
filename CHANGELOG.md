@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The registry codec capabilities now list `Gray16Le`, `Ya8` and `Ya16Le`,
+  which the encoder already accepted.
+
 ### Added
 
 - `EncodeOptions::chunk_order` / `with_chunk_order` (#28): a
