@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.14](https://github.com/OxideAV/oxideav-png/compare/v0.1.13...v0.1.14) - 2026-11-07
+
+### Other
+
+- advertise Gray16Le / Ya8 / Ya16Le encoder formats
+- colour type 4 / 16-bit decodes to native Ya16Le ([#28](https://github.com/OxideAV/oxideav-png/pull/28))
+- caller-controlled chunk order + parse_chunk_order (#28 part 2)
+
 ### Fixed
 
 - The registry codec capabilities now list `Gray16Le`, `Ya8` and `Ya16Le`,
