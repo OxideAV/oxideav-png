@@ -438,6 +438,96 @@ pub fn choose_filter_heuristic(
     best
 }
 
+/// `n × log2(n)` in Q16 fixed point for a byte count `n`, by integer
+/// arithmetic only (the same value on every platform): the integer part
+/// of the logarithm is the position of the top set bit, and each of the
+/// sixteen fraction bits comes from squaring the mantissa (`1 ≤ m < 2`
+/// in Q31) and testing whether the square reached 2.
+fn n_log2_n_q16(n: u32) -> u64 {
+    if n < 2 {
+        return 0;
+    }
+    let top = 31 - n.leading_zeros();
+    let mut log_q16 = (top as u64) << 16;
+    let mut m = (n as u64) << (31 - top); // Q31, in [1, 2)
+    for bit in (0..16).rev() {
+        m = (m * m) >> 31;
+        if m >= 1 << 32 {
+            m >>= 1;
+            log_q16 |= 1 << bit;
+        }
+    }
+    n as u64 * log_q16
+}
+
+/// [`n_log2_n_q16`] for the counts a row histogram usually holds.
+fn n_log2_n_table() -> &'static [u64; 2049] {
+    static TABLE: OnceLock<[u64; 2049]> = OnceLock::new();
+    TABLE.get_or_init(|| std::array::from_fn(|n| n_log2_n_q16(n as u32)))
+}
+
+/// Pick a filter for `row` by the zeroth-order entropy of the filtered
+/// bytes: with `n_v` the number of bytes of value `v` in a filtered row
+/// of `N` bytes, an ideal entropy coder spends `Σ n_v × log2(N / n_v)`
+/// bits on it, so the filter that maximises `Σ n_v × log2(n_v)` is the
+/// one whose bytes are cheapest to code on their own. Where the §12.8
+/// sum rewards small magnitudes, this rewards few distinct values,
+/// which is what flat artwork, text and palette indices filter to.
+///
+/// Each candidate is filtered into `scratch` (at least `row.len()`
+/// bytes) and counted; ties go to the earlier filter type. Integer
+/// arithmetic throughout, so the choice is the same on every platform.
+pub fn choose_filter_entropy(
+    row: &[u8],
+    prev_row: &[u8],
+    bpp: usize,
+    scratch: &mut [u8],
+) -> FilterType {
+    let table = n_log2_n_table();
+    let scratch = &mut scratch[..row.len()];
+    let mut best = FilterType::None;
+    let mut best_score = 0u64;
+    for (i, ft) in [
+        FilterType::None,
+        FilterType::Sub,
+        FilterType::Up,
+        FilterType::Average,
+        FilterType::Paeth,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        filter_row(ft, row, prev_row, bpp, scratch);
+        // Four interleaved histograms: consecutive equal bytes would
+        // otherwise chain through one counter's store-to-load path.
+        let mut hist = [[0u32; 256]; 4];
+        let (quads, rest) = scratch.as_chunks::<4>();
+        for q in quads {
+            hist[0][q[0] as usize] += 1;
+            hist[1][q[1] as usize] += 1;
+            hist[2][q[2] as usize] += 1;
+            hist[3][q[3] as usize] += 1;
+        }
+        for &b in rest {
+            hist[0][b as usize] += 1;
+        }
+        let score: u64 = (0..256)
+            .map(|v| {
+                let n = hist[0][v] + hist[1][v] + hist[2][v] + hist[3][v];
+                match table.get(n as usize) {
+                    Some(&t) => t,
+                    None => n_log2_n_q16(n),
+                }
+            })
+            .sum();
+        if i == 0 || score > best_score {
+            best = ft;
+            best_score = score;
+        }
+    }
+    best
+}
+
 /// Encoder-side filter-selection policy.
 ///
 /// Maps to the recommendations in W3C PNG3 §12.7 ("Filter selection").
@@ -481,8 +571,19 @@ pub enum FilterStrategy {
     /// sum); `Brute` instead measures the real compressed size, so it is
     /// always at least as small as `Adaptive` and never larger than any
     /// `Fixed` choice. It is the slowest strategy (six full-image
-    /// deflate passes) and is opt-in only.
+    /// deflate passes) and is opt-in only. The search also tries
+    /// [`Entropy`](FilterStrategy::Entropy), so it is never larger than
+    /// that either.
     Brute,
+    /// Per-row choice by the zeroth-order entropy of the filtered bytes
+    /// ([`choose_filter_entropy`]): the filter whose output an ideal
+    /// order-0 coder would spend the fewest bits on. Costs five filter
+    /// passes and five histograms per row (several times the §12.8
+    /// heuristic, still far below the DEFLATE pass at the levels where
+    /// it pays), and usually compresses better than `Adaptive` on flat
+    /// artwork, screenshots and indexed images; on photographs the two
+    /// are close.
+    Entropy,
 }
 
 impl FilterStrategy {
@@ -503,15 +604,37 @@ impl FilterStrategy {
             FilterStrategy::Adaptive | FilterStrategy::Brute => {
                 choose_filter_heuristic(row, prev_row, bpp, scratch)
             }
+            FilterStrategy::Entropy => {
+                if scratch.len() >= row.len() {
+                    choose_filter_entropy(row, prev_row, bpp, scratch)
+                } else {
+                    choose_filter_entropy(row, prev_row, bpp, &mut vec![0u8; row.len()])
+                }
+            }
             FilterStrategy::Fixed(f) => f,
         }
     }
 
-    /// The candidate row-strategies a [`FilterStrategy::Brute`] search
-    /// compresses and compares: the §12.8 [`Adaptive`](FilterStrategy::Adaptive)
-    /// heuristic followed by each of the five [`Fixed`](FilterStrategy::Fixed)
-    /// filter types. A whole-image encoder filters the image once under
-    /// each, deflates the result, and keeps the smallest.
+    /// Every row-strategy the [`FilterStrategy::Brute`] search
+    /// compresses: [`Self::BRUTE_CANDIDATES`] and
+    /// [`Entropy`](FilterStrategy::Entropy).
+    pub(crate) const BRUTE_SEARCH: [FilterStrategy; 7] = [
+        FilterStrategy::Adaptive,
+        FilterStrategy::Fixed(FilterType::None),
+        FilterStrategy::Fixed(FilterType::Sub),
+        FilterStrategy::Fixed(FilterType::Up),
+        FilterStrategy::Fixed(FilterType::Average),
+        FilterStrategy::Fixed(FilterType::Paeth),
+        FilterStrategy::Entropy,
+    ];
+
+    /// The six classic candidate row-strategies of a
+    /// [`FilterStrategy::Brute`] search: the §12.8
+    /// [`Adaptive`](FilterStrategy::Adaptive) heuristic followed by each
+    /// of the five [`Fixed`](FilterStrategy::Fixed) filter types. A
+    /// whole-image encoder filters the image once under each (and under
+    /// [`Entropy`](FilterStrategy::Entropy)), deflates the result, and
+    /// keeps the smallest.
     pub const BRUTE_CANDIDATES: [FilterStrategy; 6] = [
         FilterStrategy::Adaptive,
         FilterStrategy::Fixed(FilterType::None),

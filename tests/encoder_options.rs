@@ -20,12 +20,13 @@ use oxideav_png::EncodeOptions;
 /// `adaptive` per W3C PNG3 §12.7), and `compression_level` (u32;
 /// 0 = encoder default `DEFAULT_COMPRESSION_LEVEL`, 1..=9 = explicit DEFLATE level)
 /// with its `level` / `compression` aliases, and `loop_count` (u32; the
-/// APNG `acTL` num_plays, 0 = forever), and `chunk_order` (string; the
-/// ancillary chunk order, empty = the encoder's own, #28).
+/// APNG `acTL` num_plays, 0 = forever), `chunk_order` (string; the
+/// ancillary chunk order, empty = the encoder's own, #28), and `effort`
+/// (u32; 0 = not set, 1..=9 = the speed / size dial).
 #[test]
 fn schema_advertises_interlace_bit_depth_and_filter() {
     let schema = <EncodeOptions as CodecOptionsStruct>::SCHEMA;
-    assert_eq!(schema.len(), 8);
+    assert_eq!(schema.len(), 9);
     assert_eq!(schema[0].name, "interlace");
     assert_eq!(schema[1].name, "bit_depth");
     assert_eq!(schema[2].name, "filter");
@@ -38,6 +39,8 @@ fn schema_advertises_interlace_bit_depth_and_filter() {
     // The APNG `acTL` num_plays, under the framework-wide name.
     assert_eq!(schema[6].name, "loop_count");
     assert_eq!(schema[7].name, "chunk_order");
+    // The speed / size dial over filter policy and level (1..=9).
+    assert_eq!(schema[8].name, "effort");
 }
 
 /// `level` and `compression` are pure aliases: they land in the same

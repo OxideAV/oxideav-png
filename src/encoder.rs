@@ -194,6 +194,36 @@ pub struct EncodeOptions {
     /// breaks W3C PNG3 §5.6 Table 7 is an encode error. Applies to the
     /// still and APNG encoders alike.
     pub chunk_order: Option<ChunkOrder>,
+    /// One speed / size dial, `1` (fastest) to `9` (smallest), that
+    /// sets the row-filter policy and the DEFLATE level together:
+    ///
+    /// | effort | row filter | DEFLATE level |
+    /// |---:|---|---:|
+    /// | 1 | `Sub` on every row | 1 |
+    /// | 2 | §12.8 heuristic ([`FilterStrategy::Adaptive`]) | 1 |
+    /// | 3 | §12.8 heuristic | 2 |
+    /// | 4 | entropy ([`FilterStrategy::Entropy`]) | 3 |
+    /// | 5 | entropy | 5 |
+    /// | 6 | entropy | 6 |
+    /// | 7 | entropy | 7 |
+    /// | 8 | entropy | 9 |
+    /// | 9 | [`FilterStrategy::Brute`]: seven whole-image trials | 9 |
+    ///
+    /// An indexed-colour image, or one written at a bit depth below 8,
+    /// gets filter `None` on every row at efforts 1 to 8: its bytes are
+    /// indices or packed samples, which the filters do not predict
+    /// (W3C PNG3 §12.7 recommends exactly that), and `None` is both the
+    /// fastest and, short of the effort-9 search, the smallest there.
+    ///
+    /// `None` (the default) leaves the two settings to
+    /// [`Self::filter_strategy`] and [`Self::compression_level`]
+    /// (`Adaptive`, level [`DEFAULT_COMPRESSION_LEVEL`]: effort 3's
+    /// bytes for a truecolour or greyscale image). With an effort set,
+    /// an explicit `compression_level` still decides the level and a
+    /// `filter_strategy` other than the default `Adaptive` still
+    /// decides the filter. A value outside `1..=9` is an encode error.
+    /// The emitted bytes never depend on the thread budget.
+    pub effort: Option<u8>,
 }
 
 /// The pre-contract name of [`EncodeOptions`].
@@ -263,6 +293,58 @@ impl EncodeOptions {
         self.chunk_order = chunk_order.into();
         self
     }
+
+    /// Set (or clear with `None`) the speed / size dial `1..=9`, see
+    /// [`Self::effort`].
+    pub fn with_effort(mut self, effort: impl Into<Option<u8>>) -> Self {
+        self.effort = effort.into();
+        self
+    }
+}
+
+/// The `(row filter, DEFLATE level)` an effort stands for on a
+/// truecolour or greyscale image at 8 or 16 bits (see
+/// [`EncodeOptions::effort`] for the table and the indexed / sub-byte
+/// rule).
+fn effort_preset(effort: u8) -> Result<(FilterStrategy, u8)> {
+    use crate::filter::FilterType;
+    Ok(match effort {
+        1 => (FilterStrategy::Fixed(FilterType::Sub), 1),
+        2 => (FilterStrategy::Adaptive, 1),
+        3 => (FilterStrategy::Adaptive, 2),
+        4 => (FilterStrategy::Entropy, 3),
+        5 => (FilterStrategy::Entropy, 5),
+        6 => (FilterStrategy::Entropy, 6),
+        7 => (FilterStrategy::Entropy, 7),
+        8 => (FilterStrategy::Entropy, 9),
+        9 => (FilterStrategy::Brute, 9),
+        other => {
+            return Err(Error::invalid(format!(
+                "PNG encoder: effort {other} out of range — efforts are 1..=9 \
+                 (1 fastest, 9 smallest); None leaves the filter and level settings alone"
+            )));
+        }
+    })
+}
+
+/// The row-filter policy for a pixel stream under `ihdr`:
+/// [`EncodeOptions::filter_strategy`] when it is not the default or no
+/// effort is set, else the effort's (see [`EncodeOptions::effort`]).
+fn resolve_filter_strategy(opts: &EncodeOptions, ihdr: &Ihdr) -> Result<FilterStrategy> {
+    use crate::filter::FilterType;
+    let Some(effort) = opts.effort else {
+        return Ok(opts.filter_strategy);
+    };
+    let (strategy, _) = effort_preset(effort)?;
+    if opts.filter_strategy != FilterStrategy::Adaptive {
+        return Ok(opts.filter_strategy);
+    }
+    let unpredictable = ihdr.colour_type == 3 || ihdr.bit_depth < 8;
+    Ok(if unpredictable && strategy != FilterStrategy::Brute {
+        FilterStrategy::Fixed(FilterType::None)
+    } else {
+        strategy
+    })
 }
 
 /// DEFLATE level the pixel stream uses when
@@ -271,10 +353,17 @@ impl EncodeOptions {
 pub const DEFAULT_COMPRESSION_LEVEL: u8 = 2;
 
 /// Resolve and validate the DEFLATE level for the pixel stream:
-/// `None` → [`DEFAULT_COMPRESSION_LEVEL`]; `Some(n)` must be `1..=9`.
+/// `Some(n)` must be `1..=9`; `None` → the level of
+/// [`EncodeOptions::effort`] when one is set, else
+/// [`DEFAULT_COMPRESSION_LEVEL`].
 fn resolve_compression_level(opts: &EncodeOptions) -> Result<u8> {
+    // An effort is checked even when an explicit level overrides it.
+    let effort_level = match opts.effort {
+        Some(effort) => Some(effort_preset(effort)?.1),
+        None => None,
+    };
     match opts.compression_level {
-        None => Ok(DEFAULT_COMPRESSION_LEVEL),
+        None => Ok(effort_level.unwrap_or(DEFAULT_COMPRESSION_LEVEL)),
         Some(level @ 1..=9) => Ok(level),
         Some(other) => Err(Error::invalid(format!(
             "PNG encoder: compression_level {other} out of range — \
@@ -657,6 +746,7 @@ fn write_pixel_stream(
     level: u8,
     threads: usize,
 ) -> Result<()> {
+    let strategy = resolve_filter_strategy(opts, ihdr)?;
     let mut chunk = ChunkWriter::begin(out, chunk_type);
     chunk.write(prefix);
     if opts.interlace {
@@ -670,7 +760,7 @@ fn write_pixel_stream(
             // the source `Gray8` / `Pal8` plane, pack its rows MSB-first
             // into the pass's own wire row_bytes, then filter +
             // concatenate exactly like the ≥8-bit Adam7 path.
-            deflate_encode_pixels_adam7_subbyte(image, ihdr, opts.filter_strategy, level, threads)?
+            deflate_encode_pixels_adam7_subbyte(image, ihdr, strategy, level, threads)?
         } else {
             let raw_pixels = flatten_and_normalise_pixels(image, ihdr, row_bytes)?;
             deflate_encode_pixels_adam7(
@@ -678,7 +768,7 @@ fn write_pixel_stream(
                 image.width as usize,
                 image.height as usize,
                 ihdr,
-                opts.filter_strategy,
+                strategy,
                 level,
                 threads,
             )?
@@ -687,14 +777,9 @@ fn write_pixel_stream(
     } else {
         let plane = RowPlane::new(image, ihdr, row_bytes)?;
         let bpp = ihdr.bpp_for_filter()?;
-        deflate_encode_rows(
-            &plane,
-            bpp,
-            opts.filter_strategy,
-            level,
-            threads,
-            &mut |b| chunk.write(b),
-        )?;
+        deflate_encode_rows(&plane, bpp, strategy, level, threads, &mut |b| {
+            chunk.write(b)
+        })?;
     }
     chunk.finish()
 }
@@ -1499,6 +1584,20 @@ fn filter_row_wire(strategy: FilterStrategy, row: &[u8], prev: &[u8], bpp: usize
                 (choose_filter_heuristic(row, prev, bpp, &mut []), false)
             }
         }
+        FilterStrategy::Entropy => {
+            if row == prev {
+                // Every data byte filters to zero: one symbol, no bits.
+                if row.iter().all(|&b| b == 0) {
+                    (FilterType::None, true)
+                } else {
+                    (FilterType::Up, true)
+                }
+            } else {
+                // The output slot doubles as the trial buffer.
+                let ft = crate::filter::choose_filter_entropy(row, prev, bpp, &mut wire[1..]);
+                (ft, false)
+            }
+        }
     };
     wire[0] = ft as u8;
     if zero {
@@ -1622,19 +1721,20 @@ pub(crate) fn deflate_encode_rows(
 
 /// Run the [`FilterStrategy::Brute`] search: `compress(cand)` yields the
 /// finished zlib stream for every `cand` in
-/// [`FilterStrategy::BRUTE_CANDIDATES`]; the smallest wins. The closure
+/// the brute search list (the six classic row-strategies and
+/// `Entropy`); the smallest wins. The closure
 /// owns the filtering + compression so the row-streaming, interlaced
 /// and sub-byte paths each plug in their own stream builder.
 fn brute_compress(mut compress: impl FnMut(FilterStrategy) -> Result<Vec<u8>>) -> Result<Vec<u8>> {
     let mut best: Option<Vec<u8>> = None;
-    for &cand in FilterStrategy::BRUTE_CANDIDATES.iter() {
+    for &cand in FilterStrategy::BRUTE_SEARCH.iter() {
         let compressed = compress(cand)?;
         let smaller = best.as_ref().is_none_or(|b| compressed.len() < b.len());
         if smaller {
             best = Some(compressed);
         }
     }
-    // BRUTE_CANDIDATES is non-empty, so `best` is always populated.
+    // The candidate list is non-empty, so `best` is always populated.
     best.ok_or_else(|| Error::other("PNG encoder: brute filter search produced no candidate"))
 }
 

@@ -114,6 +114,7 @@ impl Plan {
         //   [4] filter-strategy selector
         //   [5] bit-depth selector
         //   [6] pixel seed
+        //   [7] effort selector (optional byte)
         if data.len() < 7 {
             return None;
         }
@@ -160,7 +161,13 @@ impl Plan {
             .with_metadata(metadata)
             .with_bit_depth(bit_depth)
             .with_filter_strategy(filter_strategy)
-            .with_compression_level(compression_level);
+            .with_compression_level(compression_level)
+            // 0 => None; 1..=9 the dial; 10..=11 the out-of-range
+            // rejection.
+            .with_effort(match data.get(7).map_or(0, |b| b % 12) {
+                0 => None,
+                n => Some(n),
+            });
 
         Some((image, opts))
     }
@@ -183,13 +190,14 @@ fn pixel_format_for(sel: u8) -> PngPixelFormat {
 }
 
 /// Map a fuzz byte to a filter strategy: Adaptive, all five Fixed
-/// variants, plus the whole-image exhaustive `Brute` search, uniform
-/// over a 0..=6 modulo. `Brute` funnels the budget into the
+/// variants, the whole-image exhaustive `Brute` search and the
+/// per-row `Entropy` selection, uniform over a 0..=7 modulo. `Brute` funnels the budget into the
 /// six-candidate compare loop (`brute_compress`) and, on the sub-byte
 /// paths, the pack-once / filter-six split — code the Adaptive/Fixed
 /// arms never exercise.
 fn filter_strategy_for(sel: u8) -> FilterStrategy {
-    match sel % 7 {
+    match sel % 8 {
+        7 => FilterStrategy::Entropy,
         0 => FilterStrategy::Adaptive,
         1 => FilterStrategy::Fixed(FilterType::None),
         2 => FilterStrategy::Fixed(FilterType::Sub),

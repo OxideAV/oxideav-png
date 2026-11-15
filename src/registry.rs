@@ -545,6 +545,8 @@ impl CodecOptionsStruct for EncodeOptions {
                    policies, deflates every candidate, and keeps the \
                    smallest — the §12.7 \"find what compresses best\" search \
                    (slowest; best compression). \
+                   `entropy` picks each row's filter by the entropy of its \
+                   filtered bytes (smaller than `adaptive` on most content). \
                    An empty value is treated as `adaptive`.",
         },
         OptionField {
@@ -593,6 +595,18 @@ impl CodecOptionsStruct for EncodeOptions {
                    §5.6 Table 7 is an encode error. Empty (the default) = \
                    the encoder's own order.",
         },
+        OptionField {
+            name: "effort",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(0),
+            help: "Speed / size dial 1..=9 that sets the row filter and the \
+                   DEFLATE level together: 1 = `Sub` + level 1 (fastest), \
+                   3 = the default bytes, 4..=8 = entropy-chosen filters at \
+                   levels 3 / 5 / 6 / 7 / 9, 9 = the whole-image `brute` \
+                   search at level 9 (smallest). Indexed and sub-8-bit \
+                   images use filter `none` below 9. An explicit `level` or \
+                   `filter` still wins. 0 (the default) = not set.",
+        },
     ];
     fn apply(&mut self, key: &str, v: &OptionValue) -> oxideav_core::Result<()> {
         use crate::filter::{FilterStrategy, FilterType};
@@ -635,6 +649,7 @@ impl CodecOptionsStruct for EncodeOptions {
                 // mixed-case prose.
                 self.filter_strategy = match raw.to_ascii_lowercase().as_str() {
                     "" | "adaptive" => FilterStrategy::Adaptive,
+                    "entropy" => FilterStrategy::Entropy,
                     "none" => FilterStrategy::Fixed(FilterType::None),
                     "sub" => FilterStrategy::Fixed(FilterType::Sub),
                     "up" => FilterStrategy::Fixed(FilterType::Up),
@@ -644,12 +659,22 @@ impl CodecOptionsStruct for EncodeOptions {
                     other => {
                         return Err(oxideav_core::Error::invalid(format!(
                             "PNG encoder: option `filter` got {other:?}; \
-                             expected one of adaptive / none / sub / up / average / paeth / brute"
+                             expected one of adaptive / entropy / none / sub / up / average / \
+                             paeth / brute"
                         )));
                     }
                 };
             }
             "loop_count" => self.num_plays = v.as_u32()?,
+            "effort" => {
+                let raw = v.as_u32()?;
+                // `0` = not set; the range is checked at encode time.
+                self.effort = if raw == 0 {
+                    None
+                } else {
+                    Some(u8::try_from(raw).unwrap_or(u8::MAX))
+                };
+            }
             _ => unreachable!("guarded by SCHEMA"),
         }
         Ok(())

@@ -18,6 +18,11 @@
 //!   bundles, each emitted stream decoded back and compared with the
 //!   source, plus the filter-selection and row-filter stages alone.
 //!
+//! `PNG_BENCH_EFFORTS=1,3,8` replaces the encode bundles with those
+//! `EncodeOptions::effort` values, `PNG_BENCH_GRID=1` with every DEFLATE
+//! level under four row-filter policies, and `PNG_BENCH_OUT=dir` writes
+//! each encoded file there (for size comparisons with other tools).
+//!
 //! `PNG_BENCH_REPS=n` sets the repetition count (default 5); the
 //! **median** is reported, because the machine is rarely idle.
 //! `PNG_BENCH_THREADS=1,8` adds thread budgets to the encode table and
@@ -181,6 +186,10 @@ fn bench_encode(name: &str, image: &PngImage, bundles: &[(String, EncodeOptions)
             decode(&bytes).unwrap() == *image,
             "{name} {label}: round trip"
         );
+        if let Ok(dir) = std::env::var("PNG_BENCH_OUT") {
+            let file = format!("{dir}/{name}-{}.png", label.replace([' ', ','], "_"));
+            std::fs::write(file, &bytes).expect("write PNG_BENCH_OUT file");
+        }
         println!(
             "| {name} | {label} | {t:.1} | {:.1} | {} | {:.2} % |",
             mp / t * 1e3,
@@ -286,9 +295,37 @@ fn main() {
     }
 }
 
-/// The option bundles of the encode table.
+/// The option bundles of the encode table. `PNG_BENCH_GRID=1` replaces
+/// them with every DEFLATE level under the two per-row selections and
+/// two fixed filters (the measurement behind the effort ladder).
 fn encode_bundles() -> Vec<(String, EncodeOptions)> {
     let fixed = |f| FilterStrategy::Fixed(f);
+    if let Ok(list) = std::env::var("PNG_BENCH_EFFORTS") {
+        return list
+            .split(',')
+            .filter_map(|e| e.trim().parse::<u8>().ok())
+            .map(|e| (format!("effort {e}"), EncodeOptions::new().with_effort(e)))
+            .collect();
+    }
+    if std::env::var("PNG_BENCH_GRID").is_ok() {
+        let mut grid = Vec::new();
+        for level in 1..=9u8 {
+            for (name, strategy) in [
+                ("None", fixed(FilterType::None)),
+                ("Sub", fixed(FilterType::Sub)),
+                ("adaptive", FilterStrategy::Adaptive),
+                ("entropy", FilterStrategy::Entropy),
+            ] {
+                grid.push((
+                    format!("level {level}, {name}"),
+                    EncodeOptions::new()
+                        .with_level(level)
+                        .with_filter_strategy(strategy),
+                ));
+            }
+        }
+        return grid;
+    }
     vec![
         (
             "level 1, filter None".into(),
@@ -320,6 +357,26 @@ fn encode_bundles() -> Vec<(String, EncodeOptions)> {
         (
             "level 6, adaptive".into(),
             EncodeOptions::new().with_level(6),
+        ),
+        (
+            "level 2, entropy".into(),
+            EncodeOptions::new().with_filter_strategy(FilterStrategy::Entropy),
+        ),
+        (
+            "level 6, entropy".into(),
+            EncodeOptions::new()
+                .with_level(6)
+                .with_filter_strategy(FilterStrategy::Entropy),
+        ),
+        (
+            "level 9, adaptive".into(),
+            EncodeOptions::new().with_level(9),
+        ),
+        (
+            "level 9, entropy".into(),
+            EncodeOptions::new()
+                .with_level(9)
+                .with_filter_strategy(FilterStrategy::Entropy),
         ),
     ]
 }
