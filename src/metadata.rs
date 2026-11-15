@@ -2204,6 +2204,28 @@ impl Iccp {
     /// defined in this specification is method 0").
     pub const COMPRESSION_METHOD_DEFLATE: u8 = 0;
 
+    /// The profile's data colour space signature — the four bytes at
+    /// offset 16 of the ICC header (`b"RGB "`, `b"GRAY"`, `b"CMYK"`, …)
+    /// — when the bytes carry an ICC header at all (at least 128 bytes
+    /// with the `acsp` file signature at offset 36). `None` for
+    /// anything else; the profile is otherwise opaque to this crate.
+    pub fn data_colour_space(&self) -> Option<[u8; 4]> {
+        icc_data_colour_space(&self.profile)
+    }
+
+    /// Whether the profile's colour space is the one W3C PNG3
+    /// §11.3.2.3 requires for an image of `colour_type`: "an RGB color
+    /// space for color images (color types 2, 3, and 6), or a greyscale
+    /// color space for greyscale images (color types 0 and 4)". `None`
+    /// when the profile has no readable header (see
+    /// [`Self::data_colour_space`]) or `colour_type` is not one of the
+    /// five. A strict decode ([`crate::DecodeOptions::strict`]) rejects
+    /// a file for which this is `Some(false)`; a lenient one carries
+    /// the profile as it is.
+    pub fn conforms_to_colour_type(&self, colour_type: u8) -> Option<bool> {
+        icc_conforms(&self.profile, colour_type)
+    }
+
     /// Parse an `iCCP` chunk payload: profile-name bytes, `NUL`
     /// separator, compression-method byte, then zlib-compressed
     /// profile. Validates the name against the shared keyword
@@ -2262,6 +2284,24 @@ impl Iccp {
     /// corrupt the output PNG.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         collect_payload(|sink| write_iccp_payload(&self.name, &self.profile, sink))
+    }
+}
+
+/// [`Iccp::data_colour_space`] over raw profile bytes.
+pub(crate) fn icc_data_colour_space(profile: &[u8]) -> Option<[u8; 4]> {
+    if profile.len() < 128 || profile.get(36..40) != Some(b"acsp") {
+        return None;
+    }
+    profile.get(16..20)?.try_into().ok()
+}
+
+/// [`Iccp::conforms_to_colour_type`] over raw profile bytes.
+pub(crate) fn icc_conforms(profile: &[u8], colour_type: u8) -> Option<bool> {
+    let space = icc_data_colour_space(profile)?;
+    match colour_type {
+        2 | 3 | 6 => Some(&space == b"RGB "),
+        0 | 4 => Some(&space == b"GRAY"),
+        _ => None,
     }
 }
 
@@ -2867,6 +2907,19 @@ impl PngMetadata {
     /// Replace the `unknowns` list.
     pub fn with_unknowns(mut self, unknowns: Vec<UnknownChunk>) -> Self {
         self.unknowns = unknowns;
+        self
+    }
+
+    /// Drop the unrecognised chunks whose safe-to-copy bit is clear,
+    /// keeping the rest: what a program that changed the pixels (or any
+    /// critical chunk) since [`crate::parse_metadata`] read these
+    /// records must do before writing them back (W3C PNG3 §14.2: a
+    /// chunk whose safe-to-copy bit is 0 "depends on the image data",
+    /// and after "any changes to critical chunks … unrecognized unsafe
+    /// chunks shall not be copied to the output PNG datastream"). A
+    /// re-encode of unchanged pixels may keep them all.
+    pub fn without_unsafe_to_copy(mut self) -> Self {
+        self.unknowns.retain(UnknownChunk::is_safe_to_copy);
         self
     }
 

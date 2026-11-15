@@ -203,6 +203,26 @@ pub(crate) fn extract(chunks: &[ChunkRef<'_>], strict: bool, inflate: bool) -> R
         }
     }
 
+    // §11.3.2.3: the profile "shall be an RGB color space for color
+    // images (color types 2, 3, and 6), or a greyscale color space for
+    // greyscale images (color types 0 and 4)". Strict mode holds the
+    // file to it; otherwise the profile is carried as it is (files that
+    // tag a greyscale image with an RGB profile are common, and the
+    // profile still says how the samples were meant).
+    if strict
+        && let Some(profile) = &iccp
+        && let Some(ihdr) = chunks.iter().find(|c| c.is_type(b"IHDR"))
+        && let Some(&colour_type) = ihdr.data.get(9)
+        && profile.conforms_to_colour_type(colour_type) == Some(false)
+    {
+        let space = profile.data_colour_space().unwrap_or(*b"????");
+        return Err(Error::invalid(format!(
+            "PNG iCCP: profile colour space {:?} on a colour type {colour_type} image \
+             (W3C PNG3 §11.3.2.3: RGB for colour types 2 / 3 / 6, greyscale for 0 / 4)",
+            String::from_utf8_lossy(&space)
+        )));
+    }
+
     // §4.3 Table 1 precedence.
     info.color = if let Some(ci) = &cicp {
         ColorInfo::new(
