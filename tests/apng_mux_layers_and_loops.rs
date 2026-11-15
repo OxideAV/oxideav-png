@@ -248,7 +248,10 @@ fn set_metadata_loop_count_sets_num_plays_and_the_option_wins() {
         )
         .unwrap();
     assert!(m.carries_metadata_key("loop_count"));
-    assert!(!m.carries_metadata_key("title"));
+    // Text pairs are carried as text chunks (tests/container_metadata.rs);
+    // a key that is not a valid keyword is not.
+    assert!(m.carries_metadata_key("title"));
+    assert!(!m.carries_metadata_key("two  spaces"));
 }
 
 #[test]

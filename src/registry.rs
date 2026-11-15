@@ -677,6 +677,7 @@ pub fn make_decoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn De
         eof: false,
         canvas_size,
         canvas: None,
+        animation_side: None,
     }))
 }
 
@@ -700,6 +701,11 @@ pub struct PngDecoder {
     canvas_size: Option<(u32, u32)>,
     /// The output buffer of the animation being decoded.
     canvas: Option<crate::decoder::ApngCanvas>,
+    /// What the first frame packet of the animation says about the
+    /// whole file — its colour, metadata and format-native records —
+    /// stamped on every later frame (the container puts the file's
+    /// ancillary chunks in the first frame packet only).
+    animation_side: Option<(ColorInfo, Metadata, Vec<MetadataBlob>)>,
 }
 
 impl PngDecoder {
@@ -743,8 +749,15 @@ impl PngDecoder {
         let shown = canvas.render(&fctl, &image)?;
         let stride = shown.len() / height.max(1) as usize;
         let mut whole = PngImage::packed(width, height, canvas.format(), stride, shown)?;
-        whole.color = image.color;
-        whole.metadata = image.metadata;
+        if fctl.sequence_number == 0 {
+            self.animation_side = Some((image.color, image.metadata.clone(), native.clone()));
+        }
+        let (color, metadata, native) = match &self.animation_side {
+            Some(side) if fctl.sequence_number != 0 => side.clone(),
+            _ => (image.color, image.metadata, native),
+        };
+        whole.color = color;
+        whole.metadata = metadata;
         whole.palette = image.palette;
         whole.transparency = image.transparency;
         Ok(png_image_into_video_frame(whole, pkt.pts, Some(native)))
@@ -780,6 +793,7 @@ impl Decoder for PngDecoder {
     fn flush(&mut self) -> oxideav_core::Result<()> {
         self.eof = true;
         self.canvas = None;
+        self.animation_side = None;
         Ok(())
     }
 }

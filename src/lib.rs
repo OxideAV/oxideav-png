@@ -164,6 +164,8 @@ pub mod registry;
 mod sideinfo;
 pub mod srgb;
 mod srgb_tables;
+#[cfg(feature = "registry")]
+mod textmeta;
 mod zlibvec;
 mod zstream;
 

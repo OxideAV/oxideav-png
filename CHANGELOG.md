@@ -31,8 +31,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `transparency` (the `tRNS` key) and `metadata.gamma` as `png-trns` /
   `png-gama` records.
 
+- Container: `Demuxer::metadata` reports every `tEXt` / `zTXt` / `iTXt`
+  chunk (other than the XMP packet) as a `(key, value)` pair, the
+  predefined keywords under the framework's names (`Title` → `title`,
+  `Author` → `artist`, `Creation Time` → `date`, …); the muxer's
+  `set_metadata` writes pairs as text chunks (`tEXt`, `zTXt` when long,
+  `iTXt` when not Latin-1) and reconciles them with text the packet
+  already carries, so a remux or transcode writes each text once.
+  `carries_metadata_key` answers for every valid keyword.
+
 ### Fixed
 
+- `demux → mux` of an animated file dropped every ancillary chunk
+  (colour chunks, ICC profile, Exif, text, `pHYs`, unknown chunks). The
+  first frame packet now carries the file's chunks and the muxer writes
+  them back in place.
+- Registry decoder: frames 1… of an animation carried no colour signal
+  and no blob records; they now carry the file's, like frame 0.
 - A greyscale / truecolour file's `tRNS` key no longer disappears when
   the file is decoded and re-encoded through the registry codec.
 

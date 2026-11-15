@@ -135,6 +135,31 @@ the authority:
 
 Other blob kinds are dropped.
 
+Text is also the container's string metadata. `Demuxer::metadata`
+reports every `tEXt` / `zTXt` / `iTXt` chunk other than the XMP packet
+as one `(key, value)` pair, in file order (after `loop_count` for an
+animation), and the muxer writes the pairs handed to
+`Muxer::set_metadata` as text chunks ahead of the image data: `tEXt`
+for a Latin-1 value, `zTXt` from 1024 bytes, `iTXt` otherwise. The
+predefined keywords use the framework's names — `Title` ↔ `title`,
+`Author` ↔ `artist`, `Description` ↔ `description`, `Copyright` ↔
+`copyright`, `Creation Time` ↔ `date`, `Software` ↔ `software`,
+`Disclaimer` ↔ `disclaimer`, `Warning` ↔ `warning`, `Source` ↔
+`source`, `Comment` ↔ `comment` — and any other keyword is its own key
+(`carries_metadata_key` is `true` for every key that is a valid
+keyword). A key the pairs name is decided by the pairs: a text chunk
+the packet already carries under it stays, untouched, when a pair
+repeats its value, and is removed otherwise; keys the pairs do not
+name are left alone. So `mux.set_metadata(demux.metadata())` on a
+remux, or after a decode → encode whose frames carried the `png-text`
+records, writes each text once.
+
+An animated file keeps its ancillary chunks through `demux → mux`: the
+first frame packet carries them (in file order, on their side of the
+image data), the muxer writes them back around the frames, and the
+decoder stamps the records they give — colour signal, `icc` / `exif` /
+`xmp`, the `png-*` kinds — on every frame of the animation.
+
 ## Supported layouts
 
 Decode — IHDR colour type / bit depth → native `PixelFormat`:

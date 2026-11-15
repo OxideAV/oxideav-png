@@ -13,6 +13,18 @@
 //! and hands out the whole canvas as displayed, and the muxer writes the
 //! frame back at its offset with its ops.
 //!
+//! The first frame packet of an animated file also carries the file's
+//! other chunks (colour, text, physical size, …; in file order, on the
+//! side of the image data they were found on): the muxer writes them
+//! back around the frames, so `mux(demux(file))` keeps them, and the
+//! decoder stamps the records they give on every frame.
+//!
+//! Text: each `tEXt` / `zTXt` / `iTXt` chunk other than the XMP packet
+//! is one `(key, value)` pair of `Demuxer::metadata`, in file order,
+//! and the muxer writes the pairs handed to `Muxer::set_metadata` as
+//! text chunks (see `crate::textmeta` for the key vocabulary and how
+//! pairs meet text chunks a packet already carries).
+//!
 //! Loop count: the demuxer reports the `acTL` `num_plays` as the
 //! `("loop_count", n)` metadata pair; the muxer writes `num_plays` from
 //! the stream's `loop_count` option, else from a `loop_count` pair handed
@@ -190,6 +202,8 @@ fn open_demuxer(
     if let Some(lc) = loop_count {
         metadata.push(("loop_count".into(), lc.to_string()));
     }
+    // The text chunks as string metadata (see `crate::textmeta`).
+    metadata.extend(crate::textmeta::pairs_from_chunks(&chunks));
 
     Ok(Box::new(PngDemuxer {
         stream,
@@ -337,6 +351,27 @@ fn build_apng_packets(
     let canvas_width = u32::from_be_bytes([ihdr[0], ihdr[1], ihdr[2], ihdr[3]]);
     let canvas_height = u32::from_be_bytes([ihdr[4], ihdr[5], ihdr[6], ihdr[7]]);
 
+    // The file's other chunks ride in the first frame packet, in file
+    // order (the palette and transparency chunks among them, so nothing
+    // moves across `PLTE`) and on the side of the image data they were
+    // found on, so that a remux (and the decoder, which reads the first
+    // packet's records for every frame) keeps them. Later packets carry
+    // the palette and transparency only.
+    let first_idat = chunks.iter().position(|c| c.is_type(b"IDAT"));
+    let carried = |c: &&ChunkRef<'_>| {
+        !matches!(
+            &c.chunk_type,
+            b"IHDR" | b"IEND" | b"IDAT" | b"acTL" | b"fcTL" | b"fdAT"
+        )
+    };
+    let split = first_idat.unwrap_or(chunks.len());
+    let before: Vec<&ChunkRef<'_>> = chunks[..split].iter().filter(carried).collect();
+    let after: Vec<&ChunkRef<'_>> = chunks[split..].iter().filter(carried).collect();
+    let extra = FileChunks {
+        before: &before,
+        after: &after,
+    };
+
     let mut packets: Vec<Packet> = Vec::new();
     let mut pts: i64 = 0;
 
@@ -360,6 +395,7 @@ fn build_apng_packets(
                         time_base,
                         pts,
                         &fctl,
+                        packets.is_empty().then_some(&extra),
                     )?;
                     let delay = fctl_ticks(&fctl, time_base);
                     pts += delay;
@@ -397,7 +433,16 @@ fn build_apng_packets(
     // subsequent fcTL/fdAT is contiguous-ascending with no gaps/duplicates.
     crate::apng::validate_apng_sequence(&seq_stream)?;
     if let Some(fctl) = pending_fctl.take() {
-        let pkt = build_still_png_packet(ihdr, plte, trns, &pending_data, time_base, pts, &fctl)?;
+        let pkt = build_still_png_packet(
+            ihdr,
+            plte,
+            trns,
+            &pending_data,
+            time_base,
+            pts,
+            &fctl,
+            packets.is_empty().then_some(&extra),
+        )?;
         let delay = fctl_ticks(&fctl, time_base);
         let mut p = pkt;
         p.duration = Some(delay);
@@ -407,12 +452,23 @@ fn build_apng_packets(
     Ok(packets)
 }
 
+/// The chunks of an animated file other than its header, image data
+/// and animation control, in file order, split at the first `IDAT`.
+struct FileChunks<'a, 'b> {
+    before: &'a [&'a ChunkRef<'b>],
+    after: &'a [&'a ChunkRef<'b>],
+}
+
 /// Build a standalone PNG file for a single animation frame. The file-level
 /// IHDR says `width x height` but the frame is actually `fctl.width x
 /// fctl.height` — we rewrite IHDR to the frame-local size so the decoder
 /// treats it as a plain static PNG with the right bounds. The frame's
 /// `fcTL` (offset, dispose / blend ops) is carried as a chunk of the
-/// packet.
+/// packet. `extra`, for the first frame's packet, is the file's own
+/// chunks in file order (`PLTE` / `tRNS` included, in place of `plte` /
+/// `trns`): the ones found before the image data go before it, the
+/// ones found after it go after it.
+#[allow(clippy::too_many_arguments)]
 fn build_still_png_packet(
     ihdr_bytes: &[u8],
     plte: Option<&[u8]>,
@@ -421,6 +477,7 @@ fn build_still_png_packet(
     time_base: TimeBase,
     pts: i64,
     fctl: &crate::apng::Fctl,
+    extra: Option<&FileChunks<'_, '_>>,
 ) -> Result<Packet> {
     // Rewrite IHDR width/height to the frame-local size.
     let mut patched_ihdr = [0u8; 13];
@@ -437,13 +494,25 @@ fn build_still_png_packet(
     // writes back. Without an `acTL` a PNG decoder reads the packet as a
     // still and skips the chunk.
     write_chunk(&mut out, b"fcTL", &fctl.to_bytes());
-    if let Some(p) = plte {
-        write_chunk(&mut out, b"PLTE", p);
-    }
-    if let Some(t) = trns {
-        write_chunk(&mut out, b"tRNS", t);
+    match extra {
+        Some(e) => {
+            for c in e.before {
+                write_chunk(&mut out, &c.chunk_type, c.data);
+            }
+        }
+        None => {
+            if let Some(p) = plte {
+                write_chunk(&mut out, b"PLTE", p);
+            }
+            if let Some(t) = trns {
+                write_chunk(&mut out, b"tRNS", t);
+            }
+        }
     }
     write_chunk(&mut out, b"IDAT", frame_idat);
+    for c in extra.iter().flat_map(|e| e.after) {
+        write_chunk(&mut out, &c.chunk_type, c.data);
+    }
     write_chunk(&mut out, b"IEND", &[]);
 
     let mut pkt = Packet::new(0, time_base, out);
@@ -518,6 +587,7 @@ fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<Box<
         trailer_written: false,
         loop_count,
         metadata_loop_count: None,
+        text_pairs: Vec::new(),
     }))
 }
 
@@ -551,6 +621,9 @@ struct PngMuxer {
     loop_count: Option<u32>,
     /// `loop_count` from [`Muxer::set_metadata`].
     metadata_loop_count: Option<u32>,
+    /// The other pairs from [`Muxer::set_metadata`] that PNG can store
+    /// as text chunks.
+    text_pairs: Vec<(String, String)>,
 }
 
 impl PngMuxer {
@@ -590,36 +663,52 @@ impl Muxer for PngMuxer {
             let chunks = parse_all_chunks(&self.frames[0].data)?;
             chunks.iter().any(|c| c.is_type(b"fcTL")) && !chunks.iter().any(|c| c.is_type(b"acTL"))
         };
-        if frame_packets {
-            let merged = merge_still_packets_to_apng(&self.frames, &self.stream, self.num_plays())?;
-            self.output.write_all(&merged)?;
+        let file = if frame_packets {
+            merge_still_packets_to_apng(&self.frames, &self.stream, self.num_plays())?
         } else {
             // One packet: already a whole PNG / APNG file.
-            let file = match self.num_plays() {
+            match self.num_plays() {
                 Some(plays) => with_num_plays(&self.frames[0].data, plays)?,
                 None => self.frames[0].data.clone(),
-            };
+            }
+        };
+        if self.text_pairs.is_empty() {
             self.output.write_all(&file)?;
+        } else {
+            let with_text = crate::textmeta::apply_pairs(&file, &self.text_pairs)?;
+            self.output.write_all(&with_text)?;
         }
         self.output.flush()?;
         self.trailer_written = true;
         Ok(())
     }
 
-    /// Stores `loop_count` (the APNG `acTL` `num_plays`); PNG has no
-    /// field for any other pair this hook carries.
+    /// Stores `loop_count` (the APNG `acTL` `num_plays`) and every
+    /// pair whose key PNG can spell as a text keyword — the
+    /// predefined keywords under the framework's names (`title`,
+    /// `artist`, `description`, `copyright`, `date`, `software`,
+    /// `disclaimer`, `warning`, `source`, `comment`), any other valid
+    /// keyword under itself. The pairs become `tEXt` chunks (`zTXt`
+    /// when long, `iTXt` when the value is not Latin-1) ahead of the
+    /// image data; a text chunk the packet already carries under a
+    /// named key stays when a pair repeats its value and is removed
+    /// otherwise, so handing over the pairs the demuxer reported
+    /// changes nothing.
     fn set_metadata(&mut self, metadata: &[(String, String)]) -> Result<()> {
         self.metadata_loop_count = None;
+        self.text_pairs.clear();
         for (k, v) in metadata {
             if k == "loop_count" {
                 self.metadata_loop_count = Some(parse_loop_count(v)?);
+            } else if crate::textmeta::carries_key(k) {
+                self.text_pairs.push((k.clone(), v.clone()));
             }
         }
         Ok(())
     }
 
     fn carries_metadata_key(&self, key: &str) -> bool {
-        key == "loop_count"
+        key == "loop_count" || crate::textmeta::carries_key(key)
     }
 }
 
@@ -712,13 +801,24 @@ fn merge_still_packets_to_apng(
     // Parse each packet's IHDR + IDATs.
     struct ParsedStill {
         ihdr: Ihdr,
-        plte: Option<Vec<u8>>,
-        trns: Option<Vec<u8>>,
         idat: Vec<u8>,
         delay: (u16, u16),
         fctl: Option<Fctl>,
     }
+    // The first packet's other chunks in its order, as `(type, body,
+    // after IDAT)`: the palette and transparency, and what the file
+    // says about itself (colour, text, physical size, …).
+    let mut file_chunks: Vec<([u8; 4], &[u8], bool)> = Vec::new();
     let mut stills: Vec<ParsedStill> = Vec::new();
+    let first_chunks = parse_all_chunks(&packets[0].data)?;
+    let mut seen_idat = false;
+    for c in &first_chunks {
+        match &c.chunk_type {
+            b"IDAT" => seen_idat = true,
+            b"IHDR" | b"IEND" | b"acTL" | b"fcTL" | b"fdAT" => {}
+            ty => file_chunks.push((*ty, c.data, seen_idat)),
+        }
+    }
     for p in packets {
         let chunks = parse_all_chunks(&p.data)?;
         let ihdr = Ihdr::parse(
@@ -728,14 +828,6 @@ fn merge_still_packets_to_apng(
                 .ok_or_else(|| Error::invalid("PNG muxer: packet missing IHDR"))?
                 .data,
         )?;
-        let plte = chunks
-            .iter()
-            .find(|c| c.is_type(b"PLTE"))
-            .map(|c| c.data.to_vec());
-        let trns = chunks
-            .iter()
-            .find(|c| c.is_type(b"tRNS"))
-            .map(|c| c.data.to_vec());
         let fctl = match chunks.iter().find(|c| c.is_type(b"fcTL")) {
             Some(c) => Some(Fctl::parse(c.data)?),
             None => None,
@@ -753,8 +845,6 @@ fn merge_still_packets_to_apng(
         };
         stills.push(ParsedStill {
             ihdr,
-            plte,
-            trns,
             idat,
             delay: fctl_delay(p.duration.unwrap_or(1), tb),
             fctl,
@@ -792,10 +882,6 @@ fn merge_still_packets_to_apng(
             )));
         }
     }
-    // Pull PLTE/tRNS from first still if present.
-    let plte = stills[0].plte.clone();
-    let trns = stills[0].trns.clone();
-
     let fctls: Vec<Fctl> = stills
         .iter()
         .map(|s| {
@@ -824,11 +910,10 @@ fn merge_still_packets_to_apng(
     out.extend_from_slice(&PNG_MAGIC);
     write_chunk(&mut out, b"IHDR", &canvas_ihdr.to_bytes());
     write_chunk(&mut out, b"acTL", &actl.to_bytes());
-    if let Some(p) = plte.as_deref() {
-        write_chunk(&mut out, b"PLTE", p);
-    }
-    if let Some(t) = trns.as_deref() {
-        write_chunk(&mut out, b"tRNS", t);
+    // The first packet's chunks from before its image data, in its
+    // order (`PLTE` / `tRNS` among them).
+    for (ty, data, _) in file_chunks.iter().filter(|(_, _, after)| !after) {
+        write_chunk(&mut out, ty, data);
     }
     if !first_is_default {
         write_chunk(&mut out, b"IDAT", &zero_image_idat(&canvas_ihdr)?);
@@ -847,6 +932,9 @@ fn merge_still_packets_to_apng(
             write_chunk(&mut out, b"fdAT", &payload);
             seq += 1;
         }
+    }
+    for (ty, data, _) in file_chunks.iter().filter(|(_, _, after)| *after) {
+        write_chunk(&mut out, ty, data);
     }
     write_chunk(&mut out, b"IEND", &[]);
     Ok(out)
