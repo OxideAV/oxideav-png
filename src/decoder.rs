@@ -1274,6 +1274,14 @@ pub(crate) fn decode_packed8<const N: usize>(
     let chunks = parse_all_chunks(buf)?;
     let p = prepare_decode(&chunks, opts)?;
     let ihdr = p.ihdr;
+    // The output is `N` bytes per pixel whatever the file's layout (a
+    // greyscale or palette file is a quarter of its RGBA form): hold
+    // that size to the limits too, before it is allocated.
+    opts.check(
+        ihdr.width,
+        ihdr.height,
+        u64::from(ihdr.width) * u64::from(ihdr.height) * N as u64,
+    )?;
     if ihdr.interlace != 0 {
         let frame_pixels = inflate_image_pixels(&p.idat, &ihdr, "PNG: IDAT", "IHDR")?;
         let img = build_png_image(&ihdr, frame_pixels, p.plte, p.trns)?;

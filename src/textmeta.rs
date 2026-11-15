@@ -67,14 +67,26 @@ pub(crate) fn keyword_of_key(key: &str) -> Option<String> {
         .then(|| keyword.to_string())
 }
 
-/// The `(key, value)` pair of a text chunk; `None` for any other chunk,
-/// the XMP `iTXt`, and a text chunk that does not parse.
-fn pair_of(c: &ChunkRef<'_>) -> Option<(String, String)> {
+/// Text bytes the pairs of one file may hold in all (a text chunk that
+/// would take the total past this is not reported as a pair; it is
+/// still in the packet, and in the stream's blob records). Bounds what
+/// opening a file with many compressed text chunks can make the
+/// demuxer hold: each chunk alone may inflate to 64 MiB.
+const MAX_PAIR_BYTES: u64 = 16 << 20;
+
+/// The `(key, value)` pair of a text chunk whose text is at most
+/// `budget` bytes; `None` for any other chunk, the XMP `iTXt`, a text
+/// chunk that does not parse, and one over the budget (a compressed
+/// text is not inflated past it; an uncompressed one is no larger than
+/// its chunk).
+fn pair_of(c: &ChunkRef<'_>, budget: u64) -> Option<(String, String)> {
     let (keyword, text) = match &c.chunk_type {
         b"tEXt" => Text::parse(c.data).map(|t| (t.keyword, t.text)).ok()?,
-        b"zTXt" => Ztxt::parse(c.data).map(|t| (t.keyword, t.text)).ok()?,
+        b"zTXt" => Ztxt::parse_capped(c.data, budget)
+            .map(|t| (t.keyword, t.text))
+            .ok()?,
         b"iTXt" => {
-            let t = Itxt::parse(c.data).ok()?;
+            let t = Itxt::parse_capped(c.data, budget).ok()?;
             if t.keyword == XMP_KEYWORD {
                 return None;
             }
@@ -82,12 +94,21 @@ fn pair_of(c: &ChunkRef<'_>) -> Option<(String, String)> {
         }
         _ => return None,
     };
-    Some((key_of_keyword(&keyword), text))
+    (text.len() as u64 <= budget).then(|| (key_of_keyword(&keyword), text))
 }
 
-/// Every text chunk of a chunk list as a metadata pair, in file order.
+/// The text chunks of a chunk list as metadata pairs, in file order,
+/// up to [`MAX_PAIR_BYTES`] of text in all.
 pub(crate) fn pairs_from_chunks(chunks: &[ChunkRef<'_>]) -> Vec<(String, String)> {
-    chunks.iter().filter_map(pair_of).collect()
+    let mut budget = MAX_PAIR_BYTES;
+    chunks
+        .iter()
+        .filter_map(|c| {
+            let pair = pair_of(c, budget)?;
+            budget -= pair.1.len() as u64;
+            Some(pair)
+        })
+        .collect()
 }
 
 /// The text chunk `(type, body)` a pair is written as: `tEXt` when the
@@ -140,12 +161,14 @@ pub(crate) fn apply_pairs(file: &[u8], pairs: &[(String, String)]) -> Result<Vec
     }
     let chunks = parse_all_chunks(file)?;
     // Settle every text chunk first: `keep[i]` is false for a chunk
-    // under a named key that no (not yet answered) pair repeats.
+    // under a named key that no (not yet answered) pair repeats. Each
+    // chunk is read, compared and dropped in turn (one text held at a
+    // time); one too large to be a pair is left as it is.
     let mut unused: Vec<bool> = vec![true; pairs.len()];
     let keep: Vec<bool> = chunks
         .iter()
         .map(|c| {
-            let Some((key, value)) = pair_of(c) else {
+            let Some((key, value)) = pair_of(c, MAX_PAIR_BYTES) else {
                 return true;
             };
             if !pairs.iter().any(|(k, _)| *k == key) {

@@ -281,7 +281,8 @@ pub(crate) fn blobs_from_metadata(meta: &PngMetadata) -> Result<Vec<MetadataBlob
 /// when it is ancillary, named by four letters, not a type this crate
 /// writes itself, and safe to copy. The colour records (`gAMA`, `cHRM`,
 /// `sRGB`) are returned as stored: the caller reconciles them with the
-/// frame's colour signal.
+/// frame's colour signal. The compressed text records may inflate to
+/// [`crate::MAX_INFLATED_METADATA_LEN`] in all.
 pub(crate) fn metadata_from_blobs(
     frame_blobs: &[MetadataBlob],
     stream_blobs: &[MetadataBlob],
@@ -316,6 +317,10 @@ pub(crate) fn metadata_from_blobs(
     } else {
         None
     };
+    // The compressed text records are inflated to be checked and
+    // written; together they may inflate to the bound one chunk has
+    // alone, and a record past it is dropped.
+    let text_budget = std::cell::Cell::new(crate::metadata::MAX_INFLATED_METADATA_LEN);
     let mut meta = PngMetadata {
         gama: first(b"gAMA").and_then(|d| Gama::parse(d).ok()),
         chrm: first(b"cHRM").and_then(|d| Chrm::parse(d).ok()),
@@ -340,12 +345,20 @@ pub(crate) fn metadata_from_blobs(
             .collect(),
         ztxts: all(b"zTXt")
             .into_iter()
-            .filter_map(|d| Ztxt::parse(d).ok())
+            .filter_map(|d| {
+                let t = Ztxt::parse_capped(d, text_budget.get()).ok()?;
+                text_budget.set(text_budget.get().saturating_sub(t.text.len() as u64));
+                Some(t)
+            })
             .collect(),
         itxts: all(b"iTXt")
             .into_iter()
             .filter(|d| !is_xmp_itxt(d))
-            .filter_map(|d| Itxt::parse(d).ok())
+            .filter_map(|d| {
+                let t = Itxt::parse_capped(d, text_budget.get()).ok()?;
+                text_budget.set(text_budget.get().saturating_sub(t.text.len() as u64));
+                Some(t)
+            })
             .collect(),
         ..PngMetadata::default()
     };

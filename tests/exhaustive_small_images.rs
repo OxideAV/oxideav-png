@@ -386,3 +386,31 @@ fn keyed_transparency_holds_at_every_depth_on_every_path() {
         }
     }
 }
+
+/// `decode_rgba8` / `decode_rgb8` hold their output — four / three
+/// bytes per pixel whatever the file's layout — to the default 1 GiB
+/// limit before allocating it: a 1-bit image of 17000 × 17000 pixels
+/// is a 36 MB plane and a 1.1 GiB RGBA buffer.
+#[test]
+fn packed_decodes_check_their_output_size_before_allocating() {
+    let mut out = vec![137, 80, 78, 71, 13, 10, 26, 10];
+    let mut ihdr = 17_000u32.to_be_bytes().to_vec();
+    ihdr.extend_from_slice(&17_000u32.to_be_bytes());
+    ihdr.extend_from_slice(&[1, 0, 0, 0, 0]);
+    write_chunk(&mut out, b"IHDR", &ihdr);
+    // A stream that would fail later anyway: the limit fires first.
+    write_chunk(&mut out, b"IDAT", &[0x78, 0x9c, 3, 0, 0, 0, 0, 1]);
+    write_chunk(&mut out, b"IEND", &[]);
+    let err = decode_rgba8(&out).unwrap_err();
+    assert!(
+        matches!(err, oxideav_png::PngError::LimitExceeded(_)),
+        "{err:?}"
+    );
+    // RGB of the same image is 867 MB: within the limit, so the decode
+    // goes on to the (truncated) pixel stream and fails there instead.
+    let err = decode_rgb8(&out).unwrap_err();
+    assert!(
+        matches!(err, oxideav_png::PngError::InvalidData(_)),
+        "{err:?}"
+    );
+}

@@ -577,3 +577,35 @@ fn image_conversions_carry_gamma_and_keyed_transparency() {
     .unwrap();
     assert_eq!(back, image);
 }
+
+/// The encoder inflates the compressed text records it is handed to
+/// check and rewrite them; together they may inflate to the bound one
+/// chunk has alone (64 MiB), and records past it are dropped.
+#[test]
+fn compressed_text_records_share_the_inflate_bound() {
+    // 20 MiB of one byte deflates to a few tens of kilobytes.
+    let body = Ztxt::new("Big".into(), "z".repeat(20 << 20))
+        .to_bytes()
+        .unwrap();
+    assert!(body.len() < 1 << 20);
+    let mut frame = VideoFrame {
+        pts: Some(0),
+        planes: vec![VideoPlane {
+            stride: W as usize * 3,
+            data: plane(3),
+        }],
+    };
+    let mut blobs: Vec<MetadataBlob> = (0..5)
+        .map(|_| MetadataBlob::new(kind("png-ztxt"), body.clone()))
+        .collect();
+    blobs.push(MetadataBlob::new(kind("png-text"), b"Title\0kept".to_vec()));
+    frame.set_blobs(blobs);
+    let out = trait_encode(&params(PixelFormat::Rgb24), frame);
+    let m = parse_metadata(&out).unwrap();
+    assert_eq!(
+        m.ztxts.len(),
+        3,
+        "3 × 20 MiB fit under 64 MiB, the rest are dropped"
+    );
+    assert_eq!(m.texts, vec![Text::new("Title".into(), "kept".into())]);
+}

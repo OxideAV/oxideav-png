@@ -322,7 +322,11 @@ defaults below, to a still's header and to an animation's canvas, and
 refuses with `Error::ResourceExhausted` before allocating. The muxer
 compresses the blank default image of an animation whose first frame
 does not cover the canvas as it generates it, so a small frame on a
-large declared canvas costs time, not memory.
+large declared canvas costs time, not memory. Text is inflated under
+shared budgets: the demuxer's text pairs hold at most 16 MiB in all (a
+chunk past that is left out of the pairs, never out of the file), and
+the compressed text records handed to the encoder may inflate to
+`MAX_INFLATED_METADATA_LEN` together.
 
 Every function returns `Error` on hostile input, never panics (fuzzed:
 `probe` / `info` / `decode` / `decode_with` / `decode_rgb8` /

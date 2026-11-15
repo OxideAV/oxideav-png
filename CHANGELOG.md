@@ -91,6 +91,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `decode_rgba8` / `decode_rgb8` check their output size (4 / 3 bytes
+  per pixel, up to 32× the file's own plane for a 1-bit image) against
+  the 1 GiB default limit before allocating it; they used to check
+  only the native plane.
+- Text chunks are inflated under shared budgets on the framework
+  paths: the demuxer's text pairs hold at most 16 MiB in all (a chunk
+  past that is left out of the pairs, not out of the file), and the
+  compressed text records an encoder is handed may inflate to
+  `MAX_INFLATED_METADATA_LEN` together.
 - Registry encoder: a frame decoded from a file described by `gAMA` +
   `cHRM` alone was written with a `cICP` naming those primaries and no
   transfer function, which outranks the pair. The pair is now written

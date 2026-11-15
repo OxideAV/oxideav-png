@@ -2061,6 +2061,13 @@ impl Ztxt {
     /// compression method other than `0`, decompresses the body, and
     /// rejects a `NUL` in the decompressed text.
     pub fn parse(data: &[u8]) -> Result<Self> {
+        Self::parse_capped(data, MAX_INFLATED_METADATA_LEN)
+    }
+
+    /// [`Self::parse`] with the inflate bounded at `cap` bytes (at
+    /// most [`MAX_INFLATED_METADATA_LEN`]); see `Itxt::parse_capped`.
+    pub(crate) fn parse_capped(data: &[u8], cap: u64) -> Result<Self> {
+        let cap = cap.min(MAX_INFLATED_METADATA_LEN);
         let nul = data
             .iter()
             .position(|&b| b == 0)
@@ -2086,14 +2093,13 @@ impl Ztxt {
         // the zlib datastream format." Inflate it; surface a decode
         // error rather than panicking on a tampered chunk. The inflate
         // is bounded so a decompression bomb fails cleanly (§13.3).
-        let decompressed = decompress_to_vec_zlib_capped(compressed, MAX_INFLATED_METADATA_LEN)
-            .map_err(|e| match e {
-                compcol::Error::OutputLimitExceeded => Error::invalid(format!(
-                    "PNG zTXt: text inflates past the {MAX_INFLATED_METADATA_LEN}-byte \
+        let decompressed = decompress_to_vec_zlib_capped(compressed, cap).map_err(|e| match e {
+            compcol::Error::OutputLimitExceeded => Error::invalid(format!(
+                "PNG zTXt: text inflates past the {cap}-byte \
                      decompressed-size bound (decompression bomb, W3C PNG3 §13.3)"
-                )),
-                e => Error::invalid(format!("PNG zTXt: zlib decompression failed: {e:?}")),
-            })?;
+            )),
+            e => Error::invalid(format!("PNG zTXt: zlib decompression failed: {e:?}")),
+        })?;
 
         // Decompressed text obeys the same NUL-forbidden rule as tEXt
         // (RFC 2083 §4.2.10: "Decompression of this datastream yields
@@ -2525,6 +2531,15 @@ impl Itxt {
     /// the translated keyword and text, and the no-`NUL` rule on the
     /// translated keyword and text bodies.
     pub fn parse(data: &[u8]) -> Result<Self> {
+        Self::parse_capped(data, MAX_INFLATED_METADATA_LEN)
+    }
+
+    /// [`Self::parse`] with the inflate of a compressed text bounded at
+    /// `cap` bytes (at most [`MAX_INFLATED_METADATA_LEN`]): a caller
+    /// that reads many text chunks of one file shares a budget among
+    /// them.
+    pub(crate) fn parse_capped(data: &[u8], cap: u64) -> Result<Self> {
+        let cap = cap.min(MAX_INFLATED_METADATA_LEN);
         let (mut itxt, text_region) = Self::parse_header(data)?;
         let compressed = itxt.compressed;
 
@@ -2533,15 +2548,13 @@ impl Itxt {
         let text_bytes: &[u8] = if compressed {
             // Bounded inflate — decompression-bomb defence (§13.3).
             text_bytes_owned =
-                decompress_to_vec_zlib_capped(text_region, MAX_INFLATED_METADATA_LEN).map_err(
-                    |e| match e {
-                        compcol::Error::OutputLimitExceeded => Error::invalid(format!(
-                            "PNG iTXt: text inflates past the {MAX_INFLATED_METADATA_LEN}-byte \
+                decompress_to_vec_zlib_capped(text_region, cap).map_err(|e| match e {
+                    compcol::Error::OutputLimitExceeded => Error::invalid(format!(
+                        "PNG iTXt: text inflates past the {cap}-byte \
                          decompressed-size bound (decompression bomb, W3C PNG3 §13.3)"
-                        )),
-                        e => Error::invalid(format!("PNG iTXt: zlib decompression failed: {e:?}")),
-                    },
-                )?;
+                    )),
+                    e => Error::invalid(format!("PNG iTXt: zlib decompression failed: {e:?}")),
+                })?;
             &text_bytes_owned
         } else {
             text_region

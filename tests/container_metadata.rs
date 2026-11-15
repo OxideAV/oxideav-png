@@ -389,3 +389,43 @@ fn transcode_does_not_double_the_text() {
     // `unSF` is unsafe to copy and the pixels were re-encoded.
     assert_eq!(after.unknowns.len(), 2);
 }
+
+/// Opening a file must not hold every compressed text chunk inflated:
+/// the pairs share a 16 MiB budget, and chunks past it are left out of
+/// the pairs (they stay in the packet and in the blob records).
+#[test]
+fn demuxer_text_pairs_share_a_budget() {
+    let ctx = context();
+    // Twelve zTXt chunks of 3 MiB of text each (a few kilobytes on the
+    // wire), plus a small tEXt before and after.
+    let big = "y".repeat(3 << 20);
+    let meta = PngMetadata::default()
+        .with_texts(vec![Text::new("Title".into(), "small".into())])
+        .with_ztxts(
+            (0..12)
+                .map(|i| Ztxt::new(format!("Part {i}"), big.clone()))
+                .collect(),
+        )
+        .with_itxts(vec![Itxt::new("Source".into(), "after".into())]);
+    let file =
+        oxideav_png::encode(&rgb(4, 4, 9), &EncodeOptions::new().with_metadata(meta)).unwrap();
+    assert!(file.len() < 1 << 20, "the bombs are small on the wire");
+    let (stream, pairs, pkts) = demux(&ctx, &file);
+    let total: usize = pairs.iter().map(|(_, v)| v.len()).sum();
+    assert!(total <= 16 << 20, "{total} bytes of text held");
+    // Five of the twelve fit (5 × 3 MiB + the two small ones).
+    assert_eq!(pairs.len(), 7);
+    assert_eq!(pairs[0], pair("title", "small"));
+    assert_eq!(pairs[6], pair("source", "after"));
+    // Nothing is lost from the file itself on a remux.
+    let out = mux(&ctx, &stream, Some(&pairs), &pkts);
+    assert_eq!(out, file);
+    // And the stream still carries all twelve as compressed records.
+    let records = stream
+        .params
+        .blobs()
+        .iter()
+        .filter(|b| b.kind.as_str() == "png-ztxt")
+        .count();
+    assert_eq!(records, 12);
+}
