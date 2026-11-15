@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.15](https://github.com/OxideAV/oxideav-png/compare/v0.1.14...v0.1.15) - 2026-11-15
+
+### Other
+
+- brute tries seven row-strategies; filter option lists entropy
+- hostile input: shared text-inflate budgets on the framework paths; packed decodes check their output size
+- no cICP for a cHRM-derived colour signal; README throughput tables, effort ladder, changelog
+- iCCP colour-space rule in strict decode; PngMetadata::without_unsafe_to_copy
+- hostile input: muxer default image streamed, registry decoder limits, container_transcode fuzz target
+- rows converted to RGB(A) as they are reconstructed; tRNS key on sub-byte greyscale
+- entropy row-filter selection and a 1..=9 effort dial
+- decode 4x: DEFLATE provider to compcol 0.8, slab-wise streaming inflate; throughput bench
+- text chunks are string metadata; animated files keep their ancillary chunks
+- every ancillary chunk crosses the framework as a png-<chunk> blob record
+
 ### Changed
 
 - The DEFLATE provider is compcol 0.8 (was 0.6): its table-driven
