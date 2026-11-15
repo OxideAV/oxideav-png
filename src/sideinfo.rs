@@ -80,6 +80,18 @@ const BT2020_CHRM: [(u32, u32); 4] = [
     (13100, 4600),
 ];
 
+/// The H.273 colour primaries a `cHRM` names: 1 (BT.709) or 9
+/// (BT.2020) when its chromaticities match, else unspecified.
+pub(crate) fn chrm_primaries(chrm: &Chrm) -> u8 {
+    if chrm_matches(chrm, &BT709_CHRM) {
+        ColorInfo::PRIMARIES_BT709
+    } else if chrm_matches(chrm, &BT2020_CHRM) {
+        ColorInfo::PRIMARIES_BT2020
+    } else {
+        ColorInfo::UNSPECIFIED
+    }
+}
+
 /// Resolve colour signalling and the contract metadata from a chunk
 /// list. `strict` is [`crate::DecodeOptions::strict`] and `inflate`
 /// [`crate::DecodeOptions::inflate_metadata`]: without it the `iCCP`
@@ -242,11 +254,7 @@ pub(crate) fn extract(chunks: &[ChunkRef<'_>], strict: bool, inflate: bool) -> R
     } else {
         let mut c = ColorInfo::png_default();
         if let Some(ch) = &chrm {
-            if chrm_matches(ch, &BT709_CHRM) {
-                c.primaries = ColorInfo::PRIMARIES_BT709;
-            } else if chrm_matches(ch, &BT2020_CHRM) {
-                c.primaries = ColorInfo::PRIMARIES_BT2020;
-            }
+            c.primaries = chrm_primaries(ch);
         }
         c
     };

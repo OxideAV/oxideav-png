@@ -217,13 +217,44 @@ inflates no metadata body, so the `iCCP` profile and a compressed XMP
 packet are left out of `metadata` and cost nothing however far they
 would inflate; the `iCCP` chunk still governs the colour.
 
-`EncodeOptions` (`Default` + `with_*`): `compression_level`
-(`with_level`, 1..=9, default 2), `filter_strategy` (adaptive §12.8
-heuristic, fixed, or brute), `interlace`, `bit_depth` (1 / 2 / 4 for
-`Gray8` / `Pal8`), `threads` (DEFLATE workers; bytes never depend on
-it), `metadata: Option<PngMetadata>` (every ancillary chunk, wins over
-the image-derived chunk), `chunk_order: Option<ChunkOrder>` (where the
-chunks go, below).
+`EncodeOptions` (`Default` + `with_*`): `effort` (one speed / size
+dial, below), `compression_level` (`with_level`, 1..=9, default 2),
+`filter_strategy` (adaptive §12.8 heuristic, entropy, fixed, or
+brute), `interlace`, `bit_depth` (1 / 2 / 4 for `Gray8` / `Pal8`),
+`threads` (workers for row filtering and DEFLATE; bytes never depend
+on it), `metadata: Option<PngMetadata>` (every ancillary chunk, wins
+over the image-derived chunk), `chunk_order: Option<ChunkOrder>`
+(where the chunks go, below).
+
+### Effort
+
+`EncodeOptions::with_effort(1..=9)` (registry option `effort`) sets the
+row-filter policy and the DEFLATE level together:
+
+| effort | row filter | DEFLATE level |
+|---:|---|---:|
+| 1 | `Sub` on every row | 1 |
+| 2 | §12.8 minimum sum of absolute differences (`Adaptive`) | 1 |
+| 3 | `Adaptive` — the default bytes | 2 |
+| 4 | `Entropy` | 3 |
+| 5 | `Entropy` | 5 |
+| 6 | `Entropy` | 6 |
+| 7 | `Entropy` | 7 |
+| 8 | `Entropy` | 9 |
+| 9 | `Brute`: seven whole-image trials, smallest kept | 9 |
+
+An indexed-colour image, or one written below 8 bits per sample, gets
+filter `None` on every row at efforts 1 to 8 (its bytes are indices or
+packed samples, which the filters do not predict; W3C PNG3 §12.7).
+With an effort set, an explicit `compression_level` still decides the
+level and a `filter_strategy` other than the default still decides the
+filter. `FilterStrategy::Entropy` picks, per row, the filter whose
+output has the lowest zeroth-order entropy (the fewest bits an ideal
+order-0 coder would spend on the filtered bytes; integer arithmetic,
+so the choice is the same on every platform): about 2.5 % smaller than
+`Adaptive` on photographs and 0.5 % on screenshots at equal level, for
+five filter passes and histograms per row. Measured sizes and times
+are under *Benchmarks*.
 
 ### Chunk order
 
@@ -284,6 +315,14 @@ ancillary chunks) is `parse_metadata` / `PngMetadata`, see *Metadata
 round-trip* below.
 
 ## Limits
+
+The registry decoder applies `CodecParameters::limits`
+(`max_pixels_per_frame`, `max_alloc_bytes_per_frame`) on top of the
+defaults below, to a still's header and to an animation's canvas, and
+refuses with `Error::ResourceExhausted` before allocating. The muxer
+compresses the blank default image of an animation whose first frame
+does not cover the canvas as it generates it, so a small frame on a
+large declared canvas costs time, not memory.
 
 Every function returns `Error` on hostile input, never panics (fuzzed:
 `probe` / `info` / `decode` / `decode_with` / `decode_rgb8` /
@@ -952,7 +991,7 @@ bodies in the compressed `iTXt` arm, and hand-computed
 `expected_filtered_len` values including the Adam7 per-pass sum and
 the max-dimension saturation case.
 
-The decoder is fuzzed with `cargo-fuzz`. Nine targets live under `fuzz/`:
+The decoder is fuzzed with `cargo-fuzz`. Eleven targets live under `fuzz/`:
 
 - `decode` — feeds arbitrary bytes straight at the standalone decode
   entry points (`decode`, `decode_rgba8`, `parse_metadata`,
@@ -1028,8 +1067,23 @@ The decoder is fuzzed with `cargo-fuzz`. Nine targets live under `fuzz/`:
   Drives `parse_metadata` + `decode` + `decode_rgba8`;
   liveness only (a truncated or bomb-shaped zlib body must surface as
   `Err`, not a crash or unbounded allocation).
+- `container_transcode` — the framework path. Reads the input as a
+  chunk stream with its framing repaired (lengths clamped, CRCs
+  rewritten) and drives container and codec together: demux → mux, and
+  demux → decode → encode → mux with the demuxed text pairs. Asserts
+  that the file the encoder writes from a decoded frame's records
+  (format-native blobs, colour signal, palette) passes the strict
+  metadata parser and decodes to the frame's pixels, before and after
+  the muxer adds text chunks. Its first minute found the muxer
+  allocating a declared canvas whole for the hidden default image.
 - Two optional cross-decode targets validate against a `dlopen`ed
   system PNG library when one is present (skipped when absent).
+
+`tests/exhaustive_small_images.rs` checks every colour type × bit
+depth of W3C PNG3 Table 12, plain and Adam7, at every size from 1×1 to
+9×9 (2 430 hand-built files: the decoder against pixels the test
+computes itself; then the encoder under every filter policy and
+effort), and keyed transparency at every depth on every decode path.
 
 ```sh
 cargo +nightly fuzz run decode
@@ -1037,8 +1091,9 @@ cargo +nightly fuzz run decode
 
 ### Benchmarks
 
-Six criterion harnesses live under `benches/` for A/B-testing
-optimisation changes against a stable baseline:
+Six criterion harnesses and two plain-`main` harnesses live under
+`benches/` for A/B-testing optimisation changes against a stable
+baseline:
 
 - `decode` — every supported pixel layout at "natural" sizes (1920×1080
   RGBA, 640×480 RGB, 512×512 Gray8 / Gray16Le / Rgb48Le, 320×240 Rgba64Le
@@ -1078,6 +1133,12 @@ optimisation changes against a stable baseline:
   cost so a change to the per-sample linear equation is visible on its
   own.
 
+- `throughput` — megapixels per second on real files
+  (`PNG_BENCH_FILES`), with the decode stages (inflate alone,
+  reconstruction alone, the filter-type histogram) and the encode
+  stages (§12.8 selection, filtering) timed separately;
+  `PNG_BENCH_EFFORTS` / `PNG_BENCH_GRID` / `PNG_BENCH_THREADS` /
+  `PNG_BENCH_OUT` select what the encode table holds. Results below.
 - `encode_12mp` — a plain-`main` production-scale harness (not
   Criterion): 4032×3024 encode ms / output bytes / decode ms for every
   (layout × DEFLATE level × filter strategy × thread budget) as a
@@ -1093,7 +1154,124 @@ Each scenario synthesises a fresh input on the fly with the public
 encoder API — no committed fixture files — so the benches reproduce
 from a clean checkout.
 
+#### Throughput on real files (round 490)
+
+`benches/throughput.rs` (`PNG_BENCH_FILES=a.png,b.png cargo bench
+--bench throughput`) prints megapixels per second and a stage
+breakdown for real files. The fixtures: a 4032×4032 landscape
+photograph (a system wallpaper converted to PNG by a black-box
+converter) and its half-size RGBA / 16-bit / greyscale / Adam7
+variants, a 2992×1934 desktop screenshot, and that screenshot reduced
+to 256 colours. Apple M-series, release build, one thread. The
+machine was shared with other builds, so each figure is the median of
+three interleaved runs (pre-round binary, then this one), each itself a
+median of three.
+
+**Profile first.** Before the round a decode of the 16 MP photograph
+took 390 ms, of which the zlib inflate alone was 376 ms and the filter
+reconstruction of the same rows 17 ms: the decoder was waiting on its
+DEFLATE provider. Encode had the same shape — at the default level,
+§12.8 filter selection 12 ms and the filter itself 7 ms of 741 ms. So
+the round moved the provider (compcol 0.6 → 0.8, whose inflate is
+table-driven) rather than the filter kernels, which already run at
+about 3 GB/s (Sub / Average / Paeth specialised per byte distance on
+register-carried lanes), then made the decoder hand that inflater a
+128 KiB slab of rows per step instead of one row, and converted rows to
+RGB(A) as they are reconstructed.
+
+Decode, before → after:
+
+| file | size | `decode` ms | MP/s | `decode_rgba8` ms | MP/s | inflate alone ms | reconstruction alone ms |
+|---|---|---:|---:|---:|---:|---:|---:|
+| photo, RGB 8-bit | 4032×4032 | 390 → 116 | 42 → **140** | 418 → 120 | 39 → **135** | 376 → 99 | 17.4 → 17.3 |
+| photo, RGBA 8-bit | 2016×2016 | 83 → 29 | 49 → **138** | 83 → 26 | 49 → **153** | 74 → 18 | 8.0 → 8.6 |
+| screenshot, RGBA 8-bit | 2992×1934 | 82 → 22 | 71 → **258** | 82 → 24 | 70 → **244** | 76 → 21 | 3.5 → 3.7 |
+| photo, RGB 16-bit | 2016×2016 | 152 → 63 | 27 → **64** | 159 → 68 | 26 → **60** | 141 → 54 | 6.5 → 6.5 |
+| photo, grey 8-bit | 2016×2016 | 23 → 10 | 177 → **398** | 22 → 10 | 183 → **423** | 18 → 5 | 4.6 → 3.8 |
+| screenshot, 256 colours | 2992×1934 | 18 → 4 | 323 → **1411** | 22 → 12 | 264 → **474** | 18 → 5 | 0.1 → 0.1 |
+| photo, RGB 8-bit, Adam7 | 2016×2016 | 76 → 31 | 54 → **131** | 81 → 35 | 50 → **117** | 67 → 18 | — |
+
+`decode_rgba8` / `decode_rgb8` no longer build the native-layout plane
+first: rows are reconstructed against a two-row window and converted
+while in cache (an 8-bit RGBA / RGB file's plane is returned as it
+is). Decode is still inflate-bound (85 % of the photo decode); the
+reconstruction kernels are what is left.
+
+Encode, before → after (the gain is the provider's encoder; filter
+selection and filtering were, and are, a few percent of the time, and
+already run inside the per-segment workers, so they scale with the
+thread budget and the bytes stay the same at every budget):
+
+| file | options | encode ms | MP/s | bytes |
+|---|---|---:|---:|---:|
+| photo, RGB 8-bit | level 1, filter Sub | 610 → 356 | 26.6 → **45.6** | 17,793,589 → 17,668,122 |
+| photo, RGB 8-bit | default (level 2, adaptive) | 741 → 433 | 21.9 → **37.5** | 16,288,899 → 16,230,446 |
+| photo, RGB 8-bit | level 6, adaptive | 7354 → 3579 | 2.2 → **4.5** | 14,938,150 → 14,925,181 |
+| photo, RGBA 8-bit | level 1, filter Sub | 178 → 106 | 22.9 → **38.2** | 4,771,508 → 4,726,070 |
+| photo, RGBA 8-bit | default (level 2, adaptive) | 208 → 131 | 19.6 → **31.0** | 4,530,250 → 4,509,007 |
+| photo, RGBA 8-bit | level 6, adaptive | 1869 → 819 | 2.2 → **5.0** | 3,973,886 → 3,976,160 |
+| screenshot, RGBA 8-bit | level 1, filter Sub | 166 → 78 | 35.0 → **74.2** | 3,024,593 → 2,995,053 |
+| screenshot, RGBA 8-bit | default (level 2, adaptive) | 173 → 94 | 33.5 → **61.4** | 2,713,891 → 2,703,724 |
+| screenshot, RGBA 8-bit | level 6, adaptive | 768 → 388 | 7.5 → **14.9** | 2,445,933 → 2,455,594 |
+| photo, RGB 16-bit | level 1, filter Sub | 538 → 274 | 7.6 → **14.8** | 18,640,994 → 18,522,940 |
+| photo, RGB 16-bit | default (level 2, adaptive) | 618 → 372 | 6.6 → **10.9** | 18,499,845 → 18,481,942 |
+| photo, RGB 16-bit | level 6, adaptive | 1094 → 630 | 3.7 → **6.5** | 18,503,412 → 18,503,412 |
+| photo, grey 8-bit | level 1, filter Sub | 43 → 26 | 95.4 → **159.4** | 1,065,275 → 1,053,684 |
+| photo, grey 8-bit | default (level 2, adaptive) | 52 → 33 | 77.6 → **123.2** | 1,092,830 → 1,088,259 |
+| photo, grey 8-bit | level 6, adaptive | 434 → 190 | 9.4 → **21.4** | 990,854 → 989,801 |
+| screenshot, 256 colours | level 1, filter Sub | 46 → 23 | 125.0 → **249.4** | 914,940 → 881,809 |
+| screenshot, 256 colours | default (level 2, adaptive) | 57 → 28 | 100.8 → **203.8** | 936,104 → 927,371 |
+| screenshot, 256 colours | level 6, adaptive | 164 → 75 | 35.3 → **77.1** | 884,484 → 884,657 |
+| photo, RGB 8-bit, Adam7 | level 1, filter Sub | 139 → 87 | 29.3 → **46.7** | 3,930,212 → 3,891,937 |
+| photo, RGB 8-bit, Adam7 | default (level 2, adaptive) | 163 → 102 | 24.9 → **39.7** | 3,678,279 → 3,662,924 |
+| photo, RGB 8-bit, Adam7 | level 6, adaptive | 1502 → 710 | 2.7 → **5.7** | 3,344,943 → 3,338,643 |
+
+**Effort ladder**, 4 MP RGBA photograph / RGBA screenshot / 4 MP
+greyscale photograph / 256-colour screenshot (encode ms, bytes; one
+thread, median of 3, quiet machine):
+
+| effort | photo RGBA | screenshot RGBA | photo grey | screenshot palette |
+|---:|---:|---:|---:|---:|
+| 1 | 110 ms, 4 726 070 | 97 ms, 2 995 053 | 45 ms, 1 053 684 | 26 ms, 771 108 |
+| 2 | 114 ms, 4 626 714 | 103 ms, 2 764 139 | 60 ms, 1 112 305 | 23 ms, 771 108 |
+| 3 (default bytes) | 132 ms, 4 509 007 | 111 ms, 2 703 724 | 61 ms, 1 088 259 | 35 ms, 750 455 |
+| 4 | 267 ms, 4 157 518 | 244 ms, 2 586 172 | 120 ms, 1 021 076 | 47 ms, 722 876 |
+| 5 | 342 ms, 4 060 149 | 276 ms, 2 519 343 | 160 ms, 1 003 056 | 54 ms, 710 041 |
+| 6 | 835 ms, 3 876 551 | 505 ms, 2 442 115 | 354 ms, 966 461 | 85 ms, 694 261 |
+| 7 | 1.76 s, 3 795 119 | 709 ms, 2 410 615 | 574 ms, 949 680 | 116 ms, 688 908 |
+| 8 | 15.2 s, 3 538 569 | 5.4 s, 2 329 024 | 6.2 s, 894 778 | 647 ms, 674 306 |
+| 9 | 106 s, 3 538 569 | 36 s, 2 329 024 | 31 s, 869 621 | 8.4 s, 674 306 |
+
+Two honest notes on the ladder. Sizes are not monotonic everywhere: on
+the greyscale photograph `Sub` on every row (effort 1) beats the §12.8
+heuristic at efforts 2 and 3, and the effort-9 search finds a fixed
+filter 2.8 % smaller than effort 8's per-row entropy choice. And
+efforts 8 and 9 are expensive because the provider's level 9 is: level
+7 → 9 buys 3–7 % for about nine times the time, and effort 9 runs it
+seven times.
+
+**Against black-box encoders at their maximum settings** (no PNG
+optimiser binary was installed on the measuring machine, so these are
+two general-purpose encoders, not optimisers; bytes, same pixels):
+
+| file | this crate, effort 9 | converter A, level 9 + adaptive filters | converter B, maximum level + mixed prediction |
+|---|---:|---:|---:|
+| photo RGBA 4 MP | **3 538 569** | 3 596 806 (+1.6 %) | 3 628 843 (+2.6 %) |
+| screenshot RGBA | 2 329 024 | **2 283 201** (−2.0 %) | 2 290 285 (−1.7 %) |
+| photo grey 4 MP | **869 621** | 910 302 (+4.7 %) | 918 082 (+5.6 %) |
+| screenshot, 256 colours | **674 306** | 697 410 (+3.4 %) | (wrote truecolour) |
+
+Ahead on the photographs and the palette image, 2 % behind on the
+truecolour screenshot. A dedicated optimiser (which also reduces colour
+type and bit depth, and searches DEFLATE far harder) should be expected
+to beat all three columns; that comparison is still to be made.
+
 #### 12 MP encode (round 464)
+
+(Measured before the round-490 provider change; the encode times in
+this subsection are about 1.7–2× higher than today's, the sizes within
+1 %, and the decode times about 3.5× higher. Kept as the record behind
+the default level.)
 
 4032×3024 RGB24, a real photograph (a system wallpaper decoded to raw
 RGB), M4 Max, release build, `Adaptive` filter. Encode wall-clock in

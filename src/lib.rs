@@ -86,10 +86,13 @@
 //! default 1 GiB of decoded plane), `strict` (ancillary-chunk
 //! rules, see the type docs) and `inflate_metadata` (whether the
 //! `iCCP` profile and a compressed XMP packet are inflated into the
-//! decoded image's metadata; default `true`). [`EncodeOptions`]: `compression_level`
-//! (`with_level`, 1..=9, default [`DEFAULT_COMPRESSION_LEVEL`]),
-//! `filter_strategy`, `interlace`, `bit_depth`, `threads`, and
-//! `metadata` ([`PngMetadata`], every ancillary chunk).
+//! decoded image's metadata; default `true`). [`EncodeOptions`]: `effort`
+//! (`with_effort`, one 1..=9 speed / size dial over the next two),
+//! `compression_level` (`with_level`, 1..=9, default
+//! [`DEFAULT_COMPRESSION_LEVEL`]), `filter_strategy`
+//! ([`FilterStrategy`]: §12.8 heuristic, entropy, fixed, brute),
+//! `interlace`, `bit_depth`, `threads`, and `metadata`
+//! ([`PngMetadata`], every ancillary chunk).
 //!
 //! # Metadata and colour
 //!
@@ -116,7 +119,10 @@
 //! The full chunk set — `sBIT`, `pHYs`, `tIME`, `bKGD`, `hIST`,
 //! `mDCV`, `cLLI`, `sPLT`, `tEXt`, `zTXt`, `iTXt`, unknown ancillary
 //! chunks — is [`parse_metadata`] / [`PngMetadata`], round-tripped
-//! through [`EncodeOptions::metadata`].
+//! through [`EncodeOptions::metadata`]. Through the registry the same
+//! chunks travel as blob records on frames and streams (`icc`, `exif`,
+//! `xmp`, and a `png-<chunk>` kind per other chunk; `metadata_blobs`
+//! builds them), and text chunks are the container's string metadata.
 //!
 //! # Limits
 //!

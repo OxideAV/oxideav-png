@@ -286,7 +286,9 @@ fn metadata_from_blobs(
 /// an `sRGB` record supplies only the rendering intent of the `sRGB`
 /// chunk an sRGB signal writes, and next to that chunk `gAMA` / `cHRM`
 /// records are kept only when they hold the values W3C PNG3 §11.3.2.5
-/// Table 17 allows there. Options metadata that names a colour chunk
+/// Table 17 allows there. A signal that only repeats what a `cHRM`
+/// record says (its primaries, no transfer) writes no `cICP`: the
+/// `gAMA` / `cHRM` pair stays the file's description. Options metadata that names a colour chunk
 /// itself is left alone, and no colour record is added to it.
 fn options_with_blob_chunks(
     image: &ImageRef<'_>,
@@ -316,7 +318,18 @@ fn options_with_blob_chunks(
             }
             None => {
                 derived.srgb = None;
-                derived.cicp = cicp;
+                // A signal that says no more than the `cHRM` record
+                // itself (those primaries, nothing about the transfer,
+                // full range) came from that record: writing a `cICP`
+                // for it would outrank the `gAMA` / `cHRM` pair the
+                // file is described by (W3C PNG3 §4.3 Table 1).
+                let from_chrm = derived.chrm.as_ref().is_some_and(|chrm| {
+                    let c = image.color;
+                    c.transfer == ColorInfo::UNSPECIFIED
+                        && c.range != ColorRange::Limited
+                        && c.primaries == crate::sideinfo::chrm_primaries(chrm)
+                });
+                derived.cicp = if from_chrm { None } else { cicp };
             }
         }
     }

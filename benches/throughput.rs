@@ -368,15 +368,5 @@ fn encode_bundles() -> Vec<(String, EncodeOptions)> {
                 .with_level(6)
                 .with_filter_strategy(FilterStrategy::Entropy),
         ),
-        (
-            "level 9, adaptive".into(),
-            EncodeOptions::new().with_level(9),
-        ),
-        (
-            "level 9, entropy".into(),
-            EncodeOptions::new()
-                .with_level(9)
-                .with_filter_strategy(FilterStrategy::Entropy),
-        ),
     ]
 }

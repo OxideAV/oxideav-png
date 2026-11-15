@@ -10,8 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The DEFLATE provider is compcol 0.8 (was 0.6): its table-driven
-  inflate is where a decode spends its time, so decode is about three
-  times faster with no change on this side. Its encoder writes some
+  inflate is where a decode spends its time. With the two decoder
+  changes below, decode is 2.2–4.4× faster on real files (16 MP RGB
+  photo 42 → 140 MP/s, RGBA screenshot 71 → 258 MP/s) and encode
+  1.6–2.3× (default level, RGBA photo 19.6 → 31.0 MP/s); paired
+  before → after tables in the README. Its encoder writes some
   larger streams with different (equally valid, slightly smaller)
   bytes, so an encoded file may differ byte-for-byte from 0.1.14's; the
   decoded pixels do not.
@@ -20,9 +23,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (16 MP RGB photo: 134 → 103 ms on top of the provider change).
 - `benches/throughput.rs`: megapixels-per-second and stage breakdown
   for real files (`PNG_BENCH_FILES`).
+- `decode_rgba8` / `decode_rgb8` convert each row as it is
+  reconstructed instead of building the native-layout plane first
+  (and return the reconstructed plane itself when the file is already
+  8-bit RGBA / RGB): one plane-sized allocation less, same pixels.
+- `FilterStrategy::Brute` also tries `Entropy`, so its output can only
+  get smaller.
 
 ### Added
 
+- `EncodeOptions::effort` / `with_effort` (registry option `effort`):
+  one speed / size dial `1..=9` over the row-filter policy and the
+  DEFLATE level, from `Sub` + level 1 to the whole-image search at
+  level 9; indexed and sub-8-bit images use filter `None` below 9.
+  Effort 3 writes the default bytes; explicit `compression_level` /
+  `filter_strategy` still win.
+- `FilterStrategy::Entropy` (registry `filter=entropy`) and
+  `filter::choose_filter_entropy`: per-row filter choice by the
+  zeroth-order entropy of the filtered bytes, in integer arithmetic.
+  About 2.5 % smaller than the §12.8 heuristic on photographs at equal
+  level.
+- `Iccp::data_colour_space` / `Iccp::conforms_to_colour_type`: the
+  profile's data colour space against W3C PNG3 §11.3.2.3 (RGB for
+  colour types 2 / 3 / 6, greyscale for 0 / 4). A strict decode rejects
+  a mismatch; a lenient one carries the profile as before.
+- `PngMetadata::without_unsafe_to_copy`: drops the unrecognised chunks
+  a program that changed the pixels must not write back (§14.2).
+- Registry decoder: `CodecParameters::limits` (`max_pixels_per_frame`,
+  `max_alloc_bytes_per_frame`) tighten the decode limits, and an
+  animation's canvas — sized by the stream, not by the frame packet —
+  is checked against them before it is allocated.
+- `tests/exhaustive_small_images.rs` (every colour type × bit depth,
+  plain and Adam7, 1×1 to 9×9, decoder against hand-built files and
+  encoder under every filter policy) and the `container_transcode`
+  fuzz target (demux → decode → encode → mux on repaired chunk
+  streams).
 - Registry path: every ancillary chunk now crosses the framework. The
   decoder attaches, and the demuxer puts on the stream, a format-native
   blob record per chunk the well-known kinds and the colour signal do
@@ -56,6 +91,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Registry encoder: a frame decoded from a file described by `gAMA` +
+  `cHRM` alone was written with a `cICP` naming those primaries and no
+  transfer function, which outranks the pair. The pair is now written
+  back and no `cICP` is added for a signal that only repeats the
+  `cHRM`.
+- A `tRNS` key on a 1 / 2 / 4-bit greyscale image never matched: the
+  decoded plane is scaled to 8 bits and the key was left at the file's
+  depth, so `decode_rgba8` and `PngImage::to_rgba8` showed the keyed
+  pixels opaque. `PngImage::transparency` now holds the key in the
+  image's own (scaled) samples.
+- Muxer: assembling an animation whose first frame does not cover the
+  canvas allocated the whole canvas (a size the packet headers choose)
+  to build the blank default image; it is now compressed as it is
+  generated (a 2×2 frame on a 3000×3000 canvas: 36 MB → 0.6 MB peak).
 - `demux → mux` of an animated file dropped every ancillary chunk
   (colour chunks, ICC profile, Exif, text, `pHYs`, unknown chunks). The
   first frame packet now carries the file's chunks and the muxer writes

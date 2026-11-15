@@ -443,6 +443,49 @@ fn colour_records_follow_the_frame_colour_signal() {
     assert_eq!(m.gama, Some(Gama::new(100_000)));
 }
 
+/// A file described by `gAMA` + `cHRM` alone decodes with the primaries
+/// its `cHRM` names; re-encoding the frame must not add a `cICP` (which
+/// would outrank the pair and say nothing about the transfer).
+#[test]
+fn a_gama_chrm_file_is_not_given_a_cicp() {
+    let image = PngImage::packed(W, H, PngPixelFormat::Rgb24, W as usize * 3, plane(3)).unwrap();
+    for chrm in [
+        Chrm::SRGB,
+        // BT.2020 primaries, D65.
+        Chrm::new(
+            (31270, 32900),
+            (70800, 29200),
+            (17000, 79700),
+            (13100, 4600),
+        ),
+        // Primaries no code point names.
+        Chrm::new(
+            (31270, 32900),
+            (68000, 32000),
+            (26500, 69000),
+            (15000, 6000),
+        ),
+    ] {
+        let meta = PngMetadata::default()
+            .with_gama(Gama::new(45_455))
+            .with_chrm(chrm);
+        let file = encode_file(&image, meta.clone());
+        let out = trait_encode(&params(PixelFormat::Rgb24), trait_decode(&file));
+        assert_eq!(parse_metadata(&out).unwrap(), meta);
+    }
+    // A signal that says more than the record (a transfer) is written.
+    let frame = trait_decode(&encode_file(
+        &image,
+        PngMetadata::default().with_chrm(Chrm::SRGB),
+    ))
+    .with_color_signal(oxideav_png::to_color_signal(
+        &ColorInfo::png_default().with_primaries(1).with_transfer(16),
+    ));
+    let m = parse_metadata(&trait_encode(&params(PixelFormat::Rgb24), frame)).unwrap();
+    assert_eq!(m.cicp, Some(Cicp::new(1, 16, 0, 1)));
+    assert_eq!(m.chrm, Some(Chrm::SRGB));
+}
+
 /// A frame's records of a kind replace the stream's of that kind; the
 /// stream fills the kinds the frame leaves out.
 #[test]
