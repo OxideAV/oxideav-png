@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The DEFLATE provider is compcol 0.8 (was 0.6): its table-driven
+  inflate is where a decode spends its time, so decode is about three
+  times faster with no change on this side. Its encoder writes some
+  larger streams with different (equally valid, slightly smaller)
+  bytes, so an encoded file may differ byte-for-byte from 0.1.14's; the
+  decoded pixels do not.
+- The streaming decoder inflates a cache-sized slab of rows per step
+  instead of one row, which keeps the inflater on its fast path
+  (16 MP RGB photo: 134 → 103 ms on top of the provider change).
+- `benches/throughput.rs`: megapixels-per-second and stage breakdown
+  for real files (`PNG_BENCH_FILES`).
+
 ### Added
 
 - Registry path: every ancillary chunk now crosses the framework. The

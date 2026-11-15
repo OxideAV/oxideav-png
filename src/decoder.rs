@@ -1041,12 +1041,17 @@ pub(crate) fn decode_png_chunks(chunks: &[ChunkRef<'_>], opts: &DecodeOptions) -
     Ok(img.with_color(side.color).with_metadata(side.metadata))
 }
 
+/// Wire bytes the streaming decode inflates per slab (whole rows; at
+/// least one row).
+const INFLATE_SLAB_BYTES: usize = 128 * 1024;
+
 /// Inflate a zlib pixel stream and reconstruct it into the decoded byte
 /// plane (`decoded_bytes_per_pixel × width × height`, or the packed
 /// sub-byte plane expanded as [`expand_byte_plane`] does).
 ///
-/// Non-interlaced images stream: the inflater fills one wire row
-/// (filter byte + `row_bytes`) at a time, which is reconstructed in
+/// Non-interlaced images stream: the inflater fills a cache-sized slab
+/// of wire rows (filter byte + `row_bytes` each) at a time, and each
+/// row is reconstructed in
 /// place into the output plane against the previous reconstructed row
 /// — the whole filtered image is never materialised, so a decode holds
 /// the compressed bytes and the output plane only. Interlaced images
@@ -1086,7 +1091,13 @@ fn inflate_image_pixels(stream: &[u8], ihdr: &Ihdr, what: &str, header: &str) ->
     let height = ihdr.height as usize;
     let wire_row = 1 + row_bytes;
     let mut raw = vec![0u8; row_bytes * height];
-    let mut wire = vec![0u8; wire_row];
+    // The inflater fills a slab of whole wire rows per call sequence
+    // rather than one row: its fast path needs room ahead in the output
+    // buffer, and a row is often only a few kilobytes. The slab stays
+    // cache-sized, so the copy of each row into the plane reads warm
+    // memory.
+    let slab_rows = (INFLATE_SLAB_BYTES / wire_row).clamp(1, height.max(1));
+    let mut slab = vec![0u8; slab_rows * wire_row];
     let zero_row = vec![0u8; row_bytes];
     let mut dec = compcol::zlib::Decoder::new();
     let mut consumed = 0usize;
@@ -1097,36 +1108,41 @@ fn inflate_image_pixels(stream: &[u8], ihdr: &Ihdr, what: &str, header: &str) ->
              size implied by {header}"
         ))
     };
-    for y in 0..height {
-        // Fill one wire row.
+    let mut y = 0usize;
+    while y < height {
+        // Fill the next run of wire rows.
+        let want = slab_rows.min(height - y) * wire_row;
         let mut filled = 0usize;
-        while filled < wire_row {
+        while filled < want {
             let (p, status) = dec
-                .decode(&stream[consumed..], &mut wire[filled..])
+                .decode(&stream[consumed..], &mut slab[filled..want])
                 .map_err(zerr)?;
             consumed += p.consumed;
             filled += p.written;
             match status {
-                Status::StreamEnd if filled < wire_row => return Err(truncated()),
-                Status::InputEmpty if p.written == 0 && consumed >= stream.len() => {
+                Status::StreamEnd if filled < want => return Err(truncated()),
+                _ if p.written == 0 && (p.consumed == 0 || consumed >= stream.len()) => {
                     return Err(truncated());
                 }
                 _ => {}
             }
         }
-        let filter_type = FilterType::from_u8(wire[0])?;
-        let dst_start = y * row_bytes;
-        let (prev_rows, curr_rows) = raw.split_at_mut(dst_start);
-        let curr = &mut curr_rows[..row_bytes];
-        curr.copy_from_slice(&wire[1..]);
-        // RFC 2083 §6.3: the prior scanline of the first row is all
-        // zeros.
-        let prev: &[u8] = if y == 0 {
-            &zero_row
-        } else {
-            &prev_rows[(y - 1) * row_bytes..(y - 1) * row_bytes + row_bytes]
-        };
-        unfilter_row(filter_type, curr, prev, bpp)?;
+        for wire in slab[..want].chunks_exact(wire_row) {
+            let filter_type = FilterType::from_u8(wire[0])?;
+            let dst_start = y * row_bytes;
+            let (prev_rows, curr_rows) = raw.split_at_mut(dst_start);
+            let curr = &mut curr_rows[..row_bytes];
+            curr.copy_from_slice(&wire[1..]);
+            // RFC 2083 §6.3: the prior scanline of the first row is all
+            // zeros.
+            let prev: &[u8] = if y == 0 {
+                &zero_row
+            } else {
+                &prev_rows[(y - 1) * row_bytes..]
+            };
+            unfilter_row(filter_type, curr, prev, bpp)?;
+            y += 1;
+        }
     }
     // Everything the header implies has been produced. The stream must
     // now end: one more byte of output is a bomb, and a stream that

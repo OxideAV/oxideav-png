@@ -28,8 +28,9 @@ oxideav-core = { version = "0.1", optional = true }
 # `compcol` (Karpelès Lab's compression collection, the workspace-wide
 # DEFLATE/zlib provider) handles the RFC 1950/1951 framing for IDAT /
 # fdAT pixel streams and the zTXt / iTXt / iCCP metadata chunks. Only
-# the `zlib` algorithm feature is needed.
-compcol = { version = "0.6", default-features = false, features = ["zlib"] }
+# the `zlib` algorithm feature is needed (0.8 asks for `alloc` beside
+# it: its deflate family is also offered allocation-free).
+compcol = { version = "0.8", default-features = false, features = ["alloc", "zlib"] }
 
 [features]
 default = ["registry"]
@@ -49,7 +50,7 @@ dlsym = "0.0.2"
 # Hostile-input tests (tests/hostile_inflate.rs) craft zlib bodies that
 # inflate past the crate's decompression bounds; they use the same
 # workspace compression crate the library itself delegates to.
-compcol = { version = "0.6", default-features = false, features = ["zlib"] }
+compcol = { version = "0.8", default-features = false, features = ["alloc", "zlib"] }
 
 # Round 154 (depth-mode benchmarks): Criterion drives the three bench
 # harnesses (`decode`, `encode`, `roundtrip`) that future PNG encoder /
@@ -84,4 +85,8 @@ harness = false
 
 [[bench]]
 name = "encode_12mp"
+harness = false
+
+[[bench]]
+name = "throughput"
 harness = false

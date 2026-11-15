@@ -5,7 +5,9 @@
 //! levels, a multi-segment pixel stream, the full ancillary chunk set,
 //! the image-derived chunks, APNG) and compares the length and an
 //! FNV-1a 64 hash of the file against a value recorded from the
-//! encoder at v0.1.12. Changes to how the encoder moves bytes around
+//! encoder at v0.1.12 (the cases with larger
+//! streams re-recorded when the DEFLATE provider moved to compcol 0.8,
+//! whose encoder writes those streams differently). Changes to how the encoder moves bytes around
 //! (borrowed planes, streamed metadata chunks, appending to a caller's
 //! buffer) must leave every one of these files unchanged.
 //!
@@ -626,9 +628,9 @@ const STANDALONE: &[(&str, usize, u64)] = &[
     ("level 1", 6508, 0xb24b7d36e6c1c739),
     ("level 6", 6509, 0x2d8ca479be667189),
     ("level 9", 6509, 0xc000273d9d151c28),
-    ("multi-segment serial", 981851, 0x7fbae03f935416f3),
-    ("multi-segment 4 threads", 981851, 0x7fbae03f935416f3),
-    ("multi-segment adam7", 1006197, 0xedead227fd1fad8e),
+    ("multi-segment serial", 981845, 0x83ee6eb5ccb661eb),
+    ("multi-segment 4 threads", 981845, 0x83ee6eb5ccb661eb),
+    ("multi-segment adam7", 1006199, 0x7031e16fbf701ec2),
     ("encode_rgb8", 1888, 0xcbe0d06a534e5e11),
     ("encode_rgba8 long buffer", 2488, 0xd0c541db1e3b6562),
     ("metadata full set", 434679, 0xebf2aa0b9ec13750),
@@ -655,17 +657,17 @@ const STANDALONE: &[(&str, usize, u64)] = &[
     ("edge IDAT 16385", 11537, 0xdafb88b3c593f4ab),
     ("edge iCCP zTXt iTXt 16385", 39103, 0xf1b79e4c2cd8e05a),
     ("edge IDAT 32767", 23077, 0xcd2e2d8e528b2a51),
-    ("edge iCCP zTXt iTXt 32767", 73739, 0x407a681997cd88fa),
-    ("edge IDAT 32768", 23132, 0x2f69261d87cffe92),
-    ("edge iCCP zTXt iTXt 32768", 73837, 0xe9aec30e66f3a172),
+    ("edge iCCP zTXt iTXt 32767", 73741, 0x6d7db05b889f4e34),
+    ("edge IDAT 32768", 23132, 0xd3928023ade56506),
+    ("edge iCCP zTXt iTXt 32768", 73837, 0xee909cdc2b0cc1f0),
     ("edge IDAT 32769", 23246, 0xeced709a7923651e),
-    ("edge iCCP zTXt iTXt 32769", 73770, 0x5349f985a3062b19),
-    ("edge IDAT 65535", 45611, 0x20b2a80b931ce121),
-    ("edge iCCP zTXt iTXt 65535", 140827, 0x2203f77479abeba4),
-    ("edge IDAT 65536", 45648, 0xbceaa66761cc17f0),
-    ("edge iCCP zTXt iTXt 65536", 140814, 0x2965aa9740062742),
-    ("edge IDAT 65537", 42212, 0x8d9a0b7b8096a339),
-    ("edge iCCP zTXt iTXt 65537", 140816, 0xabcdb32aede0861c),
+    ("edge iCCP zTXt iTXt 32769", 73770, 0x18c18d04ef17d3a8),
+    ("edge IDAT 65535", 45611, 0x4e94c71aa49516bb),
+    ("edge iCCP zTXt iTXt 65535", 140816, 0x1949520372134e3b),
+    ("edge IDAT 65536", 45646, 0x70f54818574b07f8),
+    ("edge iCCP zTXt iTXt 65536", 140808, 0x46e242ca6b67c0e6),
+    ("edge IDAT 65537", 42216, 0x47ada349761029e2),
+    ("edge iCCP zTXt iTXt 65537", 140810, 0x45ec2df50ac4ea0a),
 ];
 
 fn check(cases: Vec<(String, Vec<u8>)>, expected: &[(&str, usize, u64)]) {
@@ -954,10 +956,10 @@ mod registry {
         ("trait colour two frames packet 0", 9687, 0x24a46e1a16e5d9fb),
         (
             "trait 4 threads two frames packet 0",
-            1963263,
-            0xba289c209ac060fc,
+            1963265,
+            0xf3ca4da08310eb50,
         ),
-        ("trait 4 threads still packet 0", 981604, 0x1d7e87d9c72b0793),
+        ("trait 4 threads still packet 0", 981605, 0xda277bf0b1dda353),
     ];
 
     #[test]
