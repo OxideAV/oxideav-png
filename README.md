@@ -459,18 +459,18 @@ bombs, §13.3); inflated metadata bodies are capped at
   depths below 8. `Brute` is the §12.7 "try every combination … find
   what compresses best" exhaustive search, reduced to the tractable
   per-image-fixed form: the encoder filters the whole image under each
-  of the six candidate row-strategies (`Adaptive` + the five `Fixed`
+  of the seven candidate row-strategies (`Adaptive`, `Entropy` + the five `Fixed`
   types), deflates every candidate, and emits the smallest. Where
   `Adaptive` minimises a *proxy* for compressed size (the signed-byte
   absolute sum), `Brute` measures the real DEFLATE size, so its output
   is always at least as small as `Adaptive` and never larger than any
-  `Fixed` choice — at the cost of six full-image deflate passes
+  `Fixed` choice — at the cost of seven full-image deflate passes
   (slowest; opt-in). The encoder applies whatever strategy the caller
   picks at all four filter sites — the non-interlaced ≥ 8-bit path,
   the non-interlaced sub-byte path, the Adam7 ≥ 8-bit path, and the
   Adam7 sub-byte path. Registry-side
   `CodecOptions` exposes a `filter` string key with the values
-  `adaptive` / `none` / `sub` / `up` / `average` / `paeth` / `brute`
+  `adaptive` / `entropy` / `none` / `sub` / `up` / `average` / `paeth` / `brute`
   (case-insensitive); the empty string maps to `adaptive` so callers
   that set the key without picking a value get the default.
 - Container timing (`registry`): the `png` demuxer's stream tick is
