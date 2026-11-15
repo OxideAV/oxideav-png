@@ -4,10 +4,7 @@
 use std::io::{Read, Write};
 
 use crate::chunk::PNG_MAGIC;
-use crate::decoder::{
-    Ihdr, check_palette_indices, decode_apng_info, decode_image, image_to_rgba_checked,
-    parse_all_chunks, parse_apng_chunks,
-};
+use crate::decoder::{Ihdr, decode_apng_info, decode_image, parse_all_chunks, parse_apng_chunks};
 use crate::encoder::{EncodeOptions, encode as encode_image};
 use crate::error::{PngError as Error, Result};
 use crate::image::{
@@ -77,17 +74,18 @@ pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<PngImage> {
 /// Decode straight to tightly packed 8-bit RGB (alpha dropped, no
 /// compositing). See [`PngImage::to_rgb8`] for the per-layout kernels.
 pub fn decode_rgb8(bytes: &[u8]) -> Result<RgbImage> {
-    let img = decode(bytes)?;
-    check_palette_indices(&img)?;
-    Ok(RgbImage::new(img.width, img.height, img.to_rgb8()))
+    let (width, height, data) =
+        crate::decoder::decode_packed8::<3>(bytes, &DecodeOptions::default())?;
+    Ok(RgbImage::new(width, height, data))
 }
 
 /// Decode straight to tightly packed 8-bit RGBA (alpha `255` where the
 /// source has none; `tRNS` and palette alpha applied). See
 /// [`PngImage::to_rgba8`] for the per-layout kernels.
 pub fn decode_rgba8(bytes: &[u8]) -> Result<RgbaImage> {
-    let img = decode(bytes)?;
-    image_to_rgba_checked(&img)
+    let (width, height, data) =
+        crate::decoder::decode_packed8::<4>(bytes, &DecodeOptions::default())?;
+    Ok(RgbaImage::new(width, height, data))
 }
 
 /// Every image of the file: one [`Frame`] for a still PNG (delay

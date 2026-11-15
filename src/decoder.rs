@@ -962,6 +962,28 @@ pub(crate) fn decode_image(buf: &[u8], opts: &DecodeOptions) -> Result<PngImage>
 /// chunk CRC, so doing it once instead of twice halves the whole-file
 /// CRC pass.
 pub(crate) fn decode_png_chunks(chunks: &[ChunkRef<'_>], opts: &DecodeOptions) -> Result<PngImage> {
+    let p = prepare_decode(chunks, opts)?;
+    let frame_pixels = inflate_image_pixels(&p.idat, &p.ihdr, "PNG: IDAT", "IHDR")?;
+    let img = build_png_image(&p.ihdr, frame_pixels, p.plte, p.trns)?;
+    Ok(img.with_color(p.side.color).with_metadata(p.side.metadata))
+}
+
+/// What a still decode reads from the chunk list before it touches the
+/// pixel stream, every check of [`decode_png_chunks`] passed.
+struct PreparedDecode<'a> {
+    ihdr: Ihdr,
+    plte: Option<&'a [u8]>,
+    trns: Option<&'a [u8]>,
+    /// The `IDAT` payload: borrowed for a single chunk, joined for a
+    /// split run.
+    idat: std::borrow::Cow<'a, [u8]>,
+    side: crate::sideinfo::SideInfo,
+}
+
+/// Validate a chunk list for decoding and collect what the pixel
+/// decode needs (limits, colour / metadata side information, critical
+/// chunk rules, `tRNS` shape, the `IDAT` stream).
+fn prepare_decode<'a>(chunks: &[ChunkRef<'a>], opts: &DecodeOptions) -> Result<PreparedDecode<'a>> {
     let ihdr_chunk = chunks
         .iter()
         .find(|c| c.is_type(b"IHDR"))
@@ -1024,21 +1046,143 @@ pub(crate) fn decode_png_chunks(chunks: &[ChunkRef<'_>], opts: &DecodeOptions) -
     // emits exactly one IDAT) borrow the payload straight out of the
     // source buffer; only a genuinely split IDAT run pays for the
     // concatenation copy.
-    let idat_concat: Vec<u8>;
-    let idat_stream: &[u8] = if idat_slices.len() == 1 {
-        idat_slices[0]
+    let idat: std::borrow::Cow<'a, [u8]> = if idat_slices.len() == 1 {
+        std::borrow::Cow::Borrowed(idat_slices[0])
     } else {
         let mut buf = Vec::with_capacity(idat_total_len);
         for s in &idat_slices {
             buf.extend_from_slice(s);
         }
-        idat_concat = buf;
-        &idat_concat
+        std::borrow::Cow::Owned(buf)
     };
+    Ok(PreparedDecode {
+        ihdr,
+        plte,
+        trns,
+        idat,
+        side,
+    })
+}
 
-    let frame_pixels = inflate_image_pixels(idat_stream, &ihdr, "PNG: IDAT", "IHDR")?;
-    let img = build_png_image(&ihdr, frame_pixels, plte, trns)?;
-    Ok(img.with_color(side.color).with_metadata(side.metadata))
+/// The wire rows (filter-type byte + filtered bytes) of a
+/// non-interlaced pixel stream, inflated a slab at a time and handed
+/// out one by one.
+///
+/// The inflater fills a slab of whole wire rows per step rather than
+/// one row: its fast path needs room ahead in the output buffer, and a
+/// row is often only a few kilobytes. The slab stays cache-sized, so
+/// the copy of each row out of it reads warm memory. The stream must
+/// inflate to exactly the size the header implies: [`Self::next_row`]
+/// reports a stream that ends early, [`Self::finish`] one that goes on
+/// (a decompression bomb, W3C PNG3 §13.3), neither buffering more than
+/// a slab.
+struct WireRows<'a> {
+    stream: &'a [u8],
+    dec: compcol::zlib::Decoder,
+    consumed: usize,
+    slab: Vec<u8>,
+    /// Bytes of `slab` filled, and the offset of the next row in it.
+    filled: usize,
+    pos: usize,
+    wire_row: usize,
+    rows_left: usize,
+    expected: u64,
+    what: &'a str,
+    header: &'a str,
+}
+
+impl<'a> WireRows<'a> {
+    fn new(stream: &'a [u8], ihdr: &Ihdr, what: &'a str, header: &'a str) -> Result<Self> {
+        let wire_row = 1 + ihdr.row_bytes()?;
+        let height = ihdr.height as usize;
+        let slab_rows = (INFLATE_SLAB_BYTES / wire_row).clamp(1, height.max(1));
+        Ok(Self {
+            stream,
+            dec: compcol::zlib::Decoder::new(),
+            consumed: 0,
+            slab: vec![0u8; slab_rows * wire_row],
+            filled: 0,
+            pos: 0,
+            wire_row,
+            rows_left: height,
+            expected: ihdr.expected_filtered_len()?,
+            what,
+            header,
+        })
+    }
+
+    fn zerr(&self, e: compcol::Error) -> Error {
+        Error::invalid(format!("{}: zlib decompress failed: {e:?}", self.what))
+    }
+
+    fn truncated(&self) -> Error {
+        Error::invalid(format!(
+            "{}: zlib stream ends before the {}-byte filtered-stream \
+             size implied by {}",
+            self.what, self.expected, self.header
+        ))
+    }
+
+    /// The next wire row. Calling it more often than the image has
+    /// rows is a truncation error.
+    fn next_row(&mut self) -> Result<&[u8]> {
+        if self.pos == self.filled {
+            if self.rows_left == 0 {
+                return Err(self.truncated());
+            }
+            let want = (self.slab.len() / self.wire_row).min(self.rows_left) * self.wire_row;
+            let mut filled = 0usize;
+            while filled < want {
+                let (p, status) = self
+                    .dec
+                    .decode(&self.stream[self.consumed..], &mut self.slab[filled..want])
+                    .map_err(|e| self.zerr(e))?;
+                self.consumed += p.consumed;
+                filled += p.written;
+                match status {
+                    Status::StreamEnd if filled < want => return Err(self.truncated()),
+                    _ if p.written == 0
+                        && (p.consumed == 0 || self.consumed >= self.stream.len()) =>
+                    {
+                        return Err(self.truncated());
+                    }
+                    _ => {}
+                }
+            }
+            self.filled = want;
+            self.pos = 0;
+        }
+        let row = &self.slab[self.pos..self.pos + self.wire_row];
+        self.pos += self.wire_row;
+        self.rows_left -= 1;
+        Ok(row)
+    }
+
+    /// Everything the header implies has been produced. The stream
+    /// must now end: one more byte of output is a bomb, and a stream
+    /// that never reaches its trailer is truncated.
+    fn finish(mut self) -> Result<()> {
+        let mut scratch = [0u8; 1];
+        loop {
+            let (p, status) = self
+                .dec
+                .decode(&self.stream[self.consumed..], &mut scratch)
+                .map_err(|e| self.zerr(e))?;
+            self.consumed += p.consumed;
+            if p.written > 0 {
+                return Err(Error::invalid(format!(
+                    "{} inflates past the {}-byte filtered-stream size \
+                     implied by {} (decompression bomb, W3C PNG3 §13.3)",
+                    self.what, self.expected, self.header
+                )));
+            }
+            match status {
+                Status::StreamEnd => return Ok(()),
+                _ if p.consumed == 0 => return Err(self.truncated()),
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Wire bytes the streaming decode inflates per slab (whole rows; at
@@ -1089,80 +1233,272 @@ fn inflate_image_pixels(stream: &[u8], ihdr: &Ihdr, what: &str, header: &str) ->
     let row_bytes = ihdr.row_bytes()?;
     let bpp = ihdr.bpp_for_filter()?;
     let height = ihdr.height as usize;
-    let wire_row = 1 + row_bytes;
     let mut raw = vec![0u8; row_bytes * height];
-    // The inflater fills a slab of whole wire rows per call sequence
-    // rather than one row: its fast path needs room ahead in the output
-    // buffer, and a row is often only a few kilobytes. The slab stays
-    // cache-sized, so the copy of each row into the plane reads warm
-    // memory.
-    let slab_rows = (INFLATE_SLAB_BYTES / wire_row).clamp(1, height.max(1));
-    let mut slab = vec![0u8; slab_rows * wire_row];
     let zero_row = vec![0u8; row_bytes];
-    let mut dec = compcol::zlib::Decoder::new();
-    let mut consumed = 0usize;
-    let zerr = |e: compcol::Error| Error::invalid(format!("{what}: zlib decompress failed: {e:?}"));
-    let truncated = || {
-        Error::invalid(format!(
-            "{what}: zlib stream ends before the {expected}-byte filtered-stream \
-             size implied by {header}"
-        ))
-    };
-    let mut y = 0usize;
-    while y < height {
-        // Fill the next run of wire rows.
-        let want = slab_rows.min(height - y) * wire_row;
-        let mut filled = 0usize;
-        while filled < want {
-            let (p, status) = dec
-                .decode(&stream[consumed..], &mut slab[filled..want])
-                .map_err(zerr)?;
-            consumed += p.consumed;
-            filled += p.written;
-            match status {
-                Status::StreamEnd if filled < want => return Err(truncated()),
-                _ if p.written == 0 && (p.consumed == 0 || consumed >= stream.len()) => {
-                    return Err(truncated());
-                }
-                _ => {}
-            }
-        }
-        for wire in slab[..want].chunks_exact(wire_row) {
-            let filter_type = FilterType::from_u8(wire[0])?;
-            let dst_start = y * row_bytes;
-            let (prev_rows, curr_rows) = raw.split_at_mut(dst_start);
-            let curr = &mut curr_rows[..row_bytes];
-            curr.copy_from_slice(&wire[1..]);
-            // RFC 2083 §6.3: the prior scanline of the first row is all
-            // zeros.
-            let prev: &[u8] = if y == 0 {
-                &zero_row
-            } else {
-                &prev_rows[(y - 1) * row_bytes..]
-            };
-            unfilter_row(filter_type, curr, prev, bpp)?;
-            y += 1;
-        }
+    let mut rows = WireRows::new(stream, ihdr, what, header)?;
+    for y in 0..height {
+        let wire = rows.next_row()?;
+        let filter_type = FilterType::from_u8(wire[0])?;
+        let dst_start = y * row_bytes;
+        let (prev_rows, curr_rows) = raw.split_at_mut(dst_start);
+        let curr = &mut curr_rows[..row_bytes];
+        curr.copy_from_slice(&wire[1..]);
+        // RFC 2083 §6.3: the prior scanline of the first row is all
+        // zeros.
+        let prev: &[u8] = if y == 0 {
+            &zero_row
+        } else {
+            &prev_rows[(y - 1) * row_bytes..]
+        };
+        unfilter_row(filter_type, curr, prev, bpp)?;
     }
-    // Everything the header implies has been produced. The stream must
-    // now end: one more byte of output is a bomb, and a stream that
-    // never reaches its trailer is truncated.
-    let mut scratch = [0u8; 1];
-    loop {
-        let (p, status) = dec
-            .decode(&stream[consumed..], &mut scratch)
-            .map_err(zerr)?;
-        consumed += p.consumed;
-        if p.written > 0 {
-            return Err(bomb());
-        }
-        match status {
-            Status::StreamEnd => break,
-            _ if p.consumed == 0 => return Err(truncated()),
+    rows.finish()?;
+    expand_byte_plane(raw, ihdr, ihdr.width as usize, height)
+}
+
+/// Decode a still straight to tightly packed 8-bit pixels, `N` bytes
+/// each: RGBA for `N = 4` (alpha 255 where the source has none, the
+/// `tRNS` key and palette alpha applied), RGB for `N = 3` (alpha
+/// dropped, no compositing). The pixels are those of
+/// [`PngImage::to_rgba8`] / [`PngImage::to_rgb8`] on the decoded image.
+///
+/// A non-interlaced stream is converted row by row as it is
+/// reconstructed, against a two-row window in the file's own layout:
+/// the native-layout plane a [`decode_image`] builds first is never
+/// allocated, and each row is converted while it is still in cache.
+/// An interlaced stream goes through the plane.
+pub(crate) fn decode_packed8<const N: usize>(
+    buf: &[u8],
+    opts: &DecodeOptions,
+) -> Result<(u32, u32, Vec<u8>)> {
+    let chunks = parse_all_chunks(buf)?;
+    let p = prepare_decode(&chunks, opts)?;
+    let ihdr = p.ihdr;
+    if ihdr.interlace != 0 {
+        let frame_pixels = inflate_image_pixels(&p.idat, &ihdr, "PNG: IDAT", "IHDR")?;
+        let img = build_png_image(&ihdr, frame_pixels, p.plte, p.trns)?;
+        check_palette_indices(&img)?;
+        let out = if N == 4 {
+            img.to_rgba8()
+        } else {
+            img.to_rgb8()
+        };
+        return Ok((ihdr.width, ihdr.height, out));
+    }
+    if ihdr.bit_depth == 8 && matches!((ihdr.colour_type, N), (6, 4) | (2, 3)) {
+        // The file's layout is the output's: the reconstructed plane is
+        // the answer, built in place with no second buffer.
+        let plane = inflate_image_pixels(&p.idat, &ihdr, "PNG: IDAT", "IHDR")?;
+        return Ok((ihdr.width, ihdr.height, plane));
+    }
+    let kernel = Packed8Row::new(&ihdr, p.plte, p.trns)?;
+    let (w, h) = (ihdr.width as usize, ihdr.height as usize);
+    let row_bytes = ihdr.row_bytes()?;
+    let bpp = ihdr.bpp_for_filter()?;
+    let mut out = vec![0u8; w * h * N];
+    let mut prev = vec![0u8; row_bytes];
+    let mut cur = vec![0u8; row_bytes];
+    let mut rows = WireRows::new(&p.idat, &ihdr, "PNG: IDAT", "IHDR")?;
+    for dst in out.chunks_exact_mut(w * N) {
+        let wire = rows.next_row()?;
+        let filter_type = FilterType::from_u8(wire[0])?;
+        cur.copy_from_slice(&wire[1..]);
+        unfilter_row(filter_type, &mut cur, &prev, bpp)?;
+        kernel.convert::<N>(&cur, dst)?;
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    rows.finish()?;
+    Ok((ihdr.width, ihdr.height, out))
+}
+
+/// One reconstructed row in the file's layout (16-bit samples big
+/// endian, sub-byte samples packed) to 8-bit RGB(A): the per-row form
+/// of [`PngImage::to_rgba8`], for [`decode_packed8`].
+struct Packed8Row {
+    colour_type: u8,
+    bit_depth: u8,
+    /// Palette entries as RGBA; `entries` of them are defined.
+    lut: Box<[[u8; 4]; 256]>,
+    entries: usize,
+    /// The `tRNS` key of a greyscale image, at the file's bit depth.
+    key_gray: Option<u16>,
+    /// The `tRNS` key of a truecolour image.
+    key_rgb: Option<[u16; 3]>,
+}
+
+impl Packed8Row {
+    fn new(ihdr: &Ihdr, plte: Option<&[u8]>, trns: Option<&[u8]>) -> Result<Self> {
+        let mut lut = Box::new([[0u8; 4]; 256]);
+        let mut entries = 0usize;
+        let (mut key_gray, mut key_rgb) = (None, None);
+        match ihdr.colour_type {
+            3 => {
+                let plte =
+                    plte.ok_or_else(|| Error::invalid("PNG: colour type 3 requires PLTE chunk"))?;
+                let palette = Palette::from_rgb(plte, trns);
+                entries = palette.len().min(256);
+                if entries == 0 {
+                    return Err(Error::invalid(
+                        "PNG: Pal8 image missing PLTE chunk for RGBA promotion",
+                    ));
+                }
+                for (slot, e) in lut.iter_mut().zip(palette.entries.iter()) {
+                    *slot = *e;
+                }
+            }
+            0 | 2 => {
+                if let Some(t) = trns {
+                    match Trns::parse(t, ihdr.colour_type, ihdr.bit_depth, None)? {
+                        Trns::Grayscale(g) => key_gray = Some(g),
+                        Trns::Rgb(r, g, b) => key_rgb = Some([r, g, b]),
+                        Trns::Palette(_) => {}
+                    }
+                }
+            }
             _ => {}
         }
+        Ok(Self {
+            colour_type: ihdr.colour_type,
+            bit_depth: ihdr.bit_depth,
+            lut,
+            entries,
+            key_gray,
+            key_rgb,
+        })
     }
-    expand_byte_plane(raw, ihdr, ihdr.width as usize, height)
+
+    /// Convert `row` into `dst` (`N` bytes per pixel, `N` 3 or 4; the
+    /// pixel count is `dst`'s).
+    fn convert<const N: usize>(&self, row: &[u8], dst: &mut [u8]) -> Result<()> {
+        let dst = dst.as_chunks_mut::<N>().0;
+        #[inline(always)]
+        fn put<const N: usize>(px: &mut [u8; N], rgb: [u8; 3], a: u8) {
+            px[0] = rgb[0];
+            px[1] = rgb[1];
+            px[2] = rgb[2];
+            if N == 4 {
+                px[3] = a;
+            }
+        }
+        match (self.colour_type, self.bit_depth) {
+            (0, 8) => {
+                let key = self.key_gray.and_then(|k| u8::try_from(k).ok());
+                for (&g, px) in row.iter().zip(dst) {
+                    put(px, [g, g, g], if key == Some(g) { 0 } else { 255 });
+                }
+            }
+            (0, 16) => {
+                for (s, px) in row.as_chunks::<2>().0.iter().zip(dst) {
+                    let opaque = self.key_gray != Some(u16::from_be_bytes(*s));
+                    put(px, [s[0], s[0], s[0]], if opaque { 255 } else { 0 });
+                }
+            }
+            (0, depth) => {
+                // §13.12 scaling of a 1 / 2 / 4-bit sample to 8 bits.
+                let scale = 255 / ((1u16 << depth) - 1) as u8;
+                let key = self.key_gray.and_then(|k| u8::try_from(k).ok());
+                for (v, px) in subbyte_samples(row, depth).zip(dst) {
+                    let g = v * scale;
+                    put(px, [g, g, g], if key == Some(v) { 0 } else { 255 });
+                }
+            }
+            (2, 8) => {
+                let key = self.key_rgb.and_then(|k| {
+                    Some([
+                        u8::try_from(k[0]).ok()?,
+                        u8::try_from(k[1]).ok()?,
+                        u8::try_from(k[2]).ok()?,
+                    ])
+                });
+                match key {
+                    None => {
+                        for (s, px) in row.as_chunks::<3>().0.iter().zip(dst) {
+                            put(px, *s, 255);
+                        }
+                    }
+                    Some(key) => {
+                        for (s, px) in row.as_chunks::<3>().0.iter().zip(dst) {
+                            put(px, *s, if *s == key { 0 } else { 255 });
+                        }
+                    }
+                }
+            }
+            (2, _) => {
+                for (s, px) in row.as_chunks::<6>().0.iter().zip(dst) {
+                    let sample = [
+                        u16::from_be_bytes([s[0], s[1]]),
+                        u16::from_be_bytes([s[2], s[3]]),
+                        u16::from_be_bytes([s[4], s[5]]),
+                    ];
+                    let opaque = self.key_rgb != Some(sample);
+                    put(px, [s[0], s[2], s[4]], if opaque { 255 } else { 0 });
+                }
+            }
+            (3, depth) => {
+                let lookup = |idx: u8, px: &mut [u8; N]| -> Result<()> {
+                    if usize::from(idx) >= self.entries {
+                        return Err(Error::invalid(format!(
+                            "PNG: palette index {idx} out of bounds (PLTE has {} entries)",
+                            self.entries
+                        )));
+                    }
+                    let e = self.lut[idx as usize];
+                    put(px, [e[0], e[1], e[2]], e[3]);
+                    Ok(())
+                };
+                if depth == 8 {
+                    // One range check for the row, then a bare lookup.
+                    if let Some(&idx) = row
+                        .iter()
+                        .take(dst.len())
+                        .find(|&&i| usize::from(i) >= self.entries)
+                    {
+                        return lookup(idx, &mut [0u8; N]);
+                    }
+                    for (&idx, px) in row.iter().zip(dst) {
+                        let e = self.lut[idx as usize];
+                        put(px, [e[0], e[1], e[2]], e[3]);
+                    }
+                } else {
+                    for (idx, px) in subbyte_samples(row, depth).zip(dst) {
+                        lookup(idx, px)?;
+                    }
+                }
+            }
+            (4, 8) => {
+                for (s, px) in row.as_chunks::<2>().0.iter().zip(dst) {
+                    put(px, [s[0], s[0], s[0]], s[1]);
+                }
+            }
+            (4, _) => {
+                for (s, px) in row.as_chunks::<4>().0.iter().zip(dst) {
+                    put(px, [s[0], s[0], s[0]], s[2]);
+                }
+            }
+            (_, 8) => {
+                for (s, px) in row.as_chunks::<4>().0.iter().zip(dst) {
+                    put(px, [s[0], s[1], s[2]], s[3]);
+                }
+            }
+            _ => {
+                for (s, px) in row.as_chunks::<8>().0.iter().zip(dst) {
+                    put(px, [s[0], s[2], s[4]], s[6]);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The samples of a packed row of `depth`-bit (1 / 2 / 4) samples,
+/// leftmost pixel in the high-order bits of each byte (RFC 2083 §2.3).
+/// The iterator runs to the end of the last byte; the caller zips it
+/// with the row's pixels, which stops it before the padding bits.
+fn subbyte_samples(row: &[u8], depth: u8) -> impl Iterator<Item = u8> + '_ {
+    let per_byte = 8 / depth;
+    let mask = ((1u16 << depth) - 1) as u8;
+    row.iter()
+        .flat_map(move |&byte| (0..per_byte).map(move |k| (byte >> (8 - depth * (k + 1))) & mask))
 }
 
 /// Enforce the per-IHDR rules RFC 2083 §4.2.9 places on a `tRNS` chunk.
@@ -1408,7 +1744,17 @@ fn build_png_image(
         // parse failure here can only be a ct 4 / 6 chunk the caller
         // let through — which `validate_trns` rejects first.
         if matches!(ihdr.colour_type, 0 | 2) {
-            img.transparency = Some(Trns::parse(t, ihdr.colour_type, ihdr.bit_depth, None)?);
+            let key = Trns::parse(t, ihdr.colour_type, ihdr.bit_depth, None)?;
+            // The chunk gives the key at the file's bit depth; a 1 / 2 /
+            // 4-bit greyscale plane is decoded scaled to 8 bits, so the
+            // key is scaled the same way and names the same pixels in
+            // the image's own samples.
+            img.transparency = Some(match key {
+                Trns::Grayscale(v) if ihdr.bit_depth < 8 => {
+                    Trns::Grayscale(v * (255 / ((1u16 << ihdr.bit_depth) - 1)))
+                }
+                key => key,
+            });
         }
     }
     Ok(img)

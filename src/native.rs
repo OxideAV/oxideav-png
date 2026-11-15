@@ -19,7 +19,7 @@
 //! | `png-time` | `tIME` | one |
 //! | `png-bkgd` | `bKGD` | one |
 //! | `png-hist` | `hIST` | one |
-//! | `png-trns` | `tRNS` of a greyscale / truecolour image (the keyed sample) | one |
+//! | `png-trns` | `tRNS` of a greyscale / truecolour image (the keyed sample, in the frame's samples: scaled to 8 bits for a 1 / 2 / 4-bit greyscale file) | one |
 //! | `png-splt` | `sPLT` | any, distinct palette names |
 //! | `png-text` | `tEXt` | any |
 //! | `png-ztxt` | `zTXt` (body still compressed) | any |
@@ -190,7 +190,15 @@ pub(crate) fn blobs_from_chunks(chunks: &[ChunkRef<'_>], ihdr: &Ihdr) -> Vec<Met
         if single {
             seen.push(c.chunk_type);
         }
-        out.push(MetadataBlob::new(kind_of(&c.chunk_type), d.to_vec()));
+        let mut body = d.to_vec();
+        if c.is_type(b"tRNS") && ihdr.colour_type == 0 && ihdr.bit_depth < 8 {
+            // A 1 / 2 / 4-bit greyscale picture is decoded scaled to 8
+            // bits; its key is given in the frame's samples.
+            let scale = 255 / ((1u16 << ihdr.bit_depth) - 1);
+            let key = u16::from_be_bytes([d[0], d[1]]) * scale;
+            body = key.to_be_bytes().to_vec();
+        }
+        out.push(MetadataBlob::new(kind_of(&c.chunk_type), body));
     }
     out
 }
