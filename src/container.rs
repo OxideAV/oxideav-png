@@ -155,6 +155,10 @@ fn open_demuxer(
     // (the decoder attaches the same records to every frame).
     let side = crate::sideinfo::extract(&chunks, false, true)?;
     params.blobs = crate::registry::blobs_from_metadata(&side.metadata);
+    // Every other ancillary chunk as its format-native record.
+    params
+        .blobs
+        .extend(crate::native::blobs_from_chunks(&chunks, &ihdr));
 
     let time_base = if has_actl {
         apng_time_base(&chunks)?

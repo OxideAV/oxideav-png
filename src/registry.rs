@@ -176,17 +176,37 @@ fn video_frame_to_png_image(
         .ok_or_else(|| PngError::invalid("PNG encoder: frame has no planes"))?;
     let mut img = PngImage::packed(width, height, pix, plane.stride, plane.data.clone())?;
     stamp_side_channels(&mut img, frame, palette);
-    if let Some(meta) = metadata_from_blobs(frame, stream_blobs) {
+    let frame_blobs = frame.blobs();
+    if let Some(meta) = metadata_from_blobs(&frame_blobs, stream_blobs, true) {
         img.metadata = meta;
     }
+    let (colour_type, bit_depth) = colour_type_and_depth(pix);
+    img.transparency = crate::native::trns_of(&frame_blobs, stream_blobs, colour_type, bit_depth);
     Ok(img)
 }
 
+/// The IHDR colour type and natural bit depth of a layout.
+fn colour_type_and_depth(pix: PngPixelFormat) -> (u8, u8) {
+    match pix {
+        PngPixelFormat::Gray8 => (0, 8),
+        PngPixelFormat::Gray16Le => (0, 16),
+        PngPixelFormat::Rgb24 => (2, 8),
+        PngPixelFormat::Rgb48Le => (2, 16),
+        PngPixelFormat::Pal8 => (3, 8),
+        PngPixelFormat::Ya8 => (4, 8),
+        PngPixelFormat::Ya16Le => (4, 16),
+        PngPixelFormat::Rgba => (6, 8),
+        PngPixelFormat::Rgba64Le => (6, 16),
+    }
+}
+
 /// [`video_frame_to_png_image`] without the copy: the frame's first
-/// plane as the encoder reads it, borrowed, with the same side fields.
-/// The palette a `Pal8` frame gets is built into `palette`, and the
-/// metadata its blob records (or `stream_blobs`) give into `metadata`;
-/// the view borrows both.
+/// plane as the encoder reads it, borrowed, with the palette, colour
+/// and `icc` / `exif` / `xmp` side fields (the format-native records
+/// are read by [`options_with_blob_chunks`]). The palette a `Pal8`
+/// frame gets is built into `palette`, and the metadata its blob
+/// records `frame_blobs` (or `stream_blobs`) give into `metadata`; the
+/// view borrows both.
 #[allow(clippy::too_many_arguments)]
 fn video_frame_view<'a>(
     frame: &'a VideoFrame,
@@ -194,6 +214,7 @@ fn video_frame_view<'a>(
     height: u32,
     pix: PngPixelFormat,
     legacy_palette: &[u8],
+    frame_blobs: &[MetadataBlob],
     stream_blobs: &[MetadataBlob],
     palette: &'a mut Option<Palette>,
     metadata: &'a mut Option<Metadata>,
@@ -210,7 +231,9 @@ fn video_frame_view<'a>(
     if let Some(color) = color {
         image.color = color;
     }
-    *metadata = metadata_from_blobs(frame, stream_blobs);
+    // The `gAMA` record is reconciled with the colour signal by
+    // `options_with_blob_chunks`, not read as the image's gamma here.
+    *metadata = metadata_from_blobs(frame_blobs, stream_blobs, false);
     let metadata: &'a Option<Metadata> = metadata;
     image.metadata = metadata.as_ref();
     Ok(image)
@@ -220,10 +243,13 @@ fn video_frame_view<'a>(
 /// `icc` (`iCCP`), [`BlobKind::EXIF`] → `exif` (`eXIf`) and
 /// [`BlobKind::XMP`] → `xmp` (the `XML:com.adobe.xmp` `iTXt`), each
 /// from the frame's first record of that kind, else from the stream's
-/// (`CodecParameters::blobs`). Other kinds are not carried (PNG has no
-/// chunk for them). `None` when neither supplies any of the three.
-fn metadata_from_blobs(frame: &VideoFrame, stream_blobs: &[MetadataBlob]) -> Option<Metadata> {
-    let frame_blobs = frame.blobs();
+/// (`CodecParameters::blobs`), plus, under `with_gamma`, `gamma` from a
+/// `png-gama` record. `None` when neither supplies any of them.
+fn metadata_from_blobs(
+    frame_blobs: &[MetadataBlob],
+    stream_blobs: &[MetadataBlob],
+    with_gamma: bool,
+) -> Option<Metadata> {
     let pick = |kind: &BlobKind| {
         frame_blobs
             .iter()
@@ -236,14 +262,85 @@ fn metadata_from_blobs(frame: &VideoFrame, stream_blobs: &[MetadataBlob]) -> Opt
         pick(&BlobKind::EXIF),
         pick(&BlobKind::XMP),
     );
-    if icc.is_none() && exif.is_none() && xmp.is_none() {
+    let gamma = if with_gamma {
+        crate::native::gamma_of(frame_blobs, stream_blobs)
+    } else {
+        None
+    };
+    if icc.is_none() && exif.is_none() && xmp.is_none() && gamma.is_none() {
         return None;
     }
     let mut meta = Metadata::new();
     meta.icc = icc;
     meta.exif = exif;
     meta.xmp = xmp;
+    meta.gamma = gamma;
     Some(meta)
+}
+
+/// `opts` with the chunks the frame's (else the stream's) format-native
+/// blob records give `image`, see [`crate::native`]; `None` when they
+/// give none, so the caller's options are used as they are.
+///
+/// The frame's colour signal stays the authority on the colour space:
+/// an `sRGB` record supplies only the rendering intent of the `sRGB`
+/// chunk an sRGB signal writes, and next to that chunk `gAMA` / `cHRM`
+/// records are kept only when they hold the values W3C PNG3 §11.3.2.5
+/// Table 17 allows there. Options metadata that names a colour chunk
+/// itself is left alone, and no colour record is added to it.
+fn options_with_blob_chunks(
+    image: &ImageRef<'_>,
+    frame_blobs: &[MetadataBlob],
+    stream_blobs: &[MetadataBlob],
+    opts: &EncodeOptions,
+) -> Result<Option<EncodeOptions>, PngError> {
+    use crate::metadata::{Chrm, Gama};
+
+    let (ihdr, _, plte, _) = crate::encoder::ihdr_and_row_bytes(image, opts)?;
+    let plte_entries = plte.as_ref().map(|p| p.len() / 3);
+    let mut derived =
+        crate::native::metadata_from_blobs(frame_blobs, stream_blobs, &ihdr, plte_entries);
+    let explicit_colour = opts.metadata.as_ref().is_some_and(|m| {
+        m.srgb.is_some() || m.cicp.is_some() || m.chrm.is_some() || m.iccp.is_some()
+    });
+    if explicit_colour {
+        (derived.srgb, derived.gama, derived.chrm) = (None, None, None);
+    } else {
+        let has_icc = image.metadata.is_some_and(|m| m.icc.is_some());
+        let (srgb, cicp) = crate::encoder::color_chunks(image, has_icc)?;
+        match srgb {
+            Some(default_intent) => {
+                derived.srgb = Some(derived.srgb.unwrap_or(default_intent));
+                derived.gama = derived.gama.filter(|g| *g == Gama::SRGB);
+                derived.chrm = derived.chrm.filter(|c| *c == Chrm::SRGB);
+            }
+            None => {
+                derived.srgb = None;
+                derived.cicp = cicp;
+            }
+        }
+    }
+    if derived.is_empty() {
+        return Ok(None);
+    }
+    let merged = match &opts.metadata {
+        Some(explicit) => crate::native::fill_unset(explicit, derived),
+        None => derived,
+    };
+    let mut with = opts.clone();
+    with.metadata = Some(merged);
+    Ok(Some(with))
+}
+
+/// The format-native blob records of `meta` (`png-phys`, `png-time`,
+/// `png-text`, …; see the crate README's *Framework use*): what to
+/// attach to a frame, or to `CodecParameters::blobs`, so that the PNG
+/// encoder writes those chunks. `cICP`, `iCCP`, `eXIf`, an XMP `iTXt`
+/// and a palette `tRNS` are not listed — they travel as the colour
+/// signal, the `icc` / `exif` / `xmp` blobs and the palette-alpha
+/// record. A record that cannot be serialised is the error.
+pub fn metadata_blobs(meta: &crate::PngMetadata) -> Result<Vec<MetadataBlob>, PngError> {
+    crate::native::blobs_from_metadata(meta)
 }
 
 /// The blob records an image's metadata gives, in `icc`, `exif`, `xmp`
@@ -305,12 +402,16 @@ fn png_image_to_video_frame(image: &PngImage, pts: Option<i64>) -> VideoFrame {
             data: image.data().to_vec(),
         }],
     };
-    stamp_frame_side_channels(&mut frame, image);
+    stamp_frame_side_channels(&mut frame, image, None);
     frame
 }
 
 /// [`png_image_to_video_frame`] moving the plane out of `image`.
-fn png_image_into_video_frame(mut image: PngImage, pts: Option<i64>) -> VideoFrame {
+fn png_image_into_video_frame(
+    mut image: PngImage,
+    pts: Option<i64>,
+    native: Option<Vec<MetadataBlob>>,
+) -> VideoFrame {
     let stride = image.stride();
     let data = if image.planes.is_empty() {
         Vec::new()
@@ -321,18 +422,41 @@ fn png_image_into_video_frame(mut image: PngImage, pts: Option<i64>) -> VideoFra
         pts,
         planes: vec![VideoPlane { stride, data }],
     };
-    stamp_frame_side_channels(&mut frame, &image);
+    stamp_frame_side_channels(&mut frame, &image, native);
     frame
 }
 
-fn stamp_frame_side_channels(frame: &mut VideoFrame, image: &PngImage) {
+/// Attach `image`'s side fields to `frame`: the palette records, the
+/// colour signal and the blob records — `icc` / `exif` / `xmp`, then
+/// the format-native ones. `native` is the file's own chunk records
+/// when the caller has its chunk list ([`crate::native`]); without one
+/// the image gives what it holds, its `gAMA` value and keyed
+/// transparency.
+fn stamp_frame_side_channels(
+    frame: &mut VideoFrame,
+    image: &PngImage,
+    native: Option<Vec<MetadataBlob>>,
+) {
     if let (PngPixelFormat::Pal8, Some(p)) = (image.format, &image.palette) {
         frame.set_palette(p.to_rgb());
         if let Some(alpha) = p.alpha_tail() {
             frame.set_palette_alpha(alpha);
         }
     }
-    frame.set_blobs(blobs_from_metadata(&image.metadata));
+    let mut blobs = blobs_from_metadata(&image.metadata);
+    match native {
+        Some(native) => blobs.extend(native),
+        None => {
+            blobs.extend(image.metadata.gamma.and_then(crate::native::gama_blob));
+            blobs.extend(
+                image
+                    .transparency
+                    .as_ref()
+                    .and_then(crate::native::trns_blob),
+            );
+        }
+    }
+    frame.set_blobs(blobs);
     let c = image.color;
     if c.primaries != ColorInfo::UNSPECIFIED
         || c.transfer != ColorInfo::UNSPECIFIED
@@ -347,7 +471,7 @@ impl From<PngImage> for VideoFrame {
     /// for `Pal8` and the colour-signal side-channel when the image
     /// signals a colour space.
     fn from(image: PngImage) -> Self {
-        png_image_into_video_frame(image, None)
+        png_image_into_video_frame(image, None, None)
     }
 }
 
@@ -590,9 +714,6 @@ impl PngDecoder {
             _ => None,
         };
         let image = crate::decoder::decode_png_chunks(&chunks, &DecodeOptions::default())?;
-        let Some(fctl) = fctl else {
-            return Ok(png_image_into_video_frame(image, pkt.pts));
-        };
         let ihdr = crate::decoder::Ihdr::parse(
             chunks
                 .iter()
@@ -600,6 +721,10 @@ impl PngDecoder {
                 .ok_or_else(|| PngError::invalid("PNG: missing IHDR"))?
                 .data,
         )?;
+        let native = crate::native::blobs_from_chunks(&chunks, &ihdr);
+        let Some(fctl) = fctl else {
+            return Ok(png_image_into_video_frame(image, pkt.pts, Some(native)));
+        };
         let (width, height) = self.canvas_size.unwrap_or((
             fctl.x_offset.saturating_add(fctl.width),
             fctl.y_offset.saturating_add(fctl.height),
@@ -622,7 +747,7 @@ impl PngDecoder {
         whole.metadata = image.metadata;
         whole.palette = image.palette;
         whole.transparency = image.transparency;
-        Ok(png_image_into_video_frame(whole, pkt.pts))
+        Ok(png_image_into_video_frame(whole, pkt.pts, Some(native)))
     }
 }
 
@@ -664,8 +789,14 @@ impl Decoder for PngDecoder {
 /// directly: the standalone decode, then [`From<PngImage>`] for
 /// `VideoFrame` with `pts` stamped.
 pub fn decode_png_to_frame(buf: &[u8], pts: Option<i64>) -> oxideav_core::Result<VideoFrame> {
-    let img = crate::decoder::decode_image(buf, &DecodeOptions::default())?;
-    Ok(png_image_into_video_frame(img, pts))
+    let chunks = crate::decoder::parse_all_chunks(buf)?;
+    let img = crate::decoder::decode_png_chunks(&chunks, &DecodeOptions::default())?;
+    let native = chunks
+        .iter()
+        .find(|c| c.is_type(b"IHDR"))
+        .and_then(|c| crate::decoder::Ihdr::parse(c.data).ok())
+        .map(|ihdr| crate::native::blobs_from_chunks(&chunks, &ihdr));
+    Ok(png_image_into_video_frame(img, pts, native))
 }
 
 // ---- Encoder trait impl + factory ----
@@ -894,21 +1025,27 @@ impl PngEncoder {
     fn compress_frame(&mut self, frame: &VideoFrame) -> Result<(), PngError> {
         let Some(file) = self.pending.as_mut() else {
             let (mut palette, mut metadata) = (None, None);
+            let frame_blobs = frame.blobs();
+            let stream_blobs = self.output_params.blobs();
             let image = video_frame_view(
                 frame,
                 self.width,
                 self.height,
                 self.pix,
                 &self.palette,
-                self.output_params.blobs(),
+                &frame_blobs,
+                stream_blobs,
                 &mut palette,
                 &mut metadata,
             )?;
-            let (still, layout) = encode_still(&image, &self.opts, self.threads)?;
+            let with_chunks =
+                options_with_blob_chunks(&image, &frame_blobs, stream_blobs, &self.opts)?;
+            let opts = with_chunks.as_ref().unwrap_or(&self.opts);
+            let (still, layout) = encode_still(&image, opts, self.threads)?;
             // Derived once, from frame 0 with its palette, as
             // `encode_apng_threaded` derives it from its first frame; the
             // still above already passed the same checks.
-            let stream = FrameStream::new(&image, &self.opts)?;
+            let stream = FrameStream::new(&image, opts)?;
             self.pending = Some(PendingFile {
                 still,
                 layout,
@@ -1001,16 +1138,20 @@ pub fn encode_single_with_options(
 ) -> oxideav_core::Result<Vec<u8>> {
     let pix = from_core_pixel_format(pix)?;
     let (mut frame_palette, mut metadata) = (None, None);
+    let frame_blobs = frame.blobs();
     let image = video_frame_view(
         frame,
         width,
         height,
         pix,
         palette,
+        &frame_blobs,
         &[],
         &mut frame_palette,
         &mut metadata,
     )?;
+    let with_chunks = options_with_blob_chunks(&image, &frame_blobs, &[], opts)?;
+    let opts = with_chunks.as_ref().unwrap_or(opts);
     Ok(encode_view(&image, opts, opts.threads.max(1))?)
 }
 
@@ -1034,9 +1175,15 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             PixelFormat::Ya16Le,
         ])
         // `iCCP`, `eXIf` and the `XML:com.adobe.xmp` `iTXt` (W3C PNG3
-        // §11.3.2.4 / §11.3.4.5 / §11.3.3.4); every other kind has no
+        // §11.3.2.4 / §11.3.4.5 / §11.3.3.4), then the format-native
+        // `png-<chunk>` kinds (`crate::native`); every other kind has no
         // PNG chunk and is dropped.
-        .with_embedded_blob_kinds(vec![BlobKind::ICC, BlobKind::EXIF, BlobKind::XMP]);
+        .with_embedded_blob_kinds(
+            [BlobKind::ICC, BlobKind::EXIF, BlobKind::XMP]
+                .into_iter()
+                .chain(crate::native::native_kinds())
+                .collect(),
+        );
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_STR))
             .capabilities(caps)

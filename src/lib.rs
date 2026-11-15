@@ -155,6 +155,8 @@ pub mod filter;
 pub mod gamma;
 pub mod image;
 pub mod metadata;
+#[cfg(feature = "registry")]
+mod native;
 mod options;
 mod order;
 #[cfg(feature = "registry")]
@@ -235,6 +237,6 @@ pub use srgb::{
 #[cfg(feature = "registry")]
 pub use registry::{
     __oxideav_entry, PngDecoder, PngEncoder, decode_png_to_frame, encode_single,
-    encode_single_with_options, from_color_signal, make_decoder, make_encoder, register,
-    register_codecs, register_containers, to_color_signal, to_core_pixel_format,
+    encode_single_with_options, from_color_signal, make_decoder, make_encoder, metadata_blobs,
+    register, register_codecs, register_containers, to_color_signal, to_core_pixel_format,
 };

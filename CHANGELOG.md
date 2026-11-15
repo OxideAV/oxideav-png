@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Registry path: every ancillary chunk now crosses the framework. The
+  decoder attaches, and the demuxer puts on the stream, a format-native
+  blob record per chunk the well-known kinds and the colour signal do
+  not cover — `png-gama`, `png-chrm`, `png-srgb`, `png-mdcv`,
+  `png-clli`, `png-sbit`, `png-phys`, `png-time`, `png-bkgd`,
+  `png-hist`, `png-trns` (the keyed sample of a greyscale / truecolour
+  image), `png-splt`, `png-text`, `png-ztxt`, `png-itxt`, and
+  `png-chunk` / `png-chunk-after-idat` for unrecognised ancillary
+  chunks (type bytes + body) — each holding the chunk body as stored.
+  The encoder writes them back (a frame's records of a kind before the
+  stream's) and lists the kinds in
+  `CodecCapabilities::embedded_blob_kinds`. A record that does not fit
+  the output picture is dropped rather than failing the encode; the
+  frame's colour signal decides the colour chunk, with `png-srgb`
+  supplying the rendering intent; an unrecognised chunk is written only
+  when it is safe to copy (W3C PNG3 §14.2).
+- `metadata_blobs(&PngMetadata)` builds those records for a frame or
+  stream assembled by hand.
+- `From<PngImage> for VideoFrame` / `PngImage::from_video_frame` carry
+  `transparency` (the `tRNS` key) and `metadata.gamma` as `png-trns` /
+  `png-gama` records.
+
+### Fixed
+
+- A greyscale / truecolour file's `tRNS` key no longer disappears when
+  the file is decoded and re-encoded through the registry codec.
+
 ## [0.1.14](https://github.com/OxideAV/oxideav-png/compare/v0.1.13...v0.1.14) - 2026-11-07
 
 ### Other

@@ -1691,7 +1691,7 @@ pub struct Splt {
 /// / §11.3.4.4): 1-79 bytes, printable Latin-1 (`0x20..=0x7E` or
 /// `0xA1..=0xFF`), no leading / trailing / consecutive spaces. Returns
 /// the validated raw bytes on success.
-fn validate_keyword(name: &str, context: &str) -> Result<Vec<u8>> {
+pub(crate) fn validate_keyword(name: &str, context: &str) -> Result<Vec<u8>> {
     // The name is Latin-1 on the wire: every char must be a single byte
     // (`U+0000..=U+00FF`). Reject anything that wouldn't round-trip to a
     // single byte before we even check the printable ranges.

@@ -91,11 +91,49 @@ standalone functions (one implementation). `decode_png_to_frame` /
 Framework records map onto PNG chunks both ways: the `icc` / `exif` /
 `xmp` metadata blobs (a frame's record, else the stream's
 `CodecParameters::blobs`) are `iCCP` / `eXIf` / the
-`XML:com.adobe.xmp` `iTXt`, and a `Pal8` frame's palette-alpha record
-is `tRNS`. The encoder declares exactly those three kinds in
-`CodecCapabilities::embedded_blob_kinds`; other kinds are dropped. The
-decoder attaches the records to every frame and the demuxer to the
-stream.
+`XML:com.adobe.xmp` `iTXt`, a `Pal8` frame's palette-alpha record is
+`tRNS`, and the colour signal is `cICP` / `sRGB`. Every other
+ancillary chunk travels as a format-native blob named by the
+framework's `<producer>-<chunk>` rule, its payload the chunk body
+exactly as stored:
+
+| Blob kind | Chunk | Instances |
+|---|---|---|
+| `png-gama`, `png-chrm` | `gAMA`, `cHRM` | one each |
+| `png-srgb` | `sRGB` (the rendering intent) | one |
+| `png-mdcv`, `png-clli` | `mDCV`, `cLLI` | one each |
+| `png-sbit` | `sBIT` | one |
+| `png-phys` | `pHYs` | one |
+| `png-time` | `tIME` | one |
+| `png-bkgd`, `png-hist` | `bKGD`, `hIST` | one each |
+| `png-trns` | `tRNS` of a greyscale / truecolour image (the keyed sample) | one |
+| `png-splt` | `sPLT` | any, distinct names |
+| `png-text`, `png-ztxt`, `png-itxt` | `tEXt`, `zTXt` (still compressed), `iTXt` other than XMP | any |
+| `png-chunk`, `png-chunk-after-idat` | an unrecognised ancillary chunk before / after `IDAT`: its four type bytes, then its body | any |
+
+The decoder attaches the records to every frame and the demuxer to
+the stream; the encoder declares all of these kinds in
+`CodecCapabilities::embedded_blob_kinds` and writes each chunk back,
+a frame's records of a kind before the stream's. `metadata_blobs(&PngMetadata)`
+builds the records for a frame made by hand. On encode the frame is
+the authority:
+
+- a record whose payload does not fit the picture being written — an
+  `sBIT` of the wrong channel count after a pixel-format conversion, a
+  16-bit `bKGD` on an 8-bit image, a `hIST` that does not match the
+  palette, a `tRNS` key beside an alpha channel, a malformed body — is
+  dropped, never an encode error;
+- the colour signal decides the colour chunk (`sRGB` for exactly the
+  sRGB signal, else `cICP`); `png-srgb` supplies only that `sRGB`
+  chunk's rendering intent, and next to it `png-gama` / `png-chrm` are
+  written only when they hold the values W3C PNG3 §11.3.2.5 Table 17
+  allows there;
+- an unrecognised chunk is written only when its type's safe-to-copy
+  bit is set (W3C PNG3 §14.2: an unsafe-to-copy chunk depends on the
+  image data, which the encoder cannot know to be unchanged), on the
+  side of `IDAT` it came from.
+
+Other blob kinds are dropped.
 
 ## Supported layouts
 

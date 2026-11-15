@@ -517,9 +517,6 @@ struct ChunkSet<'a> {
 /// With no options metadata and nothing on the image the set is empty
 /// and no ancillary chunk is written.
 fn chunk_set<'a>(image: &ImageRef<'a>, opts: &'a EncodeOptions) -> Result<ChunkSet<'a>> {
-    use crate::image::{ColorInfo, ColorRange};
-    use crate::metadata::RenderingIntent;
-
     static NO_METADATA: std::sync::OnceLock<PngMetadata> = std::sync::OnceLock::new();
     let meta = match &opts.metadata {
         Some(m) => m,
@@ -562,40 +559,7 @@ fn chunk_set<'a>(image: &ImageRef<'a>, opts: &'a EncodeOptions) -> Result<ChunkS
     // `color` was derived from them) is not overridden by a chunk
     // synthesised from `color` (#28).
     if srgb.is_none() && cicp.is_none() && meta.chrm.is_none() && meta.iccp.is_none() {
-        let c = image.color;
-        if c == ColorInfo::srgb() {
-            if iccp.is_none() {
-                srgb = Some(Srgb::new(RenderingIntent::Perceptual));
-            }
-        } else if c.primaries != ColorInfo::UNSPECIFIED
-            || c.transfer != ColorInfo::UNSPECIFIED
-            || c.range == ColorRange::Limited
-        {
-            // A luma-only image (gray / gray+alpha) is matrix-invariant:
-            // with neutral chroma every H.273 matrix reconstructs
-            // R = G = B = Y, so a source matrix (e.g. a monochrome HEVC
-            // still tagged BT.601) carries no information PNG could
-            // lose and is written as the RGB identity matrix 0.
-            let luma_only = matches!(
-                image.format,
-                PngPixelFormat::Gray8
-                    | PngPixelFormat::Gray16Le
-                    | PngPixelFormat::Ya8
-                    | PngPixelFormat::Ya16Le
-            );
-            if !luma_only
-                && c.matrix != ColorInfo::MATRIX_IDENTITY
-                && c.matrix != ColorInfo::UNSPECIFIED
-            {
-                return Err(Error::unsupported(format!(
-                    "PNG encoder: color.matrix {} cannot be carried — PNG is RGB-only, \
-                     cICP matrix_coefficients shall be 0 (W3C PNG3 §11.3.2.6)",
-                    c.matrix
-                )));
-            }
-            let full = u8::from(c.range != ColorRange::Limited);
-            cicp = Some(Cicp::new(c.primaries, c.transfer, 0, full));
-        }
+        (srgb, cicp) = color_chunks(image, iccp.is_some())?;
     }
     let trns = meta.trns.as_ref().or(image.transparency);
 
@@ -609,6 +573,54 @@ fn chunk_set<'a>(image: &ImageRef<'a>, opts: &'a EncodeOptions) -> Result<ChunkS
         trns,
         xmp,
     })
+}
+
+/// The colour chunk `image.color` gives when nothing else describes
+/// the colour space: `sRGB` (perceptual intent) for exactly
+/// [`ColorInfo::srgb`](crate::ColorInfo::srgb) unless an ICC profile is
+/// written (`has_icc`), else `cICP` whenever a code point is specified
+/// or the range is limited, else neither. A colour layout whose matrix
+/// is neither identity nor unspecified is `Unsupported` (PNG is
+/// RGB-only, W3C PNG3 §11.3.2.6).
+pub(crate) fn color_chunks(
+    image: &ImageRef<'_>,
+    has_icc: bool,
+) -> Result<(Option<Srgb>, Option<Cicp>)> {
+    use crate::image::{ColorInfo, ColorRange};
+    use crate::metadata::RenderingIntent;
+
+    let c = image.color;
+    if c == ColorInfo::srgb() {
+        let srgb = (!has_icc).then(|| Srgb::new(RenderingIntent::Perceptual));
+        return Ok((srgb, None));
+    }
+    if c.primaries == ColorInfo::UNSPECIFIED
+        && c.transfer == ColorInfo::UNSPECIFIED
+        && c.range != ColorRange::Limited
+    {
+        return Ok((None, None));
+    }
+    // A luma-only image (gray / gray+alpha) is matrix-invariant: with
+    // neutral chroma every H.273 matrix reconstructs R = G = B = Y, so
+    // a source matrix (e.g. a monochrome HEVC still tagged BT.601)
+    // carries no information PNG could lose and is written as the RGB
+    // identity matrix 0.
+    let luma_only = matches!(
+        image.format,
+        PngPixelFormat::Gray8
+            | PngPixelFormat::Gray16Le
+            | PngPixelFormat::Ya8
+            | PngPixelFormat::Ya16Le
+    );
+    if !luma_only && c.matrix != ColorInfo::MATRIX_IDENTITY && c.matrix != ColorInfo::UNSPECIFIED {
+        return Err(Error::unsupported(format!(
+            "PNG encoder: color.matrix {} cannot be carried — PNG is RGB-only, \
+             cICP matrix_coefficients shall be 0 (W3C PNG3 §11.3.2.6)",
+            c.matrix
+        )));
+    }
+    let full = u8::from(c.range != ColorRange::Limited);
+    Ok((None, Some(Cicp::new(c.primaries, c.transfer, 0, full))))
 }
 
 /// Write one chunk whose data `payload` hands over in pieces, straight
@@ -1181,7 +1193,10 @@ fn resolve_bit_depth(base: u8, colour_type: u8, opts: &EncodeOptions) -> Result<
 /// is the *packed* on-wire row length (`(width * bit_depth + 7) / 8`)
 /// rather than the source `image.data` row stride. The packing itself
 /// happens in [`flatten_and_normalise_pixels`].
-fn ihdr_and_row_bytes(image: &ImageRef<'_>, opts: &EncodeOptions) -> Result<IhdrAndRowInfo> {
+pub(crate) fn ihdr_and_row_bytes(
+    image: &ImageRef<'_>,
+    opts: &EncodeOptions,
+) -> Result<IhdrAndRowInfo> {
     let (base_bit_depth, colour_type, channels): (u8, u8, usize) = match image.format {
         PngPixelFormat::Gray8 => (8, 0, 1),
         PngPixelFormat::Gray16Le => (16, 0, 1),
