@@ -745,33 +745,37 @@ fn with_num_plays(file: &[u8], plays: u32) -> Result<Vec<u8>> {
 /// W3C PNG3 §11.3.6.2, and a default image without an `fcTL` "is not
 /// part of the animation", §4.9.1).
 fn zero_image_idat(canvas: &Ihdr) -> Result<Vec<u8>> {
-    let channels: usize = match canvas.colour_type {
-        0 | 3 => 1,
-        2 => 3,
-        4 => 2,
-        _ => 4,
-    };
-    let bits = channels * canvas.bit_depth as usize;
-    let row = |w: usize| 1 + (w * bits).div_ceil(8);
-    let (w, h) = (canvas.width as usize, canvas.height as usize);
-    let len = if canvas.interlace == 1 {
-        (0..7)
-            .map(|p| {
-                let (pw, ph) = crate::decoder::adam7_pass_dims(w, h, p);
-                if pw == 0 || ph == 0 { 0 } else { ph * row(pw) }
-            })
-            .sum()
-    } else {
-        h * row(w)
-    };
-    // Every filter byte 0 (None) and every sample 0.
-    let raw = vec![0u8; len];
-    Ok(crate::zstream::compress_bytes_to_vec(
-        &raw,
-        raw.len().max(1),
-        9,
-        1,
-    )?)
+    use crate::zstream::{SegmentSource, compress_zlib};
+
+    /// `len` zero bytes (every filter byte 0 = None, every sample 0),
+    /// handed to the compressor a piece at a time: the canvas size is
+    /// the file's word, so the stream is never held uncompressed.
+    struct Zeros(u64);
+    impl SegmentSource for Zeros {
+        fn segment_count(&self) -> usize {
+            1
+        }
+        fn feed(
+            &self,
+            _index: usize,
+            sink: &mut dyn FnMut(&[u8]) -> crate::error::Result<()>,
+        ) -> crate::error::Result<()> {
+            static PIECE: [u8; 1 << 16] = [0u8; 1 << 16];
+            let mut left = self.0;
+            while left > 0 {
+                let n = left.min(PIECE.len() as u64) as usize;
+                sink(&PIECE[..n])?;
+                left -= n as u64;
+            }
+            Ok(())
+        }
+    }
+    // The filtered-stream size the header implies, both interlace
+    // layouts: the size the decoder bounds its inflate by.
+    let len = canvas.expected_filtered_len()?;
+    let mut out = Vec::new();
+    compress_zlib(&Zeros(len), 9, 1, &mut |b| out.extend_from_slice(b))?;
+    Ok(out)
 }
 
 /// Take N standalone-PNG packets produced by the demuxer's APNG split (or

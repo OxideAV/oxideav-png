@@ -145,3 +145,16 @@ name = "apng_region_encode"
 path = "fuzz_targets/apng_region_encode.rs"
 test = false
 doc = false
+
+# Framework-path target (r490). Reads the input as a chunk stream with
+# its framing repaired (lengths clamped, CRCs rewritten) and drives the
+# container and codec together: demux -> mux, and demux -> decode ->
+# encode -> mux with the demuxed text pairs. Asserts that a file the
+# encoder writes from a decoded frame's records (format-native blobs,
+# colour signal, palette) passes the strict metadata parser and decodes
+# to the frame's pixels, before and after the muxer adds text chunks.
+[[bin]]
+name = "container_transcode"
+path = "fuzz_targets/container_transcode.rs"
+test = false
+doc = false

@@ -703,6 +703,12 @@ pub fn make_decoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn De
         canvas_size,
         canvas: None,
         animation_side: None,
+        // The caller's resource caps (`CodecParameters::limits`), on
+        // top of the crate's own defaults: checked against a header
+        // before anything its size is allocated.
+        opts: DecodeOptions::default()
+            .with_max_pixels(params.limits.max_pixels_per_frame)
+            .with_max_bytes(params.limits.max_alloc_bytes_per_frame),
     }))
 }
 
@@ -731,6 +737,9 @@ pub struct PngDecoder {
     /// stamped on every later frame (the container puts the file's
     /// ancillary chunks in the first frame packet only).
     animation_side: Option<(ColorInfo, Metadata, Vec<MetadataBlob>)>,
+    /// Decode limits: the defaults tightened by the stream's
+    /// `CodecParameters::limits`.
+    opts: DecodeOptions,
 }
 
 impl PngDecoder {
@@ -744,7 +753,7 @@ impl PngDecoder {
             }
             _ => None,
         };
-        let image = crate::decoder::decode_png_chunks(&chunks, &DecodeOptions::default())?;
+        let image = crate::decoder::decode_png_chunks(&chunks, &self.opts)?;
         let ihdr = crate::decoder::Ihdr::parse(
             chunks
                 .iter()
@@ -766,6 +775,11 @@ impl PngDecoder {
                 height,
                 ..ihdr
             };
+            // The canvas size is the stream's word (the file's IHDR),
+            // not this packet's: hold it to the limits before the
+            // canvas is allocated.
+            self.opts
+                .check(width, height, canvas_ihdr.decoded_plane_bytes()?)?;
             let plte = chunks.iter().find(|c| c.is_type(b"PLTE")).map(|c| c.data);
             let trns = chunks.iter().find(|c| c.is_type(b"tRNS")).map(|c| c.data);
             self.canvas = Some(crate::decoder::ApngCanvas::new(&canvas_ihdr, plte, trns)?);

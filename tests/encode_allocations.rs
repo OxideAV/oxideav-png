@@ -446,3 +446,103 @@ mod registry {
         assert_eq!(img.as_bytes().unwrap(), &frame.planes[0].data[..]);
     }
 }
+
+/// The muxer's hidden default image (needed when an animation's first
+/// frame does not cover the canvas) is all zeros at the canvas size —
+/// a size the packets' header chooses. It is compressed as it is
+/// generated: a small frame on a large canvas must not make the muxer
+/// allocate the canvas.
+#[cfg(feature = "registry")]
+mod muxer_default_image {
+    use super::*;
+    use oxideav_core::{
+        CodecId, CodecParameters, Packet, PixelFormat, RuntimeContext, StreamInfo, TimeBase,
+    };
+    use oxideav_png::chunk::write_chunk;
+    use std::io::{Cursor, Seek, SeekFrom, Write};
+    use std::sync::{Arc, Mutex};
+
+    struct SharedWriter(Arc<Mutex<Cursor<Vec<u8>>>>);
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Seek for SharedWriter {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.0.lock().unwrap().seek(pos)
+        }
+    }
+
+    /// A 2×2 RGBA frame packet at offset (1, 1), as the demuxer makes
+    /// them: a still of the frame's own size carrying its `fcTL`.
+    fn frame_packet(seq: u32) -> Packet {
+        let image = oxideav_png::PngImage::from_rgba8(2, 2, vec![200u8; 16]).unwrap();
+        let still = oxideav_png::encode(&image, &oxideav_png::EncodeOptions::new()).unwrap();
+        let mut fctl = seq.to_be_bytes().to_vec();
+        for v in [2u32, 2, 1, 1] {
+            fctl.extend_from_slice(&v.to_be_bytes());
+        }
+        fctl.extend_from_slice(&[0, 1, 0, 10, 0, 0]);
+        let mut chunk = Vec::new();
+        write_chunk(&mut chunk, b"fcTL", &fctl);
+        let mut data = still;
+        data.splice(33..33, chunk);
+        let mut p = Packet::new(0, TimeBase::new(1, 100), data);
+        p.duration = Some(10);
+        p
+    }
+
+    #[test]
+    fn hidden_default_image_is_not_materialised() {
+        const CANVAS: u32 = 3000; // 3000 × 3000 RGBA: 36 MB of zeros
+        let mut ctx = RuntimeContext::new();
+        oxideav_png::register(&mut ctx);
+        let mut params = CodecParameters::video(CodecId::new("png"));
+        params.width = Some(CANVAS);
+        params.height = Some(CANVAS);
+        params.pixel_format = Some(PixelFormat::Rgba);
+        let stream = StreamInfo {
+            index: 0,
+            time_base: TimeBase::new(1, 100),
+            duration: None,
+            start_time: Some(0),
+            params,
+        };
+        let packets = [frame_packet(0), frame_packet(1)];
+        let shared = Arc::new(Mutex::new(Cursor::new(Vec::new())));
+        let ((), stats) = measure(|| {
+            let mut m = ctx
+                .containers
+                .open_muxer(
+                    "png",
+                    Box::new(SharedWriter(Arc::clone(&shared))),
+                    std::slice::from_ref(&stream),
+                )
+                .unwrap();
+            m.write_header().unwrap();
+            for p in &packets {
+                m.write_packet(p).unwrap();
+            }
+            m.write_trailer().unwrap();
+        });
+        report("mux 2x2 frames on a 3000x3000 canvas", &stats);
+        let raw = CANVAS as usize * (CANVAS as usize * 4 + 1);
+        assert!(
+            stats.peak < raw / 16,
+            "peak {} bytes for a {raw}-byte zero image",
+            stats.peak
+        );
+        // The file is a valid animation whose default image is the
+        // blank canvas.
+        let file = shared.lock().unwrap().get_ref().clone();
+        let info = oxideav_png::parse_apng(&file).unwrap();
+        assert_eq!(info.frames.len(), 2);
+        let default = oxideav_png::decode(&file).unwrap();
+        assert_eq!((default.width(), default.height()), (CANVAS, CANVAS));
+        assert!(default.as_bytes().unwrap().iter().all(|&b| b == 0));
+    }
+}
